@@ -2,12 +2,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
 use std::{
+    collections::HashMap,
     io::{Read, Write},
     sync::{Arc, Mutex},
     thread,
 };
 use tauri::{command, AppHandle, Emitter, State};
+use uuid::Uuid;
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -17,11 +20,23 @@ struct PtySession {
 
 #[derive(Clone)]
 struct AppState {
-    session: Arc<Mutex<Option<PtySession>>>,
+    sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+}
+
+#[derive(Clone, Serialize)]
+struct PtyOutputEvent {
+    id: String,
+    data: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PtyExitEvent {
+    id: String,
+    message: String,
 }
 
 #[command]
-fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16) -> Result<(), String> {
+fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16) -> Result<String, String> {
     let pty_system = native_pty_system();
     let pty_pair = pty_system
         .openpty(PtySize {
@@ -35,7 +50,7 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16) -
     let shell_path = if cfg!(target_os = "windows") {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
     } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
     };
 
     let command = CommandBuilder::new(shell_path);
@@ -56,48 +71,68 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16) -
         .try_clone_reader()
         .map_err(|error| error.to_string())?;
 
-    {
-        let mut guard = state.session.lock().map_err(|error| error.to_string())?;
-        if let Some(mut existing) = guard.take() {
-            let _ = existing.child.kill();
-        }
+    let id = Uuid::new_v4().to_string();
 
-        *guard = Some(PtySession {
-            master: pty_pair.master,
-            writer,
-            child,
-        });
+    {
+        let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
+        guard.insert(
+            id.clone(),
+            PtySession {
+                master: pty_pair.master,
+                writer,
+                child,
+            },
+        );
     }
 
     let app_handle = app.clone();
+    let pty_id = id.clone();
     thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    let _ = app_handle.emit("pty-exit", "PTY closed");
+                    let _ = app_handle.emit(
+                        "pty-exit",
+                        PtyExitEvent {
+                            id: pty_id.clone(),
+                            message: "PTY closed".to_string(),
+                        },
+                    );
                     break;
                 }
                 Ok(size) => {
                     let output = String::from_utf8_lossy(&buffer[..size]).to_string();
-                    let _ = app_handle.emit("pty-output", output);
+                    let _ = app_handle.emit(
+                        "pty-output",
+                        PtyOutputEvent {
+                            id: pty_id.clone(),
+                            data: output,
+                        },
+                    );
                 }
                 Err(_) => {
-                    let _ = app_handle.emit("pty-exit", "PTY read error");
+                    let _ = app_handle.emit(
+                        "pty-exit",
+                        PtyExitEvent {
+                            id: pty_id.clone(),
+                            message: "PTY read error".to_string(),
+                        },
+                    );
                     break;
                 }
             }
         }
     });
 
-    Ok(())
+    Ok(id)
 }
 
 #[command]
-fn write_pty_input(state: State<'_, AppState>, data: String) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|error| error.to_string())?;
-    let Some(session) = guard.as_mut() else {
-        return Err("PTY session not started".to_string());
+fn write_pty_input(state: State<'_, AppState>, id: String, data: String) -> Result<(), String> {
+    let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
+    let Some(session) = guard.get_mut(&id) else {
+        return Err("PTY session not found".to_string());
     };
 
     session
@@ -110,9 +145,9 @@ fn write_pty_input(state: State<'_, AppState>, data: String) -> Result<(), Strin
 }
 
 #[command]
-fn resize_pty(state: State<'_, AppState>, cols: u16, rows: u16) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|error| error.to_string())?;
-    let Some(session) = guard.as_mut() else {
+fn resize_pty(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
+    let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
+    let Some(session) = guard.get_mut(&id) else {
         return Ok(());
     };
 
@@ -130,9 +165,9 @@ fn resize_pty(state: State<'_, AppState>, cols: u16, rows: u16) -> Result<(), St
 }
 
 #[command]
-fn close_pty(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|error| error.to_string())?;
-    if let Some(mut session) = guard.take() {
+fn close_pty(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
+    if let Some(mut session) = guard.remove(&id) {
         let _ = session.child.kill();
     }
     Ok(())
@@ -140,7 +175,7 @@ fn close_pty(state: State<'_, AppState>) -> Result<(), String> {
 
 fn main() {
     let app_state = AppState {
-        session: Arc::new(Mutex::new(None)),
+        sessions: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tauri::Builder::default()

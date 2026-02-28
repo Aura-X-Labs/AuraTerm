@@ -61,29 +61,91 @@
   filter: brightness(0.92);
 }
 
-.toolbar {
-  height: 40px;
-  background: #333333;
+.tab-bar {
+  height: 36px;
+  background: #252525;
+  display: flex;
+  align-items: flex-end;
+  padding: 0 10px;
+  gap: 4px;
+  margin-top: 30px;
+  overflow-x: auto;
+}
+
+.tab-item {
+  height: 28px;
+  min-width: 120px;
+  max-width: 200px;
+  background: #333;
+  border-radius: 6px 6px 0 0;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 10px;
-  gap: 10px;
-  border-bottom: 1px solid #1e1e1e;
-  margin-top: 30px;
-}
-
-.toolbar button {
-  background: #444;
-  border: none;
-  color: white;
-  padding: 5px 10px;
-  border-radius: 4px;
   cursor: pointer;
-  -webkit-app-region: no-drag;
+  color: #aaa;
+  font-size: 12px;
+  flex: 1;
+  transition: background 0.2s, color 0.2s;
+  user-select: none;
 }
 
-.toolbar button:hover {
+.tab-item:hover {
+  background: #3c3c3c;
+}
+
+.tab-item.active {
+  background: #000000;
+  color: #fff;
+}
+
+.tab-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.tab-close-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
+.tab-item:hover .tab-close-btn,
+.tab-item.active .tab-close-btn {
+  opacity: 1;
+}
+
+.tab-close-btn:hover {
   background: #555;
+  color: #fff;
+}
+
+.tab-new-btn {
+  height: 26px;
+  width: 26px;
+  background: transparent;
+  border: none;
+  color: #aaa;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  margin-bottom: 2px;
+}
+
+.tab-new-btn:hover {
+  background: #444;
+  color: #fff;
 }
 
 .terminal-container {
@@ -91,4 +153,5 @@
   background: #000000;
   padding: 5px;
   overflow: hidden;
+  position: relative;
 }

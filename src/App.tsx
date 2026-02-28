@@ -1,15 +1,18 @@
-import { useEffect, useRef, type MouseEvent } from "react";
-import { Terminal } from "xterm";
-import { FitAddon } from "xterm-addon-fit";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useState, type MouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import "xterm/css/xterm.css";
+import { TerminalComponent } from "./TerminalComponent";
+import "./App.css";
+
+interface Tab {
+  id: string;
+  title: string;
+}
+
+let nextTabId = 1;
 
 function App() {
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const term = useRef<Terminal | null>(null);
-  const fitAddon = useRef<FitAddon | null>(null);
+  const [tabs, setTabs] = useState<Tab[]>([{ id: `tab-0`, title: "Local Shell" }]);
+  const [activeTabId, setActiveTabId] = useState<string>("tab-0");
 
   const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -53,91 +56,28 @@ function App() {
     event.stopPropagation();
   };
 
-  useEffect(() => {
-    if (!terminalRef.current) return;
+  const handleNewTab = () => {
+    const newId = `tab-${nextTabId++}`;
+    setTabs(prev => [...prev, { id: newId, title: "Local Shell" }]);
+    setActiveTabId(newId);
+  };
 
-    // Initialize xterm.js
-    term.current = new Terminal({
-      cursorBlink: true,
-      fontFamily: 'Consolas, "Courier New", monospace',
-      fontSize: 14,
-      theme: {
-        background: '#000000',
-        foreground: '#ffffff',
+  const handleCloseTab = (id: string, event: MouseEvent) => {
+    event.stopPropagation();
+    setTabs(prev => {
+      const newTabs = prev.filter(t => t.id !== id);
+      if (activeTabId === id) {
+        // Pick the previous tab or the next one
+        const index = prev.findIndex(t => t.id === id);
+        if (newTabs.length > 0) {
+          setActiveTabId(newTabs[Math.max(0, index - 1)].id);
+        } else {
+          setActiveTabId("");
+        }
       }
+      return newTabs;
     });
-
-    fitAddon.current = new FitAddon();
-    term.current.loadAddon(fitAddon.current);
-
-    term.current.open(terminalRef.current);
-    fitAddon.current.fit();
-
-    term.current.writeln('Starting local shell PTY...');
-
-    let disposed = false;
-    let unlistenOutput: UnlistenFn | null = null;
-    let unlistenExit: UnlistenFn | null = null;
-
-    const inputDisposable = term.current.onData((data) => {
-      void invoke("write_pty_input", { data }).catch((error) => {
-        console.error("write_pty_input failed", error);
-      });
-    });
-
-    const resizeDisposable = term.current.onResize(({ cols, rows }) => {
-      void invoke("resize_pty", { cols, rows }).catch((error) => {
-        console.error("resize_pty failed", error);
-      });
-    });
-
-    const bindPty = async () => {
-      unlistenOutput = await listen<string>("pty-output", (event) => {
-        term.current?.write(event.payload);
-      });
-
-      unlistenExit = await listen<string>("pty-exit", (event) => {
-        term.current?.writeln(`\r\n[PTY exited] ${event.payload}`);
-      });
-
-      if (disposed) {
-        unlistenOutput();
-        unlistenExit();
-        return;
-      }
-
-      const cols = term.current?.cols ?? 80;
-      const rows = term.current?.rows ?? 24;
-      await invoke("start_pty", { cols, rows });
-    };
-
-    void bindPty().catch((error) => {
-      term.current?.writeln(`\r\n[Failed to start PTY] ${String(error)}`);
-      console.error("start_pty failed", error);
-    });
-
-    const handleResize = () => {
-      fitAddon.current?.fit();
-      const cols = term.current?.cols ?? 80;
-      const rows = term.current?.rows ?? 24;
-      void invoke("resize_pty", { cols, rows }).catch((error) => {
-        console.error("resize_pty on window resize failed", error);
-      });
-    };
-
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      disposed = true;
-      window.removeEventListener('resize', handleResize);
-      inputDisposable.dispose();
-      resizeDisposable.dispose();
-      if (unlistenOutput) unlistenOutput();
-      if (unlistenExit) unlistenExit();
-      void invoke("close_pty").catch(() => {});
-      term.current?.dispose();
-    };
-  }, []);
+  };
 
   return (
     <div className="app-container">
@@ -167,11 +107,40 @@ function App() {
         </div>
         <div className="titlebar-title">AuraTerm</div>
       </div>
-      <div className="toolbar">
-        <button>New Connection</button>
-        <button>Settings</button>
+      
+      <div className="tab-bar">
+        {tabs.map((tab) => (
+          <div 
+            key={tab.id} 
+            className={`tab-item ${activeTabId === tab.id ? 'active' : ''}`}
+            onClick={() => setActiveTabId(tab.id)}
+          >
+            <span className="tab-title">{tab.title}</span>
+            <button 
+              className="tab-close-btn" 
+              onClick={(e) => handleCloseTab(tab.id, e)}
+              title="Close Tab"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <button className="tab-new-btn" onClick={handleNewTab} title="New Tab">
+          +
+        </button>
       </div>
-      <div className="terminal-container" ref={terminalRef}></div>
+
+      <div className="terminal-container">
+        {tabs.length === 0 ? (
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', color: '#666' }}>
+            No open tabs. Click + to open a new tab.
+          </div>
+        ) : (
+          tabs.map((tab) => (
+            <TerminalComponent key={tab.id} isActive={activeTabId === tab.id} />
+          ))
+        )}
+      </div>
     </div>
   );
 }
