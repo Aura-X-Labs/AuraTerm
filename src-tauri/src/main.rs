@@ -186,6 +186,7 @@ fn main() {
             resize_pty,
             close_pty
         ])
+        .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

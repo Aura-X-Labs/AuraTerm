@@ -1,5 +1,6 @@
-import { useState, type MouseEvent } from "react";
+import { useState, useEffect, type MouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { type } from "@tauri-apps/plugin-os";
 import { TerminalComponent } from "./TerminalComponent";
 import "./App.css";
 
@@ -13,6 +14,19 @@ let nextTabId = 1;
 function App() {
   const [tabs, setTabs] = useState<Tab[]>([{ id: `tab-0`, title: "Local Shell" }]);
   const [activeTabId, setActiveTabId] = useState<string>("tab-0");
+  const [osType, setOsType] = useState<string>("windows");
+
+  useEffect(() => {
+    async function determineOs() {
+      try {
+        const os = await type();
+        setOsType(os);
+      } catch (err) {
+        console.error("Failed to detect OS:", err);
+      }
+    }
+    determineOs();
+  }, []);
 
   const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -80,32 +94,65 @@ function App() {
   };
 
   return (
-    <div className="app-container">
+    <div className={`app-container ${osType}`}>
       <div className="titlebar" onMouseDown={handleTitlebarMouseDown}>
-        <div className="titlebar-controls" aria-label="Window controls">
-          <button
-            className="titlebar-control-btn titlebar-control-close"
-            onMouseDown={stopDragPropagation}
-            onClick={handleClose}
-            aria-label="Close"
-            type="button"
-          />
-          <button
-            className="titlebar-control-btn titlebar-control-minimize"
-            onMouseDown={stopDragPropagation}
-            onClick={handleMinimize}
-            aria-label="Minimize"
-            type="button"
-          />
-          <button
-            className="titlebar-control-btn titlebar-control-maximize"
-            onMouseDown={stopDragPropagation}
-            onClick={handleToggleMaximize}
-            aria-label="Maximize"
-            type="button"
-          />
-        </div>
+        {osType !== "windows" && (
+          <div className="titlebar-controls" aria-label="Window controls">
+            <button
+              className="titlebar-control-btn titlebar-control-close"
+              onMouseDown={stopDragPropagation}
+              onClick={handleClose}
+              aria-label="Close"
+              type="button"
+            />
+            <button
+              className="titlebar-control-btn titlebar-control-minimize"
+              onMouseDown={stopDragPropagation}
+              onClick={handleMinimize}
+              aria-label="Minimize"
+              type="button"
+            />
+            <button
+              className="titlebar-control-btn titlebar-control-maximize"
+              onMouseDown={stopDragPropagation}
+              onClick={handleToggleMaximize}
+              aria-label="Maximize"
+              type="button"
+            />
+          </div>
+        )}
         <div className="titlebar-title">AuraTerm</div>
+        {osType === "windows" && (
+          <div className="titlebar-controls-win" aria-label="Window controls">
+            <button
+              className="titlebar-control-win-btn"
+              onMouseDown={stopDragPropagation}
+              onClick={handleMinimize}
+              aria-label="Minimize"
+              type="button"
+            >
+              &#xE921;
+            </button>
+            <button
+              className="titlebar-control-win-btn"
+              onMouseDown={stopDragPropagation}
+              onClick={handleToggleMaximize}
+              aria-label="Maximize"
+              type="button"
+            >
+              &#xE922;
+            </button>
+            <button
+              className="titlebar-control-win-btn close"
+              onMouseDown={stopDragPropagation}
+              onClick={handleClose}
+              aria-label="Close"
+              type="button"
+            >
+              &#xE8BB;
+            </button>
+          </div>
+        )}
       </div>
       
       <div className="tab-bar">

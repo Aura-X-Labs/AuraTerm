@@ -61,6 +61,46 @@
   filter: brightness(0.92);
 }
 
+.titlebar-controls-win {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-control-win-btn {
+  height: 100%;
+  width: 46px;
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 10px;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.titlebar-control-win-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.titlebar-control-win-btn.close:hover {
+  background: #e81123;
+  color: white;
+}
+
+.app-container.windows .titlebar {
+  justify-content: flex-start;
+}
+
+.app-container.windows .titlebar-title {
+  padding-left: 10px;
+}
+
 .tab-bar {
   height: 36px;
   background: #252525;
