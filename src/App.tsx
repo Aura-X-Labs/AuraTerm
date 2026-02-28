@@ -11,9 +11,44 @@ function App() {
 
   const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest(".titlebar-controls")) return;
     getCurrentWindow().startDragging().catch((error) => {
       console.error("startDragging failed", error);
     });
+  };
+
+  const handleMinimize = async () => {
+    await getCurrentWindow().minimize().catch((error) => {
+      console.error("minimize failed", error);
+    });
+  };
+
+  const handleToggleMaximize = async () => {
+    const window = getCurrentWindow();
+    const isMaximized = await window.isMaximized().catch((error) => {
+      console.error("isMaximized failed", error);
+      return false;
+    });
+    if (isMaximized) {
+      await window.unmaximize().catch((error) => {
+        console.error("unmaximize failed", error);
+      });
+      return;
+    }
+    await window.maximize().catch((error) => {
+      console.error("maximize failed", error);
+    });
+  };
+
+  const handleClose = async () => {
+    await getCurrentWindow().close().catch((error) => {
+      console.error("close failed", error);
+    });
+  };
+
+  const stopDragPropagation = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   useEffect(() => {
@@ -68,6 +103,29 @@ function App() {
   return (
     <div className="app-container">
       <div className="titlebar" onMouseDown={handleTitlebarMouseDown}>
+        <div className="titlebar-controls" aria-label="Window controls">
+          <button
+            className="titlebar-control-btn titlebar-control-close"
+            onMouseDown={stopDragPropagation}
+            onClick={handleClose}
+            aria-label="Close"
+            type="button"
+          />
+          <button
+            className="titlebar-control-btn titlebar-control-minimize"
+            onMouseDown={stopDragPropagation}
+            onClick={handleMinimize}
+            aria-label="Minimize"
+            type="button"
+          />
+          <button
+            className="titlebar-control-btn titlebar-control-maximize"
+            onMouseDown={stopDragPropagation}
+            onClick={handleToggleMaximize}
+            aria-label="Maximize"
+            type="button"
+          />
+        </div>
         <div className="titlebar-title">AuraTerm</div>
       </div>
       <div className="toolbar">

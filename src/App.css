@@ -10,6 +10,7 @@
   background: #2d2d2d;
   display: flex;
   align-items: center;
+  justify-content: center;
   padding: 0 10px;
   user-select: none;
   -webkit-user-select: none;
@@ -24,6 +25,40 @@
 .titlebar-title {
   font-size: 12px;
   font-weight: bold;
+}
+
+.titlebar-controls {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 6px;
+}
+
+.titlebar-control-btn {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+}
+
+.titlebar-control-close {
+  background: #ff5f57;
+}
+
+.titlebar-control-minimize {
+  background: #ffbd2e;
+}
+
+.titlebar-control-maximize {
+  background: #28c840;
+}
+
+.titlebar-control-btn:hover {
+  filter: brightness(0.92);
 }
 
 .toolbar {
