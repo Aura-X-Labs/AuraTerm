@@ -2,5 +2,11 @@
 
 all: build-app
 
+ifeq ($(OS),Windows_NT)
+BUNDLE = nsis
+else
+BUNDLE = app
+endif
+
 build-app:
-	npm run tauri -- build --bundles app
+	npm run tauri -- build --bundles $(BUNDLE)
