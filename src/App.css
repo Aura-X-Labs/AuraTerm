@@ -13,8 +13,7 @@
   padding: 0 10px;
   user-select: none;
   -webkit-user-select: none;
-  /* Tauri drag region */
-  -webkit-app-region: drag;
+  cursor: move;
   position: fixed;
   top: 0;
   left: 0;
@@ -25,7 +24,6 @@
 .titlebar-title {
   font-size: 12px;
   font-weight: bold;
-  -webkit-app-region: no-drag;
 }
 
 .toolbar {

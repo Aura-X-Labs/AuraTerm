@@ -1,12 +1,20 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type MouseEvent } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "xterm/css/xterm.css";
 
 function App() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
+
+  const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    getCurrentWindow().startDragging().catch((error) => {
+      console.error("startDragging failed", error);
+    });
+  };
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -59,7 +67,7 @@ function App() {
 
   return (
     <div className="app-container">
-      <div className="titlebar" data-tauri-drag-region>
+      <div className="titlebar" onMouseDown={handleTitlebarMouseDown}>
         <div className="titlebar-title">AuraTerm</div>
       </div>
       <div className="toolbar">
