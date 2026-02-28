@@ -1,6 +1,8 @@
 import { useEffect, useRef, type MouseEvent } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "xterm/css/xterm.css";
 
@@ -71,31 +73,68 @@ function App() {
     term.current.open(terminalRef.current);
     fitAddon.current.fit();
 
-    term.current.writeln('Welcome to AuraTerm!');
-    term.current.writeln('This is a basic local terminal skeleton.');
-    term.current.writeln('');
-    term.current.write('$ ');
+    term.current.writeln('Starting local shell PTY...');
 
-    // Basic echo for testing
-    term.current.onData((data) => {
-      const code = data.charCodeAt(0);
-      if (code === 13) { // Enter
-        term.current?.write('\r\n$ ');
-      } else if (code === 127) { // Backspace
-        term.current?.write('\b \b');
-      } else {
-        term.current?.write(data);
+    let disposed = false;
+    let unlistenOutput: UnlistenFn | null = null;
+    let unlistenExit: UnlistenFn | null = null;
+
+    const inputDisposable = term.current.onData((data) => {
+      void invoke("write_pty_input", { data }).catch((error) => {
+        console.error("write_pty_input failed", error);
+      });
+    });
+
+    const resizeDisposable = term.current.onResize(({ cols, rows }) => {
+      void invoke("resize_pty", { cols, rows }).catch((error) => {
+        console.error("resize_pty failed", error);
+      });
+    });
+
+    const bindPty = async () => {
+      unlistenOutput = await listen<string>("pty-output", (event) => {
+        term.current?.write(event.payload);
+      });
+
+      unlistenExit = await listen<string>("pty-exit", (event) => {
+        term.current?.writeln(`\r\n[PTY exited] ${event.payload}`);
+      });
+
+      if (disposed) {
+        unlistenOutput();
+        unlistenExit();
+        return;
       }
+
+      const cols = term.current?.cols ?? 80;
+      const rows = term.current?.rows ?? 24;
+      await invoke("start_pty", { cols, rows });
+    };
+
+    void bindPty().catch((error) => {
+      term.current?.writeln(`\r\n[Failed to start PTY] ${String(error)}`);
+      console.error("start_pty failed", error);
     });
 
     const handleResize = () => {
       fitAddon.current?.fit();
+      const cols = term.current?.cols ?? 80;
+      const rows = term.current?.rows ?? 24;
+      void invoke("resize_pty", { cols, rows }).catch((error) => {
+        console.error("resize_pty on window resize failed", error);
+      });
     };
 
     window.addEventListener('resize', handleResize);
 
     return () => {
+      disposed = true;
       window.removeEventListener('resize', handleResize);
+      inputDisposable.dispose();
+      resizeDisposable.dispose();
+      if (unlistenOutput) unlistenOutput();
+      if (unlistenExit) unlistenExit();
+      void invoke("close_pty").catch(() => {});
       term.current?.dispose();
     };
   }, []);
