@@ -55,9 +55,9 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
 ### Phase 1: 基础设施与基础终端 (第 1-2 个月)
 * **目标**: 搭建 Tauri 框架，实现基础的本地终端和 UI 骨架。
 * **任务**:
-  * 初始化 Tauri + React/Vue 项目。
-  * 集成 Xterm.js 并实现基础的 PTY 绑定（本地 Shell 测试）。
-  * 设计并实现多标签页 (Tab) UI 框架。
+  * 初始化 Tauri + React/Vue 项目。--Done
+  * 集成 Xterm.js 并实现基础的 PTY 绑定（本地 Shell 测试）。--Done
+  * 设计并实现多标签页 (Tab) UI 框架。--Done
   * 实现基础的设置持久化（JSON）。
 
 ### Phase 2: 核心通信协议接入 (第 3-4 个月)

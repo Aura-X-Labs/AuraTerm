@@ -12,6 +12,8 @@ use std::{
 use tauri::{command, AppHandle, Emitter, State};
 use uuid::Uuid;
 
+mod ssh;
+
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -21,6 +23,7 @@ struct PtySession {
 #[derive(Clone)]
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    ssh_state: ssh::SshState,
 }
 
 #[derive(Clone, Serialize)]
@@ -36,7 +39,7 @@ struct PtyExitEvent {
 }
 
 #[command]
-fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16) -> Result<String, String> {
+fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, id: String) -> Result<String, String> {
     let pty_system = native_pty_system();
     let pty_pair = pty_system
         .openpty(PtySize {
@@ -70,8 +73,6 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16) -
         .master
         .try_clone_reader()
         .map_err(|error| error.to_string())?;
-
-    let id = Uuid::new_v4().to_string();
 
     {
         let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
@@ -176,6 +177,7 @@ fn close_pty(state: State<'_, AppState>, id: String) -> Result<(), String> {
 fn main() {
     let app_state = AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        ssh_state: ssh::SshState::default(),
     };
 
     tauri::Builder::default()
@@ -184,7 +186,11 @@ fn main() {
             start_pty,
             write_pty_input,
             resize_pty,
-            close_pty
+            close_pty,
+            ssh::start_ssh_pty,
+            ssh::write_ssh_pty_input,
+            ssh::resize_ssh_pty,
+            ssh::close_ssh_pty,
         ])
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())

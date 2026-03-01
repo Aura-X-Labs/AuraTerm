@@ -16,3 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1.21.0", features = ["v4"] }
 tauri-plugin-os = "2.3.2"
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "sync"] }
+async-trait = "0.1.89"
+anyhow = "1.0.102"
+ssh2 = "0.9.5"

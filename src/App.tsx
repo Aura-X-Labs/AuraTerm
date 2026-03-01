@@ -2,11 +2,13 @@ import { useState, useEffect, type MouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type } from "@tauri-apps/plugin-os";
 import { TerminalComponent } from "./TerminalComponent";
+import { ConnectDialog, type SshConfig } from "./ConnectDialog";
 import "./App.css";
 
 interface Tab {
   id: string;
   title: string;
+  sshConfig?: SshConfig;
 }
 
 let nextTabId = 1;
@@ -15,6 +17,7 @@ function App() {
   const [tabs, setTabs] = useState<Tab[]>([{ id: `tab-0`, title: "Local Shell" }]);
   const [activeTabId, setActiveTabId] = useState<string>("tab-0");
   const [osType, setOsType] = useState<string>("windows");
+  const [showConnectDialog, setShowConnectDialog] = useState(false);
 
   useEffect(() => {
     async function determineOs() {
@@ -172,8 +175,11 @@ function App() {
             </button>
           </div>
         ))}
-        <button className="tab-new-btn" onClick={handleNewTab} title="New Tab">
+        <button className="tab-new-btn" onClick={handleNewTab} title="New Local Shell">
           +
+        </button>
+        <button className="tab-new-btn" onClick={() => setShowConnectDialog(true)} title="New SSH Connection" style={{ marginLeft: '4px' }}>
+          &#x1F5A7;
         </button>
       </div>
 
@@ -184,10 +190,29 @@ function App() {
           </div>
         ) : (
           tabs.map((tab) => (
-            <TerminalComponent key={tab.id} isActive={activeTabId === tab.id} />
+            <TerminalComponent 
+              key={tab.id} 
+              isActive={activeTabId === tab.id} 
+              sshConfig={tab.sshConfig} 
+            />
           ))
         )}
       </div>
+
+      {showConnectDialog && (
+        <ConnectDialog
+          onConnect={(config) => {
+            const newId = `tab-${nextTabId++}`;
+            setTabs((prev) => [
+              ...prev,
+              { id: newId, title: `${config.user}@${config.host}`, sshConfig: config },
+            ]);
+            setActiveTabId(newId);
+            setShowConnectDialog(false);
+          }}
+          onCancel={() => setShowConnectDialog(false)}
+        />
+      )}
     </div>
   );
 }
