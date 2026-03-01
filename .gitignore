@@ -29,3 +29,5 @@ src-tauri/gen
 
 .DS_Store
 *.log
+
+git.diff

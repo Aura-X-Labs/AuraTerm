@@ -105,7 +105,9 @@ pub fn start_ssh_pty(
                 if let Ok(mut c) = channel_clone.lock() {
                     match c.read(&mut buffer) {
                         Ok(0) => {
-                            if c.eof() {
+                            let eof = c.eof();
+                            println!("SSH PTY read returned 0, eof={}", eof);
+                            if eof {
                                 should_exit = true;
                             }
                         }
@@ -114,10 +116,12 @@ pub fn start_ssh_pty(
                         }
                         Err(e) => {
                             let e_str = e.to_string();
+                            println!("SSH PTY READ ERR: kind={:?} msg={}", e.kind(), e_str);
                             if e.kind() == std::io::ErrorKind::WouldBlock || e_str.to_lowercase().contains("would block") || e_str.to_uppercase().contains("EAGAIN") {
+                                println!("SSH PTY read would block, continuing");
                                 // Do nothing, yield
                             } else {
-                                println!("SSH PTY ERROR: {}", e_str);
+                                println!("SSH PTY ERROR (fatal): {}", e_str);
                                 err_msg = Some(e_str);
                                 should_exit = true;
                             }
@@ -177,13 +181,16 @@ pub fn write_ssh_pty_input(
         match channel.write(&bytes[written..]) {
             Ok(n) => {
                 if n == 0 {
+                    println!("SSH PTY write returned 0 bytes");
                     return Err("Failed to write to SSH channel: 0 bytes written".to_string());
                 }
                 written += n;
             }
             Err(e) => {
                 let e_str = e.to_string();
+                println!("SSH PTY WRITE ERR: kind={:?} msg={}", e.kind(), e_str);
                 if e.kind() == std::io::ErrorKind::WouldBlock || e_str.to_lowercase().contains("would block") || e_str.to_uppercase().contains("EAGAIN") {
+                    // Back off briefly and retry
                     std::thread::yield_now();
                     std::thread::sleep(std::time::Duration::from_millis(1));
                     continue;
