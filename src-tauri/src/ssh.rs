@@ -50,9 +50,15 @@ pub fn start_ssh_pty(
     id: String,
 ) -> Result<String, String> {
     let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
+    // Enable TCP keepalive to prevent random "transport read" disconnects on idle
+    let _ = tcp.set_nodelay(true);
+
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
+
+    // Enable SSH protocol keepalive
+    sess.set_keepalive(true, 15);
 
     if let Some(pk) = private_key {
         // Need to parse or use a file path? The simple way is via file, but since we get file contents...
@@ -167,17 +173,19 @@ pub fn write_ssh_pty_input(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let mut guard = state.ssh_state.sessions.lock().map_err(|error| error.to_string())?;
-    let Some(session) = guard.get_mut(&id) else {
-        return Err("SSH session not found".to_string());
+    let channel_arc = {
+        let mut guard = state.ssh_state.sessions.lock().map_err(|error| error.to_string())?;
+        let Some(session) = guard.get_mut(&id) else {
+            return Err("SSH session not found".to_string());
+        };
+        session.channel.clone()
     };
-
-    let mut channel = session.channel.lock().map_err(|error| error.to_string())?;
 
     // Write data iteratively in non-blocking mode
     let bytes = data.as_bytes();
     let mut written = 0;
     while written < bytes.len() {
+        let mut channel = channel_arc.lock().map_err(|error| error.to_string())?;
         match channel.write(&bytes[written..]) {
             Ok(n) => {
                 if n == 0 {
@@ -188,18 +196,20 @@ pub fn write_ssh_pty_input(
             }
             Err(e) => {
                 let e_str = e.to_string();
-                println!("SSH PTY WRITE ERR: kind={:?} msg={}", e.kind(), e_str);
                 if e.kind() == std::io::ErrorKind::WouldBlock || e_str.to_lowercase().contains("would block") || e_str.to_uppercase().contains("EAGAIN") {
-                    // Back off briefly and retry
+                    drop(channel); // Release lock before sleeping
                     std::thread::yield_now();
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                     continue;
                 }
+                println!("SSH PTY WRITE ERR: kind={:?} msg={}", e.kind(), e_str);
                 return Err(e_str);
             }
         }
     }
-    channel.flush().ok();
+    if let Ok(mut channel) = channel_arc.lock() {
+        let _ = channel.flush();
+    }
     Ok(())
 }
 
@@ -210,21 +220,24 @@ pub fn resize_ssh_pty(
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
-    let mut guard = state.ssh_state.sessions.lock().map_err(|error| error.to_string())?;
-    let Some(session) = guard.get_mut(&id) else {
-        return Ok(());
+    let channel_arc = {
+        let mut guard = state.ssh_state.sessions.lock().map_err(|error| error.to_string())?;
+        let Some(session) = guard.get_mut(&id) else {
+            return Ok(());
+        };
+        session.channel.clone()
     };
 
-    let mut channel = session.channel.lock().map_err(|error| error.to_string())?;
-
     loop {
+        let mut channel = channel_arc.lock().map_err(|error| error.to_string())?;
         match channel.request_pty_size(cols, rows, None, None) {
             Ok(_) => return Ok(()),
             Err(e) => {
                 let e_str = e.to_string();
                 if e_str.to_lowercase().contains("would block") || e_str.to_uppercase().contains("EAGAIN") {
+                    drop(channel);
                     std::thread::yield_now();
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                     continue;
                 }
                 return Err(e_str);
