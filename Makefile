@@ -10,3 +10,7 @@ endif
 
 build-app:
 	npm run tauri -- build --bundles $(BUNDLE)
+
+clean:
+	npm run tauri -- clean
+	rm -rf src-tauri/target
