@@ -349,3 +349,114 @@
 .settings-btn-save:hover {
   background: #106ebe;
 }
+
+
+/* ── Password retry overlay（在终端内部居中显示）─────────── */
+.password-retry-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(2px);
+}
+
+.password-retry-dialog {
+  background: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 10px;
+  padding: 28px 32px;
+  width: 340px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  color: #fff;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.password-retry-icon {
+  font-size: 32px;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.password-retry-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.password-retry-desc {
+  margin: 0;
+  font-size: 13px;
+  color: #aaa;
+  line-height: 1.5;
+}
+
+.password-retry-desc strong {
+  color: #ccc;
+}
+
+.password-retry-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.password-retry-input {
+  width: 100%;
+  background: #1e1e1e;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #fff;
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.password-retry-input:focus {
+  border-color: #0078d4;
+  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.25);
+}
+
+.password-retry-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.password-retry-btn {
+  padding: 7px 18px;
+  border-radius: 5px;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.password-retry-btn.cancel {
+  background: #444;
+  color: #ccc;
+}
+
+.password-retry-btn.cancel:hover {
+  background: #555;
+  color: #fff;
+}
+
+.password-retry-btn.retry {
+  background: #0078d4;
+  color: #fff;
+}
+
+.password-retry-btn.retry:hover {
+  background: #106ebe;
+}
