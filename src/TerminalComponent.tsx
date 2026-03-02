@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { invoke } from "@tauri-apps/api/core";
@@ -24,18 +24,50 @@ interface TerminalComponentProps {
   settings?: AppSettings;
 }
 
+function isAuthError(errStr: string): boolean {
+  const lower = errStr.toLowerCase();
+  return (
+    lower.includes("authentication failed") ||
+    lower.includes("auth failed") ||
+    lower.includes("incorrect password") ||
+    lower.includes("permission denied")
+  );
+}
+
 export function TerminalComponent({ isActive, sshConfig, settings }: TerminalComponentProps) {
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
+
   const terminalRef = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
 
+  // 内部活跃的 SSH 配置（密码重试时会更新）
+  const [activeSshConfig, setActiveSshConfig] = useState<SshConfig | undefined>(sshConfig);
+  // 供 Effect 1 的 event handler 读取最新 SSH 配置（避免闭包捕获旧值）
+  const activeSshConfigRef = useRef<SshConfig | undefined>(sshConfig);
+
+  // 密码重试 overlay
+  const [showRetryOverlay, setShowRetryOverlay] = useState(false);
+  const [retryPassword, setRetryPassword] = useState("");
+
+  // 当 prop sshConfig 变化时（新连接），重置内部状态
+  useEffect(() => {
+    setActiveSshConfig(sshConfig);
+    setShowRetryOverlay(false);
+    setRetryPassword("");
+  }, [sshConfig]);
+
+  // 同步 activeSshConfig 到 ref，供 Effect 1 的 handlers 使用
+  useEffect(() => {
+    activeSshConfigRef.current = activeSshConfig;
+  }, [activeSshConfig]);
+
+  // ─── Effect 1：初始化 xterm（只在 mount/unmount 时执行一次）────────────────
   useEffect(() => {
     if (!terminalRef.current) return;
 
-    // Initialize xterm.js
-    term.current = new Terminal({
+    const terminal = new Terminal({
       cursorBlink: true,
       fontFamily: effectiveSettings.fontFamily,
       fontSize: effectiveSettings.fontSize,
@@ -47,51 +79,99 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
       },
     });
 
-    fitAddon.current = new FitAddon();
-    term.current.loadAddon(fitAddon.current);
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(terminalRef.current);
+    fit.fit();
 
-    term.current.open(terminalRef.current);
-    fitAddon.current.fit();
+    term.current = terminal;
+    fitAddon.current = fit;
 
+    // 输入 handler：通过 ref 读取当前的 activeSshConfig
+    const inputDisposable = terminal.onData((data) => {
+      if (!ptyIdRef.current) return;
+      if (activeSshConfigRef.current) {
+        void invoke("write_ssh_pty_input", { id: ptyIdRef.current, data }).catch((e) => {
+          console.error("write_ssh_pty_input failed", e);
+        });
+      } else {
+        void invoke("write_pty_input", { id: ptyIdRef.current, data }).catch((e) => {
+          console.error("write_pty_input failed", e);
+        });
+      }
+    });
+
+    // resize handler
+    const resizeDisposable = terminal.onResize(({ cols, rows }) => {
+      if (!ptyIdRef.current) return;
+      if (activeSshConfigRef.current) {
+        void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
+          console.error("resize_ssh_pty failed", e);
+        });
+      } else {
+        void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
+          console.error("resize_pty failed", e);
+        });
+      }
+    });
+
+    const handleWindowResize = () => {
+      fit.fit();
+      if (!ptyIdRef.current) return;
+      const cols = terminal.cols ?? 80;
+      const rows = terminal.rows ?? 24;
+      if (activeSshConfigRef.current) {
+        void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
+          console.error("resize_ssh_pty on window resize failed", e);
+        });
+      } else {
+        void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
+          console.error("resize_pty on window resize failed", e);
+        });
+      }
+    };
+    window.addEventListener("resize", handleWindowResize);
+
+    return () => {
+      window.removeEventListener("resize", handleWindowResize);
+      inputDisposable.dispose();
+      resizeDisposable.dispose();
+      // 关闭 PTY（如果 Effect 2 cleanup 已经清空了 ptyIdRef，这里不会重复关闭）
+      if (ptyIdRef.current) {
+        const id = ptyIdRef.current;
+        ptyIdRef.current = null;
+        if (activeSshConfigRef.current) {
+          void invoke("close_ssh_pty", { id }).catch(() => {});
+        } else {
+          void invoke("close_pty", { id }).catch(() => {});
+        }
+      }
+      terminal.dispose();
+      term.current = null;
+      fitAddon.current = null;
+    };
+  }, []); // 空依赖：xterm 只初始化一次
+
+  // ─── Effect 2：管理连接生命周期（依赖 activeSshConfig）────────────────────
+  useEffect(() => {
+    // xterm 可能还未初始化（Effect 1 尚未运行完）
+    // 用 setTimeout 0 确保在 Effect 1 之后执行
     let disposed = false;
     let unlistenOutput: UnlistenFn | null = null;
     let unlistenExit: UnlistenFn | null = null;
 
-    const inputDisposable = term.current.onData((data) => {
-      if (ptyIdRef.current) {
-        if (sshConfig) {
-          void invoke("write_ssh_pty_input", { id: ptyIdRef.current, data }).catch((error) => {
-            console.error("write_ssh_pty_input failed", error);
-          });
-        } else {
-          void invoke("write_pty_input", { id: ptyIdRef.current, data }).catch((error) => {
-            console.error("write_pty_input failed", error);
-          });
-        }
+    const connect = async () => {
+      // 等待 xterm 初始化
+      if (!term.current) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        if (disposed || !term.current) return;
       }
-    });
 
-    const resizeDisposable = term.current.onResize(({ cols, rows }) => {
-      if (ptyIdRef.current) {
-        if (sshConfig) {
-          void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((error) => {
-            console.error("resize_ssh_pty failed", error);
-          });
-        } else {
-          void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((error) => {
-            console.error("resize_pty failed", error);
-          });
-        }
-      }
-    });
-
-    const bindPty = async () => {
       unlistenOutput = await listen<PtyOutputEvent>("pty-output", (event) => {
         if (event.payload.id === ptyIdRef.current) {
           term.current?.write(event.payload.data);
         }
       });
-
       unlistenExit = await listen<PtyExitEvent>("pty-exit", (event) => {
         if (event.payload.id === ptyIdRef.current) {
           term.current?.writeln(`\r\n[PTY exited] ${event.payload.message}`);
@@ -106,83 +186,63 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
 
       const cols = term.current?.cols ?? 80;
       const rows = term.current?.rows ?? 24;
-      try {
-        const newId = crypto.randomUUID();
-        ptyIdRef.current = newId;
+      const newId = crypto.randomUUID();
+      ptyIdRef.current = newId;
 
-        if (sshConfig) {
-          term.current?.writeln(`Connecting to ${sshConfig.user}@${sshConfig.host}:${sshConfig.port}...`);
+      try {
+        if (activeSshConfig) {
+          term.current?.writeln(
+            `Connecting to ${activeSshConfig.user}@${activeSshConfig.host}:${activeSshConfig.port}...`
+          );
           await invoke<string>("start_ssh_pty", {
             id: newId,
-            host: sshConfig.host,
-            port: sshConfig.port,
-            user: sshConfig.user,
-            password: sshConfig.password || null,
-            privateKey: sshConfig.privateKey || null,
+            host: activeSshConfig.host,
+            port: activeSshConfig.port,
+            user: activeSshConfig.user,
+            password: activeSshConfig.password ?? null,
+            privateKey: activeSshConfig.privateKey ?? null,
             cols,
             rows,
           });
-          term.current?.writeln('\r\n[Connected]');
+          term.current?.writeln("\r\n[Connected]");
         } else {
-          term.current?.writeln('Starting local shell PTY...');
+          term.current?.writeln("Starting local shell PTY...");
           await invoke<string>("start_pty", { id: newId, cols, rows });
         }
       } catch (error) {
+        if (disposed) return;
         ptyIdRef.current = null;
-        term.current?.writeln(`\r\n[Failed to start PTY] ${String(error)}`);
-        console.error("start_pty failed", error);
-      }
-    };
+        const errStr = String(error);
+        term.current?.writeln(`\r\n[Failed to start PTY] ${errStr}`);
+        console.error("connect failed", error);
 
-    void bindPty();
-
-    const handleResize = () => {
-      fitAddon.current?.fit();
-      if (ptyIdRef.current) {
-        const cols = term.current?.cols ?? 80;
-        const rows = term.current?.rows ?? 24;
-        if (sshConfig) {
-          void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((error) => {
-            console.error("resize_ssh_pty on window resize failed", error);
-          });
-        } else {
-          void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((error) => {
-            console.error("resize_pty on window resize failed", error);
-          });
+        // 如果是 SSH 认证失败，显示密码重试 overlay
+        if (activeSshConfig && isAuthError(errStr)) {
+          setShowRetryOverlay(true);
         }
       }
     };
 
-    window.addEventListener('resize', handleResize);
+    void connect();
 
     return () => {
       disposed = true;
-      window.removeEventListener('resize', handleResize);
-      inputDisposable.dispose();
-      resizeDisposable.dispose();
-      if (unlistenOutput) unlistenOutput();
-      if (unlistenExit) unlistenExit();
+      unlistenOutput?.();
+      unlistenExit?.();
+      // 关闭当前 PTY 连接（activeSshConfig 变化时触发，用于关闭旧连接）
       if (ptyIdRef.current) {
-        if (sshConfig) {
-          void invoke("close_ssh_pty", { id: ptyIdRef.current }).catch(() => {});
+        const id = ptyIdRef.current;
+        ptyIdRef.current = null;
+        if (activeSshConfig) {
+          void invoke("close_ssh_pty", { id }).catch(() => {});
         } else {
-          void invoke("close_pty", { id: ptyIdRef.current }).catch(() => {});
+          void invoke("close_pty", { id }).catch(() => {});
         }
       }
-      term.current?.dispose();
     };
-  }, [sshConfig]);
+  }, [activeSshConfig]); // activeSshConfig 变化时重新连接（密码重试、新连接）
 
-  // Make sure to resize when becoming active because display: none ruins size
-  useEffect(() => {
-    if (isActive) {
-      setTimeout(() => {
-        fitAddon.current?.fit();
-      }, 0);
-    }
-  }, [isActive]);
-
-  // Dynamically apply settings changes without restarting the PTY
+  // ─── 动态应用 settings 变化（不重启 PTY）─────────────────────────────────
   useEffect(() => {
     if (!term.current || !settings) return;
     term.current.options.fontSize = settings.fontSize;
@@ -196,14 +256,71 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
     fitAddon.current?.fit();
   }, [settings]);
 
+  // ─── 激活时调整大小──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (isActive) {
+      setTimeout(() => {
+        fitAddon.current?.fit();
+      }, 0);
+    }
+  }, [isActive]);
+
+  // ─── 密码重试处理────────────────────────────────────────────────────────
+  const handlePasswordRetry = (e: FormEvent) => {
+    e.preventDefault();
+    if (!activeSshConfig) return;
+    const newConfig: SshConfig = { ...activeSshConfig, password: retryPassword };
+    setShowRetryOverlay(false);
+    setRetryPassword("");
+    setActiveSshConfig(newConfig);
+  };
+
   return (
     <div
-      ref={terminalRef}
       style={{
+        position: "relative",
         width: "100%",
         height: "100%",
-        display: isActive ? "block" : "none"
+        display: isActive ? "flex" : "none",
+        flexDirection: "column",
       }}
-    />
+    >
+      <div ref={terminalRef} style={{ flex: 1, minHeight: 0 }} />
+
+      {showRetryOverlay && activeSshConfig && (
+        <div className="password-retry-overlay">
+          <div className="password-retry-dialog">
+            <div className="password-retry-icon">🔐</div>
+            <h3 className="password-retry-title">认证失败</h3>
+            <p className="password-retry-desc">
+              无法连接到 <strong>{activeSshConfig.user}@{activeSshConfig.host}</strong>，
+              密码不正确，请重新输入。
+            </p>
+            <form onSubmit={handlePasswordRetry} className="password-retry-form">
+              <input
+                type="password"
+                className="password-retry-input"
+                value={retryPassword}
+                onChange={(e) => setRetryPassword(e.target.value)}
+                placeholder="输入密码"
+                autoFocus
+              />
+              <div className="password-retry-actions">
+                <button
+                  type="button"
+                  className="password-retry-btn cancel"
+                  onClick={() => setShowRetryOverlay(false)}
+                >
+                  取消
+                </button>
+                <button type="submit" className="password-retry-btn retry">
+                  重试连接
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
