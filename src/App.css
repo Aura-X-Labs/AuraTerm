@@ -195,3 +195,157 @@
   overflow: hidden;
   position: relative;
 }
+
+/* ── Settings dialog ──────────────────────────────────── */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-dialog {
+  background: #2d2d2d;
+  border-radius: 8px;
+  width: 480px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: #fff;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #444;
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-close-btn {
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+}
+
+.settings-close-btn:hover {
+  color: #fff;
+}
+
+.settings-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.settings-section h3 {
+  margin: 0 0 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #888;
+  letter-spacing: 0.8px;
+}
+
+.settings-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.settings-field span {
+  color: #ccc;
+  min-width: 130px;
+}
+
+.settings-field input[type="text"],
+.settings-field input[type="number"] {
+  background: #1e1e1e;
+  border: 1px solid #555;
+  color: #fff;
+  border-radius: 4px;
+  padding: 4px 8px;
+  width: 220px;
+  font-size: 13px;
+  outline: none;
+}
+
+.settings-field input[type="text"]:focus,
+.settings-field input[type="number"]:focus {
+  border-color: #0078d4;
+}
+
+.settings-color-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-color-row input[type="color"] {
+  width: 36px;
+  height: 28px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 2px;
+  background: #1e1e1e;
+}
+
+.settings-color-row input[type="text"] {
+  width: 174px;
+}
+
+.settings-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid #444;
+}
+
+.settings-btn-cancel {
+  background: #444;
+  border: none;
+  color: #fff;
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.settings-btn-cancel:hover {
+  background: #555;
+}
+
+.settings-btn-save {
+  background: #0078d4;
+  border: none;
+  color: #fff;
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.settings-btn-save:hover {
+  background: #106ebe;
+}

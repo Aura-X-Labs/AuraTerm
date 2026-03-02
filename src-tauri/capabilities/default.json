@@ -10,6 +10,7 @@
     "core:window:allow-minimize",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
-    "core:window:allow-is-maximized"
+    "core:window:allow-is-maximized",
+    "core:path:default"
   ]
 }
