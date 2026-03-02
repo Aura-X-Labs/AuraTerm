@@ -4,6 +4,8 @@ import { FitAddon } from "xterm-addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { SshConfig } from "./ConnectDialog";
+import type { AppSettings } from "./settings";
+import { DEFAULT_SETTINGS } from "./settings";
 import "xterm/css/xterm.css";
 
 interface PtyOutputEvent {
@@ -19,9 +21,11 @@ interface PtyExitEvent {
 interface TerminalComponentProps {
   isActive: boolean;
   sshConfig?: SshConfig;
+  settings?: AppSettings;
 }
 
-export function TerminalComponent({ isActive, sshConfig }: TerminalComponentProps) {
+export function TerminalComponent({ isActive, sshConfig, settings }: TerminalComponentProps) {
+  const effectiveSettings = settings ?? DEFAULT_SETTINGS;
   const terminalRef = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
@@ -33,12 +37,14 @@ export function TerminalComponent({ isActive, sshConfig }: TerminalComponentProp
     // Initialize xterm.js
     term.current = new Terminal({
       cursorBlink: true,
-      fontFamily: 'Consolas, "Courier New", monospace',
-      fontSize: 14,
+      fontFamily: effectiveSettings.fontFamily,
+      fontSize: effectiveSettings.fontSize,
+      scrollback: effectiveSettings.scrollback,
       theme: {
-        background: '#000000',
-        foreground: '#ffffff',
-      }
+        background: effectiveSettings.theme.background,
+        foreground: effectiveSettings.theme.foreground,
+        cursor: effectiveSettings.theme.cursor,
+      },
     });
 
     fitAddon.current = new FitAddon();
@@ -175,6 +181,20 @@ export function TerminalComponent({ isActive, sshConfig }: TerminalComponentProp
       }, 0);
     }
   }, [isActive]);
+
+  // Dynamically apply settings changes without restarting the PTY
+  useEffect(() => {
+    if (!term.current || !settings) return;
+    term.current.options.fontSize = settings.fontSize;
+    term.current.options.fontFamily = settings.fontFamily;
+    term.current.options.scrollback = settings.scrollback;
+    term.current.options.theme = {
+      background: settings.theme.background,
+      foreground: settings.theme.foreground,
+      cursor: settings.theme.cursor,
+    };
+    fitAddon.current?.fit();
+  }, [settings]);
 
   return (
     <div

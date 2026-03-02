@@ -10,8 +10,8 @@ use std::{
     thread,
 };
 use tauri::{command, AppHandle, Emitter, State};
-use uuid::Uuid;
 
+mod settings;
 mod ssh;
 
 struct PtySession {
@@ -191,6 +191,8 @@ fn main() {
             ssh::write_ssh_pty_input,
             ssh::resize_ssh_pty,
             ssh::close_ssh_pty,
+            settings::get_settings,
+            settings::save_settings,
         ])
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())

@@ -4,7 +4,6 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter};
-use uuid::Uuid;
 
 #[derive(Clone, serde::Serialize)]
 struct PtyOutputEvent {
@@ -20,6 +19,7 @@ struct PtyExitEvent {
 
 pub struct SshSession {
     pub channel: Arc<Mutex<ssh2::Channel>>,
+    #[allow(dead_code)]
     pub session: Arc<Mutex<ssh2::Session>>,
 }
 
@@ -60,7 +60,7 @@ pub fn start_ssh_pty(
     // Enable SSH protocol keepalive
     sess.set_keepalive(true, 15);
 
-    if let Some(pk) = private_key {
+    if let Some(_pk) = private_key {
         // Need to parse or use a file path? The simple way is via file, but since we get file contents...
         // Let's assume it's just trying password for now to get it compiling, or we can use the `userauth_pubkey_memory` if we enable vendored-openssl
         sess.userauth_password(&user, password.as_deref().unwrap_or("")).map_err(|e| e.to_string())?;

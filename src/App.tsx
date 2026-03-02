@@ -1,8 +1,11 @@
 import { useState, useEffect, type MouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
 import { TerminalComponent } from "./TerminalComponent";
 import { ConnectDialog, type SshConfig } from "./ConnectDialog";
+import { SettingsDialog } from "./SettingsDialog";
+import { type AppSettings, DEFAULT_SETTINGS } from "./settings";
 import "./App.css";
 
 interface Tab {
@@ -18,6 +21,8 @@ function App() {
   const [activeTabId, setActiveTabId] = useState<string>("tab-0");
   const [osType, setOsType] = useState<string>("windows");
   const [showConnectDialog, setShowConnectDialog] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
     async function determineOs() {
@@ -30,6 +35,18 @@ function App() {
     }
     determineOs();
   }, []);
+
+  useEffect(() => {
+    invoke<AppSettings>("get_settings")
+      .then(setSettings)
+      .catch(() => setSettings(DEFAULT_SETTINGS));
+  }, []);
+
+  const handleSaveSettings = async (newSettings: AppSettings) => {
+    await invoke("save_settings", { settings: newSettings }).catch(console.error);
+    setSettings(newSettings);
+    setShowSettings(false);
+  };
 
   const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -181,6 +198,9 @@ function App() {
         <button className="tab-new-btn" onClick={() => setShowConnectDialog(true)} title="New SSH Connection" style={{ marginLeft: '4px' }}>
           &#x1F5A7;
         </button>
+        <button className="tab-new-btn" onClick={() => setShowSettings(true)} title="Settings" style={{ marginLeft: 'auto' }}>
+          &#x2699;
+        </button>
       </div>
 
       <div className="terminal-container">
@@ -193,11 +213,20 @@ function App() {
             <TerminalComponent 
               key={tab.id} 
               isActive={activeTabId === tab.id} 
-              sshConfig={tab.sshConfig} 
+              sshConfig={tab.sshConfig}
+              settings={settings}
             />
           ))
         )}
       </div>
+
+      {showSettings && (
+        <SettingsDialog
+          initial={settings}
+          onSave={handleSaveSettings}
+          onCancel={() => setShowSettings(false)}
+        />
+      )}
 
       {showConnectDialog && (
         <ConnectDialog
