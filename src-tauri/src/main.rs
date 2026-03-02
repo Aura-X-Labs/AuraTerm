@@ -11,6 +11,7 @@ use std::{
 };
 use tauri::{command, AppHandle, Emitter, State};
 
+mod connections;
 mod settings;
 mod ssh;
 
@@ -193,6 +194,10 @@ fn main() {
             ssh::close_ssh_pty,
             settings::get_settings,
             settings::save_settings,
+            connections::get_connections,
+            connections::save_connection,
+            connections::delete_connection,
+            connections::touch_connection,
         ])
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())

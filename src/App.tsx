@@ -3,7 +3,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
 import { TerminalComponent } from "./TerminalComponent";
-import { ConnectDialog, type SshConfig } from "./ConnectDialog";
+import { ConnectDialog, type SshConfig, type ConnectResult } from "./ConnectDialog";
+import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar";
 import { SettingsDialog } from "./SettingsDialog";
 import { type AppSettings, DEFAULT_SETTINGS } from "./settings";
 import "./App.css";
@@ -23,6 +24,8 @@ function App() {
   const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarRefreshToken, setSidebarRefreshToken] = useState(0);
 
   useEffect(() => {
     async function determineOs() {
@@ -101,7 +104,6 @@ function App() {
     setTabs(prev => {
       const newTabs = prev.filter(t => t.id !== id);
       if (activeTabId === id) {
-        // Pick the previous tab or the next one
         const index = prev.findIndex(t => t.id === id);
         if (newTabs.length > 0) {
           setActiveTabId(newTabs[Math.max(0, index - 1)].id);
@@ -111,6 +113,58 @@ function App() {
       }
       return newTabs;
     });
+  };
+
+  /**
+   * 处理 ConnectDialog 的连接结果：
+   * - 开新标签页建立 SSH 连接
+   * - 如果 saveAs 有值，则保存到 connections.json
+   */
+  const handleConnectResult = async (result: ConnectResult) => {
+    const newId = `tab-${nextTabId++}`;
+    const { config, saveAs } = result;
+
+    setTabs((prev) => [
+      ...prev,
+      { id: newId, title: `${config.user}@${config.host}`, sshConfig: config },
+    ]);
+    setActiveTabId(newId);
+    setShowConnectDialog(false);
+
+    if (saveAs) {
+      const conn: SavedConnection = {
+        id: crypto.randomUUID(),
+        name: saveAs,
+        host: config.host,
+        port: config.port,
+        user: config.user,
+        authType: config.privateKey ? "key" : "password",
+        password: config.password,
+        privateKey: config.privateKey,
+        createdAt: Date.now(),
+      };
+      try {
+        await invoke("save_connection", { connection: conn });
+        // 通知侧边栏刷新（递增 token）
+        setSidebarRefreshToken(t => t + 1);
+        // 如果侧边栏是关闭的，自动展开提示用户
+        setSidebarOpen(true);
+      } catch (e) {
+        console.error("Failed to save connection", e);
+      }
+    }
+  };
+
+  /**
+   * 侧边栏双击已保存的连接，直接开新标签页
+   */
+  const handleBookmarkConnect = (config: SshConfig, _connectionId: string) => {
+    const newId = `tab-${nextTabId++}`;
+    setTabs((prev) => [
+      ...prev,
+      { id: newId, title: `${config.user}@${config.host}`, sshConfig: config },
+    ]);
+    setActiveTabId(newId);
   };
 
   return (
@@ -174,17 +228,17 @@ function App() {
           </div>
         )}
       </div>
-      
+
       <div className="tab-bar">
         {tabs.map((tab) => (
-          <div 
-            key={tab.id} 
+          <div
+            key={tab.id}
             className={`tab-item ${activeTabId === tab.id ? 'active' : ''}`}
             onClick={() => setActiveTabId(tab.id)}
           >
             <span className="tab-title">{tab.title}</span>
-            <button 
-              className="tab-close-btn" 
+            <button
+              className="tab-close-btn"
               onClick={(e) => handleCloseTab(tab.id, e)}
               title="Close Tab"
             >
@@ -195,29 +249,56 @@ function App() {
         <button className="tab-new-btn" onClick={handleNewTab} title="New Local Shell">
           +
         </button>
-        <button className="tab-new-btn" onClick={() => setShowConnectDialog(true)} title="New SSH Connection" style={{ marginLeft: '4px' }}>
+        <button
+          className="tab-new-btn"
+          onClick={() => setShowConnectDialog(true)}
+          title="New SSH Connection"
+          style={{ marginLeft: '4px' }}
+        >
           &#x1F5A7;
         </button>
-        <button className="tab-new-btn" onClick={() => setShowSettings(true)} title="Settings" style={{ marginLeft: 'auto' }}>
+        <button
+          className={`tab-new-btn bookmark-toggle-btn ${sidebarOpen ? 'active' : ''}`}
+          onClick={() => setSidebarOpen(v => !v)}
+          title="快捷连接"
+          style={{ marginLeft: '4px' }}
+        >
+          🔖
+        </button>
+        <button
+          className="tab-new-btn"
+          onClick={() => setShowSettings(true)}
+          title="Settings"
+          style={{ marginLeft: 'auto' }}
+        >
           &#x2699;
         </button>
       </div>
 
-      <div className="terminal-container">
-        {tabs.length === 0 ? (
-          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', color: '#666' }}>
-            No open tabs. Click + to open a new tab.
-          </div>
-        ) : (
-          tabs.map((tab) => (
-            <TerminalComponent 
-              key={tab.id} 
-              isActive={activeTabId === tab.id} 
-              sshConfig={tab.sshConfig}
-              settings={settings}
-            />
-          ))
+      <div className="workspace">
+        {sidebarOpen && (
+          <BookmarkSidebar
+            refreshToken={sidebarRefreshToken}
+            onConnect={handleBookmarkConnect}
+          />
         )}
+
+        <div className="terminal-container">
+          {tabs.length === 0 ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', color: '#666' }}>
+              No open tabs. Click + to open a new tab.
+            </div>
+          ) : (
+            tabs.map((tab) => (
+              <TerminalComponent
+                key={tab.id}
+                isActive={activeTabId === tab.id}
+                sshConfig={tab.sshConfig}
+                settings={settings}
+              />
+            ))
+          )}
+        </div>
       </div>
 
       {showSettings && (
@@ -230,15 +311,7 @@ function App() {
 
       {showConnectDialog && (
         <ConnectDialog
-          onConnect={(config) => {
-            const newId = `tab-${nextTabId++}`;
-            setTabs((prev) => [
-              ...prev,
-              { id: newId, title: `${config.user}@${config.host}`, sshConfig: config },
-            ]);
-            setActiveTabId(newId);
-            setShowConnectDialog(false);
-          }}
+          onConnect={handleConnectResult}
           onCancel={() => setShowConnectDialog(false)}
         />
       )}

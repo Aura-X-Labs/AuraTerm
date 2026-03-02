@@ -35,7 +35,8 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
 #### 前端 (Web)
 1. **Terminal View (终端视图)**: 封装 Xterm.js，处理输入输出流、字体、颜色主题。
 2. **Workspace Manager (工作区管理)**: 多标签页 (Tabs)、分屏 (Split Panes)、窗口停靠。
-3. **UI Components (交互组件)**: 连接对话框、设置面板、文件传输进度条、宏调试器。
+3. **Bookmark Sidebar (快捷连接侧边栏)**: 保存并展示历史 SSH/Telnet/Serial 连接，双击一键重连。
+4. **UI Components (交互组件)**: 连接对话框（含"保存连接"选项）、设置面板、文件传输进度条、宏调试器。
 
 ## 3. 核心难点与解决方案 (Challenges & Solutions)
 1. **TTL 宏脚本的完全兼容**:
@@ -48,9 +49,84 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
    * *难点*: TeraTerm 支持大量日文及其他遗留编码（Shift-JIS, EUC-JP 等）。
    * *方案*: 使用 Rust 的 \encoding_rs\ 库在后端进行统一的字节流编解码，前端 Xterm.js 统一接收 UTF-8。
 
-## 4. 实施计划 (Implementation Plan)
+## 4. 快捷连接（Bookmark）功能设计
+
+### 4.1 数据模型
+
+保存的连接信息存储在独立的 `connections.json` 文件中（与 `settings.json` 分离）：
+
+```json
+[
+  {
+    "id": "uuid-v4",
+    "name": "My Server",
+    "host": "10.127.120.163",
+    "port": 22,
+    "user": "bill",
+    "authType": "password",
+    "password": "（明文，未来可改为加密存储）",
+    "privateKey": null,
+    "createdAt": 1709000000000,
+    "lastUsed": 1709100000000
+  }
+]
+```
+
+### 4.2 后端命令（Rust）
+
+| 命令 | 入参 | 返回 | 说明 |
+|------|------|------|------|
+| `get_connections` | — | `Vec<SavedConnection>` | 读取全部已保存连接，按 `lastUsed` 降序 |
+| `save_connection` | `SavedConnection` | `String`（id） | 新增或更新（同 id 覆盖） |
+| `delete_connection` | `id: String` | `()` | 删除指定连接 |
+
+### 4.3 UI 布局
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Titlebar                          │
+├────────────────────────────────────────────────────-┤
+│  [tab1] [tab2] [+] [⊞] [⚙]               [☰]     │
+├──────────────────────────────────────────────────────┤
+│ ┌──────────┐ ┌──────────────────────────────────┐   │
+│ │ Bookmark │ │                                  │   │
+│ │ Sidebar  │ │       Terminal View               │   │
+│ │ -------- │ │                                  │   │
+│ │ ▶ server1│ │                                  │   │
+│ │ ▶ server2│ │                                  │   │
+│ │          │ │                                  │   │
+│ └──────────┘ └──────────────────────────────────┘   │
+└─────────────────────────────────────────────────────┘
+```
+
+- 侧边栏默认**收起**，点击 Tab Bar 上的书签图标（🔖）展开/收起。
+- 侧边栏宽度 200px，不可调整（初版）。
+- 每个连接条目显示：🖥 图标 + 名称（`name`）+ 副标题（`user@host:port`）。
+- **双击**条目 → 打开新标签页并立即建立 SSH 连接。
+- **右键菜单**：编辑名称、删除连接。
+- 连接建立成功后，若该 `host+port+user` 组合未保存过，**自动在侧边栏底部显示"保存此连接"提示条**；或在 ConnectDialog 中内联提供"保存连接"复选框（默认勾选）。
+
+### 4.4 安全说明
+
+当前版本密码以**明文**存储在用户配置目录的 `connections.json` 中。后续版本计划：
+- macOS: 使用 **Keychain** 存储凭据。
+- Windows: 使用 **Windows Credential Manager (DPAPI)** 加密。
+- Linux: 使用 **libsecret / Secret Service API**。
+
+---
+
+## 5. 实施计划 (Implementation Plan)
 
 项目分为 5 个主要阶段（Phase），采用敏捷迭代方式推进：
+
+### Phase 0: 已完成功能（基础框架）
+* Tauri + React/TypeScript 项目初始化。 ✅
+* Xterm.js PTY 绑定（本地 Shell）。 ✅
+* 多标签页 UI 框架。 ✅
+* 基础设置持久化（JSON）。 ✅
+* SSH2 连接（密码认证）。 ✅
+* SSH 认证失败密码重试 overlay。 ✅
+* 快捷连接（Bookmark）侧边栏。 ✅
 
 ### Phase 1: 基础设施与基础终端 (第 1-2 个月)
 * **目标**: 搭建 Tauri 框架，实现基础的本地终端和 UI 骨架。
@@ -67,6 +143,11 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
   * 实现 Telnet 协议解析。
   * 集成 \serialport-rs\，实现串口设备的枚举和连接。
   * 前端实现新建连接对话框（支持 SSH/Telnet/Serial 切换）。
+
+### Phase 2.5: 快捷连接增强
+* SSH 公钥认证支持（`userauth_pubkey_memory`）。
+* Bookmark 侧边栏支持分组/文件夹。
+* 连接凭据加密存储（Keychain / DPAPI）。
 
 ### Phase 3: 文件传输与高级终端特性 (第 5-6 个月)
 * **目标**: 补齐 TeraTerm 的特色文件传输功能。
