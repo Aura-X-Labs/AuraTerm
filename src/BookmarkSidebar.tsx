@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { SshConfig } from "./ConnectDialog";
 
 export interface SavedConnection {
   id: string;
@@ -17,6 +18,7 @@ export interface SavedConnection {
 
 interface BookmarkSidebarProps {
   onConnect: (conn: SavedConnection) => void;
+  onConnect: (config: SshConfig, connectionId: string) => void;
   /** 每次递增该值，侧边栏会自动重新加载连接列表 */
   refreshToken?: number;
 }
@@ -67,6 +69,16 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
     } catch (_) {}
 
     onConnect(conn);
+    onConnect(
+      {
+        host: conn.host,
+        port: conn.port,
+        user: conn.user,
+        password: conn.authType === "password" ? conn.password : undefined,
+        privateKey: conn.authType === "key" ? conn.privateKey : undefined,
+      },
+      conn.id
+    );
   };
 
   const handleContextMenu = (e: React.MouseEvent, conn: SavedConnection) => {
@@ -135,6 +147,7 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
               : `${conn.user}@${conn.host}:${conn.port}`;
             const icon = isTelnet ? "🌐" : "🖥";
             return (
+          {connections.map((conn) => (
             <li
               key={conn.id}
               className="bookmark-item"
@@ -143,6 +156,9 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
               title={`${subtitle}\n双击连接`}
             >
               <span className="bookmark-icon">{icon}</span>
+              title={`${conn.user}@${conn.host}:${conn.port}\n双击连接`}
+            >
+              <span className="bookmark-icon">🖥</span>
               <div className="bookmark-info">
                 {editingId === conn.id ? (
                   <input
@@ -165,6 +181,12 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
             </li>
             );
           })}
+                <span className="bookmark-host">
+                  {conn.user}@{conn.host}:{conn.port}
+                </span>
+              </div>
+            </li>
+          ))}
         </ul>
       )}
 

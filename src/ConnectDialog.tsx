@@ -23,6 +23,11 @@ export interface ConnectResult {
 
 type Protocol = "ssh" | "telnet";
 
+export interface ConnectResult {
+  config: SshConfig;
+  saveAs?: string; // 非 undefined 表示需要保存，值为连接名称
+}
+
 interface ConnectDialogProps {
   onConnect: (result: ConnectResult) => void;
   onCancel: () => void;
@@ -50,6 +55,9 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
     ? `${user}@${host}`
     : host ? `telnet://${host}:${telnetPort}` : "";
 
+  // 当 host 或 user 变化时，自动填充默认连接名
+  const defaultName = user && host ? `${user}@${host}` : "";
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!host) return;
@@ -75,6 +83,9 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
     onConnect({
       protocol: "ssh",
       sshConfig: config,
+
+    onConnect({
+      config,
       saveAs: saveConnection ? (connectionName.trim() || defaultName) : undefined,
     });
   };
@@ -183,6 +194,50 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
           )}
 
           {/* 保存此连接 — SSH 和 Telnet 均支持 */}
+          <div className="form-group save-connection-group">
+            <label className="save-connection-label">
+          <div className="form-group">
+            <label>User:</label>
+            <input
+              type="text"
+              value={user}
+              onChange={(e) => setUser(e.target.value)}
+              required
+            />
+          </div>
+          <div className="form-group auth-type-group">
+            <label>Auth Type:</label>
+            <select
+              value={authType}
+              onChange={(e) => setAuthType(e.target.value as "password" | "key")}
+            >
+              <option value="password">Password</option>
+              <option value="key">Private Key</option>
+            </select>
+          </div>
+
+          {authType === "password" ? (
+            <div className="form-group">
+              <label>Password:</label>
+              <input
+                type="checkbox"
+                checked={saveConnection}
+                onChange={(e) => setSaveConnection(e.target.checked)}
+              />
+              <span>保存此连接</span>
+            </label>
+            {saveConnection && (
+              <input
+                type="text"
+                className="save-connection-name"
+                value={connectionName}
+                onChange={(e) => setConnectionName(e.target.value)}
+                placeholder={defaultName || "连接名称（可选）"}
+              />
+            )}
+          </div>
+
+          {/* 保存连接选项 */}
           <div className="form-group save-connection-group">
             <label className="save-connection-label">
               <input

@@ -317,6 +317,14 @@ function App() {
           &#x1F5A7;
         </button>
         <button
+          className={`tab-new-btn bookmark-toggle-btn ${sidebarOpen ? 'active' : ''}`}
+          onClick={() => setSidebarOpen(v => !v)}
+          title="快捷连接"
+          style={{ marginLeft: '4px' }}
+        >
+          🔖
+        </button>
+        <button
           className="tab-new-btn"
           onClick={() => setShowSettings(true)}
           title="Settings"
