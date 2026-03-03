@@ -9,10 +9,19 @@ export interface SshConfig {
   privateKey?: string;
 }
 
+export interface TelnetConfig {
+  host: string;
+  port: number;
+}
+
 export interface ConnectResult {
-  config: SshConfig;
+  protocol: "ssh" | "telnet";
+  sshConfig?: SshConfig;
+  telnetConfig?: TelnetConfig;
   saveAs?: string; // 非 undefined 表示需要保存，值为连接名称
 }
+
+type Protocol = "ssh" | "telnet";
 
 interface ConnectDialogProps {
   onConnect: (result: ConnectResult) => void;
@@ -20,32 +29,52 @@ interface ConnectDialogProps {
 }
 
 export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
+  const [protocol, setProtocol] = useState<Protocol>("ssh");
+
+  // 共用字段
   const [host, setHost] = useState("");
-  const [port, setPort] = useState("22");
+  // SSH 字段
+  const [sshPort, setSshPort] = useState("22");
   const [user, setUser] = useState("");
   const [password, setPassword] = useState("");
   const [privateKey, setPrivateKey] = useState("");
   const [authType, setAuthType] = useState<"password" | "key">("password");
   const [saveConnection, setSaveConnection] = useState(true);
   const [connectionName, setConnectionName] = useState("");
+  // Telnet 字段
+  const [telnetPort, setTelnetPort] = useState("23");
 
-  // 当 host 或 user 变化时，自动填充默认连接名
-  const defaultName = user && host ? `${user}@${host}` : "";
+  const isSsh = protocol === "ssh";
+
+  const defaultName = isSsh && user && host
+    ? `${user}@${host}`
+    : host ? `telnet://${host}:${telnetPort}` : "";
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (!host || !user) return;
+    if (!host) return;
 
+    if (protocol === "telnet") {
+      onConnect({
+        protocol: "telnet",
+        telnetConfig: { host, port: parseInt(telnetPort, 10) || 23 },
+        saveAs: saveConnection ? (connectionName.trim() || `telnet://${host}:${telnetPort}`) : undefined,
+      });
+      return;
+    }
+
+    // SSH
+    if (!user) return;
     const config: SshConfig = {
       host,
-      port: parseInt(port, 10) || 22,
+      port: parseInt(sshPort, 10) || 22,
       user,
       password: authType === "password" ? password : undefined,
       privateKey: authType === "key" ? privateKey : undefined,
     };
-
     onConnect({
-      config,
+      protocol: "ssh",
+      sshConfig: config,
       saveAs: saveConnection ? (connectionName.trim() || defaultName) : undefined,
     });
   };
@@ -53,77 +82,107 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
   return (
     <div className="dialog-overlay">
       <div className="dialog-content">
-        <h2 className="dialog-title">Connect to SSH</h2>
+        <h2 className="dialog-title">新建连接</h2>
         <form onSubmit={handleSubmit}>
+          {/* 协议选择 */}
           <div className="form-group">
-            <label>Host:</label>
+            <label>协议:</label>
+            <div className="protocol-tabs">
+              <button
+                type="button"
+                className={`protocol-tab-btn${protocol === "ssh" ? " active" : ""}`}
+                onClick={() => setProtocol("ssh")}
+              >
+                SSH
+              </button>
+              <button
+                type="button"
+                className={`protocol-tab-btn${protocol === "telnet" ? " active" : ""}`}
+                onClick={() => setProtocol("telnet")}
+              >
+                Telnet
+              </button>
+            </div>
+          </div>
+
+          {/* 主机 */}
+          <div className="form-group">
+            <label>主机:</label>
             <input
               type="text"
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="e.g. 192.168.1.100"
+              placeholder="例如 192.168.1.100"
               autoFocus
               required
             />
           </div>
+
+          {/* 端口 */}
           <div className="form-group">
-            <label>Port:</label>
+            <label>端口:</label>
             <input
               type="number"
-              value={port}
-              onChange={(e) => setPort(e.target.value)}
+              value={isSsh ? sshPort : telnetPort}
+              onChange={(e) => isSsh ? setSshPort(e.target.value) : setTelnetPort(e.target.value)}
               required
             />
-          </div>
-          <div className="form-group">
-            <label>User:</label>
-            <input
-              type="text"
-              value={user}
-              onChange={(e) => setUser(e.target.value)}
-              required
-            />
-          </div>
-          <div className="form-group auth-type-group">
-            <label>Auth Type:</label>
-            <select
-              value={authType}
-              onChange={(e) => setAuthType(e.target.value as "password" | "key")}
-            >
-              <option value="password">Password</option>
-              <option value="key">Private Key</option>
-            </select>
           </div>
 
-          {authType === "password" ? (
-            <div className="form-group">
-              <label>Password:</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-          ) : (
-            <div className="form-group">
-              <label>Private Key (PEM):</label>
-              <textarea
-                value={privateKey}
-                onChange={(e) => setPrivateKey(e.target.value)}
-                placeholder="-----BEGIN RSA PRIVATE KEY-----..."
-                rows={4}
-              />
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Key Passphrase (optional)"
-                style={{ marginTop: "8px" }}
-              />
-            </div>
+          {/* SSH 专用字段 */}
+          {isSsh && (
+            <>
+              <div className="form-group">
+                <label>用户名:</label>
+                <input
+                  type="text"
+                  value={user}
+                  onChange={(e) => setUser(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="form-group auth-type-group">
+                <label>认证方式:</label>
+                <select
+                  value={authType}
+                  onChange={(e) => setAuthType(e.target.value as "password" | "key")}
+                >
+                  <option value="password">密码</option>
+                  <option value="key">私钥</option>
+                </select>
+              </div>
+
+              {authType === "password" ? (
+                <div className="form-group">
+                  <label>密码:</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+              ) : (
+                <div className="form-group">
+                  <label>私钥 (PEM):</label>
+                  <textarea
+                    value={privateKey}
+                    onChange={(e) => setPrivateKey(e.target.value)}
+                    placeholder="-----BEGIN RSA PRIVATE KEY-----..."
+                    rows={4}
+                  />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Key Passphrase（可选）"
+                    style={{ marginTop: "8px" }}
+                  />
+                </div>
+              )}
+            </>
           )}
 
-          {/* 保存连接选项 */}
+          {/* 保存此连接 — SSH 和 Telnet 均支持 */}
           <div className="form-group save-connection-group">
             <label className="save-connection-label">
               <input
@@ -146,10 +205,14 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
 
           <div className="dialog-actions">
             <button type="button" className="btn-cancel" onClick={onCancel}>
-              Cancel
+              取消
             </button>
-            <button type="submit" className="btn-connect" disabled={!host || !user}>
-              Connect
+            <button
+              type="submit"
+              className="btn-connect"
+              disabled={!host || (isSsh && !user)}
+            >
+              连接
             </button>
           </div>
         </form>

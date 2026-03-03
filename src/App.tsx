@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
 import { TerminalComponent } from "./TerminalComponent";
-import { ConnectDialog, type SshConfig, type ConnectResult } from "./ConnectDialog";
+import { ConnectDialog, type SshConfig, type TelnetConfig, type ConnectResult } from "./ConnectDialog";
 import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar";
 import { SettingsDialog } from "./SettingsDialog";
 import { type AppSettings, DEFAULT_SETTINGS } from "./settings";
@@ -13,6 +13,7 @@ interface Tab {
   id: string;
   title: string;
   sshConfig?: SshConfig;
+  telnetConfig?: TelnetConfig;
 }
 
 let nextTabId = 1;
@@ -122,7 +123,41 @@ function App() {
    */
   const handleConnectResult = async (result: ConnectResult) => {
     const newId = `tab-${nextTabId++}`;
-    const { config, saveAs } = result;
+    const { protocol, sshConfig, telnetConfig, saveAs } = result;
+
+    if (protocol === "telnet" && telnetConfig) {
+      setTabs((prev) => [
+        ...prev,
+        { id: newId, title: `telnet://${telnetConfig.host}:${telnetConfig.port}`, telnetConfig },
+      ]);
+      setActiveTabId(newId);
+      setShowConnectDialog(false);
+
+      if (saveAs) {
+        const conn: SavedConnection = {
+          id: crypto.randomUUID(),
+          name: saveAs,
+          host: telnetConfig.host,
+          port: telnetConfig.port,
+          user: "",
+          authType: "password",
+          protocol: "telnet",
+          createdAt: Date.now(),
+        };
+        try {
+          await invoke("save_connection", { connection: conn });
+          setSidebarRefreshToken(t => t + 1);
+          setSidebarOpen(true);
+        } catch (e) {
+          console.error("Failed to save telnet connection", e);
+        }
+      }
+      return;
+    }
+
+    // SSH
+    if (!sshConfig) return;
+    const config = sshConfig;
 
     setTabs((prev) => [
       ...prev,
@@ -141,6 +176,7 @@ function App() {
         authType: config.privateKey ? "key" : "password",
         password: config.password,
         privateKey: config.privateKey,
+        protocol: "ssh",
         createdAt: Date.now(),
       };
       try {
@@ -158,12 +194,27 @@ function App() {
   /**
    * 侧边栏双击已保存的连接，直接开新标签页
    */
-  const handleBookmarkConnect = (config: SshConfig, _connectionId: string) => {
+  const handleBookmarkConnect = (conn: SavedConnection) => {
     const newId = `tab-${nextTabId++}`;
-    setTabs((prev) => [
-      ...prev,
-      { id: newId, title: `${config.user}@${config.host}`, sshConfig: config },
-    ]);
+    if (conn.protocol === "telnet") {
+      const telnetConfig: TelnetConfig = { host: conn.host, port: conn.port };
+      setTabs((prev) => [
+        ...prev,
+        { id: newId, title: `telnet://${conn.host}:${conn.port}`, telnetConfig },
+      ]);
+    } else {
+      const sshConfig: SshConfig = {
+        host: conn.host,
+        port: conn.port,
+        user: conn.user,
+        password: conn.authType === "password" ? conn.password : undefined,
+        privateKey: conn.authType === "key" ? conn.privateKey : undefined,
+      };
+      setTabs((prev) => [
+        ...prev,
+        { id: newId, title: `${conn.user}@${conn.host}`, sshConfig },
+      ]);
+    }
     setActiveTabId(newId);
   };
 
@@ -230,6 +281,14 @@ function App() {
       </div>
 
       <div className="tab-bar">
+        <button
+          className={`tab-new-btn bookmark-toggle-btn ${sidebarOpen ? 'active' : ''}`}
+          onClick={() => setSidebarOpen(v => !v)}
+          title="快捷连接"
+          style={{ marginRight: '4px' }}
+        >
+          🔖
+        </button>
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -256,14 +315,6 @@ function App() {
           style={{ marginLeft: '4px' }}
         >
           &#x1F5A7;
-        </button>
-        <button
-          className={`tab-new-btn bookmark-toggle-btn ${sidebarOpen ? 'active' : ''}`}
-          onClick={() => setSidebarOpen(v => !v)}
-          title="快捷连接"
-          style={{ marginLeft: '4px' }}
-        >
-          🔖
         </button>
         <button
           className="tab-new-btn"
@@ -294,6 +345,7 @@ function App() {
                 key={tab.id}
                 isActive={activeTabId === tab.id}
                 sshConfig={tab.sshConfig}
+                telnetConfig={tab.telnetConfig}
                 settings={settings}
               />
             ))

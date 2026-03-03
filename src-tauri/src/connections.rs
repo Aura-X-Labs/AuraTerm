@@ -9,14 +9,21 @@ pub struct SavedConnection {
     pub name: String,
     pub host: String,
     pub port: u16,
+    #[serde(default)]
     pub user: String,
     pub auth_type: String, // "password" | "key"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
+    #[serde(default = "default_protocol")]
+    pub protocol: String, // "ssh" | "telnet"
     pub created_at: u64,
     pub last_used: Option<u64>,
+}
+
+fn default_protocol() -> String {
+    "ssh".to_string()
 }
 
 fn connections_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {

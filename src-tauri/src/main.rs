@@ -14,6 +14,7 @@ use tauri::{command, AppHandle, Emitter, State};
 mod connections;
 mod settings;
 mod ssh;
+mod telnet;
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -25,6 +26,7 @@ struct PtySession {
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
     ssh_state: ssh::SshState,
+    telnet_state: telnet::TelnetState,
 }
 
 #[derive(Clone, Serialize)]
@@ -179,6 +181,7 @@ fn main() {
     let app_state = AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         ssh_state: ssh::SshState::default(),
+        telnet_state: telnet::TelnetState::default(),
     };
 
     tauri::Builder::default()
@@ -198,6 +201,10 @@ fn main() {
             connections::save_connection,
             connections::delete_connection,
             connections::touch_connection,
+            telnet::start_telnet_pty,
+            telnet::write_telnet_pty_input,
+            telnet::resize_telnet_pty,
+            telnet::close_telnet_pty,
         ])
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())

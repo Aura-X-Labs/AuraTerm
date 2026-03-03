@@ -3,7 +3,7 @@ import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SshConfig } from "./ConnectDialog";
+import type { SshConfig, TelnetConfig } from "./ConnectDialog";
 import type { AppSettings } from "./settings";
 import { DEFAULT_SETTINGS } from "./settings";
 import "xterm/css/xterm.css";
@@ -21,6 +21,7 @@ interface PtyExitEvent {
 interface TerminalComponentProps {
   isActive: boolean;
   sshConfig?: SshConfig;
+  telnetConfig?: TelnetConfig;
   settings?: AppSettings;
 }
 
@@ -34,7 +35,7 @@ function isAuthError(errStr: string): boolean {
   );
 }
 
-export function TerminalComponent({ isActive, sshConfig, settings }: TerminalComponentProps) {
+export function TerminalComponent({ isActive, sshConfig, telnetConfig, settings }: TerminalComponentProps) {
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -46,6 +47,8 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
   const [activeSshConfig, setActiveSshConfig] = useState<SshConfig | undefined>(sshConfig);
   // 供 Effect 1 的 event handler 读取最新 SSH 配置（避免闭包捕获旧值）
   const activeSshConfigRef = useRef<SshConfig | undefined>(sshConfig);
+  // Telnet 配置 ref（供 Effect 1 的 handlers 使用）
+  const telnetConfigRef = useRef<TelnetConfig | undefined>(telnetConfig);
 
   // 密码重试 overlay
   const [showRetryOverlay, setShowRetryOverlay] = useState(false);
@@ -62,6 +65,11 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
   useEffect(() => {
     activeSshConfigRef.current = activeSshConfig;
   }, [activeSshConfig]);
+
+  // 同步 telnetConfig 到 ref
+  useEffect(() => {
+    telnetConfigRef.current = telnetConfig;
+  }, [telnetConfig]);
 
   // ─── Effect 1：初始化 xterm（只在 mount/unmount 时执行一次）────────────────
   useEffect(() => {
@@ -87,12 +95,25 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
     term.current = terminal;
     fitAddon.current = fit;
 
-    // 输入 handler：通过 ref 读取当前的 activeSshConfig
+    // 阻止浏览器/Tauri 拦截 Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+\ 等控制键，
+    // 直接由 xterm 的 onData 处理并转发给 PTY
+    terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.ctrlKey && ['c', 'd', 'z', '\\', 'a', 'e', 'k', 'l', 'r', 'u', 'w'].includes(e.key.toLowerCase())) {
+        return true; // 让 xterm 处理，阻止浏览器默认行为
+      }
+      return true; // 所有键都转给 xterm
+    });
+
+    // 输入 handler：通过 ref 读取当前的连接类型
     const inputDisposable = terminal.onData((data) => {
       if (!ptyIdRef.current) return;
       if (activeSshConfigRef.current) {
         void invoke("write_ssh_pty_input", { id: ptyIdRef.current, data }).catch((e) => {
           console.error("write_ssh_pty_input failed", e);
+        });
+      } else if (telnetConfigRef.current) {
+        void invoke("write_telnet_pty_input", { id: ptyIdRef.current, data }).catch((e) => {
+          console.error("write_telnet_pty_input failed", e);
         });
       } else {
         void invoke("write_pty_input", { id: ptyIdRef.current, data }).catch((e) => {
@@ -107,6 +128,10 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
       if (activeSshConfigRef.current) {
         void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
           console.error("resize_ssh_pty failed", e);
+        });
+      } else if (telnetConfigRef.current) {
+        void invoke("resize_telnet_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
+          console.error("resize_telnet_pty failed", e);
         });
       } else {
         void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
@@ -123,6 +148,10 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
       if (activeSshConfigRef.current) {
         void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
           console.error("resize_ssh_pty on window resize failed", e);
+        });
+      } else if (telnetConfigRef.current) {
+        void invoke("resize_telnet_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
+          console.error("resize_telnet_pty on window resize failed", e);
         });
       } else {
         void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
@@ -142,6 +171,8 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
         ptyIdRef.current = null;
         if (activeSshConfigRef.current) {
           void invoke("close_ssh_pty", { id }).catch(() => {});
+        } else if (telnetConfigRef.current) {
+          void invoke("close_telnet_pty", { id }).catch(() => {});
         } else {
           void invoke("close_pty", { id }).catch(() => {});
         }
@@ -152,10 +183,8 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
     };
   }, []); // 空依赖：xterm 只初始化一次
 
-  // ─── Effect 2：管理连接生命周期（依赖 activeSshConfig）────────────────────
+  // ─── Effect 2：管理连接生命周期（依赖 activeSshConfig / telnetConfig）──────
   useEffect(() => {
-    // xterm 可能还未初始化（Effect 1 尚未运行完）
-    // 用 setTimeout 0 确保在 Effect 1 之后执行
     let disposed = false;
     let unlistenOutput: UnlistenFn | null = null;
     let unlistenExit: UnlistenFn | null = null;
@@ -205,6 +234,18 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
             rows,
           });
           term.current?.writeln("\r\n[Connected]");
+        } else if (telnetConfig) {
+          term.current?.writeln(
+            `Connecting to telnet://${telnetConfig.host}:${telnetConfig.port}...`
+          );
+          await invoke<string>("start_telnet_pty", {
+            id: newId,
+            host: telnetConfig.host,
+            port: telnetConfig.port,
+            cols,
+            rows,
+          });
+          term.current?.writeln("\r\n[Connected]");
         } else {
           term.current?.writeln("Starting local shell PTY...");
           await invoke<string>("start_pty", { id: newId, cols, rows });
@@ -229,18 +270,21 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
       disposed = true;
       unlistenOutput?.();
       unlistenExit?.();
-      // 关闭当前 PTY 连接（activeSshConfig 变化时触发，用于关闭旧连接）
+      // 关闭当前连接
       if (ptyIdRef.current) {
         const id = ptyIdRef.current;
         ptyIdRef.current = null;
         if (activeSshConfig) {
           void invoke("close_ssh_pty", { id }).catch(() => {});
+        } else if (telnetConfig) {
+          void invoke("close_telnet_pty", { id }).catch(() => {});
         } else {
           void invoke("close_pty", { id }).catch(() => {});
         }
       }
     };
-  }, [activeSshConfig]); // activeSshConfig 变化时重新连接（密码重试、新连接）
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSshConfig, telnetConfig]); // 连接变化时重新连接
 
   // ─── 动态应用 settings 变化（不重启 PTY）─────────────────────────────────
   useEffect(() => {
@@ -256,12 +300,13 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
     fitAddon.current?.fit();
   }, [settings]);
 
-  // ─── 激活时调整大小──────────────────────────────────────────────────────
+  // ─── 激活时调整大小并聚焦────────────────────────────────────────────────
   useEffect(() => {
     if (isActive) {
       setTimeout(() => {
         fitAddon.current?.fit();
-      }, 0);
+        term.current?.focus();
+      }, 50);
     }
   }, [isActive]);
 
