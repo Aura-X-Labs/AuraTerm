@@ -55,6 +55,12 @@ export const TerminalComponent = forwardRef<TerminalHandle, TerminalComponentPro
 function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
+  // 始终保持最新的 settings，供 Effect 1 内的事件处理器使用（避免闭包读取旧值）
+  const settingsRef = useRef<AppSettings>(effectiveSettings);
+  useEffect(() => {
+    settingsRef.current = effectiveSettings;
+  }, [settings]);
+
   const terminalRef = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
@@ -123,6 +129,89 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     term.current = terminal;
     fitAddon.current = fit;
 
+    // ─── 自定义键盘事件处理：Ctrl+C / Ctrl+V ─────────────────────────────────
+    terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+      if (event.type !== "keydown") return true;
+
+      // Ctrl+C：有选中文本时消费事件（不发送 ^C 给 PTY），复制由 onSelectionChange 已处理
+      if (event.ctrlKey && event.key === "c" && settingsRef.current.ctrlCCopy) {
+        const selection = terminal.getSelection();
+        if (selection) {
+          // 选中内容已经由 onSelectionChange 写入剪贴板，直接消费按键即可
+          return false;
+        }
+      }
+
+      // Ctrl+V：从剪贴板粘贴到 PTY
+      if (event.ctrlKey && event.key === "v" && settingsRef.current.ctrlVPaste) {
+        void navigator.clipboard.readText().then((text) => {
+          if (!text || !ptyIdRef.current) return;
+          const id = ptyIdRef.current;
+          if (activeSshConfigRef.current) {
+            void invoke("write_ssh_pty_input", { id, data: text }).catch((e) => {
+              console.error("write_ssh_pty_input paste failed", e);
+            });
+          } else {
+            void invoke("write_pty_input", { id, data: text }).catch((e) => {
+              console.error("write_pty_input paste failed", e);
+            });
+          }
+        }).catch((e) => {
+          console.error("clipboard read failed", e);
+        });
+        return false;
+      }
+
+      return true;
+    });
+
+    // ─── 选中即复制：每当 selection 变化时，若有内容则写入剪贴板 ──────────────
+    const selectionDisposable = terminal.onSelectionChange(() => {
+      if (!settingsRef.current.ctrlCCopy) return;
+      const selection = terminal.getSelection();
+      if (!selection) return;
+      void navigator.clipboard.writeText(selection).catch((e) => {
+        console.error("clipboard write (selection) failed", e);
+      });
+    });
+
+    // ─── 鼠标中键粘贴 ──────────────────────────────────────────────────────
+    const terminalEl = terminalRef.current;
+
+    // mousedown 阶段就 preventDefault，阻止系统/浏览器弹出粘贴菜单
+    const handleMiddleMouseDown = (event: MouseEvent) => {
+      if (event.button !== 1) return;
+      if (!settingsRef.current.middleClickPaste) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    // auxclick 在中键 release 后触发，此时执行实际粘贴
+    const handleMiddleClick = (event: MouseEvent) => {
+      if (event.button !== 1) return;
+      if (!settingsRef.current.middleClickPaste) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void navigator.clipboard.readText().then((text) => {
+        if (!text || !ptyIdRef.current) return;
+        const id = ptyIdRef.current;
+        if (activeSshConfigRef.current) {
+          void invoke("write_ssh_pty_input", { id, data: text }).catch((e) => {
+            console.error("write_ssh_pty_input middle paste failed", e);
+          });
+        } else {
+          void invoke("write_pty_input", { id, data: text }).catch((e) => {
+            console.error("write_pty_input middle paste failed", e);
+          });
+        }
+      }).catch((e) => {
+        console.error("clipboard read (middle click) failed", e);
+      });
+    };
+
+    terminalEl.addEventListener("mousedown", handleMiddleMouseDown);
+    terminalEl.addEventListener("auxclick", handleMiddleClick);
+
     // 输入 handler：通过 ref 读取当前的 activeSshConfig
     const inputDisposable = terminal.onData((data) => {
       if (!ptyIdRef.current) return;
@@ -170,6 +259,9 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
 
     return () => {
       window.removeEventListener("resize", handleWindowResize);
+      terminalEl.removeEventListener("mousedown", handleMiddleMouseDown);
+      terminalEl.removeEventListener("auxclick", handleMiddleClick);
+      selectionDisposable.dispose();
       inputDisposable.dispose();
       resizeDisposable.dispose();
       // 关闭 PTY（如果 Effect 2 cleanup 已经清空了 ptyIdRef，这里不会重复关闭）

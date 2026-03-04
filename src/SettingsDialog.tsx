@@ -76,6 +76,50 @@ export function SettingsDialog({ initial, onSave, onCancel }: SettingsDialogProp
             </label>
           </section>
 
+          {/* ── Keyboard & Mouse ── */}
+          <section className="settings-section">
+            <h3>Keyboard &amp; Mouse</h3>
+
+            <label className="settings-field settings-field--toggle">
+              <span>
+                <strong>Copy on select</strong>
+                <small>选中文本后自动复制到剪贴板；Ctrl+C 有选中时消费按键（不发 ^C 给 PTY）</small>
+              </span>
+              <input
+                type="checkbox"
+                className="settings-toggle"
+                checked={settings.ctrlCCopy}
+                onChange={(e) => update("ctrlCCopy", e.target.checked)}
+              />
+            </label>
+
+            <label className="settings-field settings-field--toggle">
+              <span>
+                <strong>Ctrl+V</strong> Paste from clipboard
+                <small>Ctrl+V 将剪贴板内容粘贴到终端</small>
+              </span>
+              <input
+                type="checkbox"
+                className="settings-toggle"
+                checked={settings.ctrlVPaste}
+                onChange={(e) => update("ctrlVPaste", e.target.checked)}
+              />
+            </label>
+
+            <label className="settings-field settings-field--toggle">
+              <span>
+                <strong>Middle-click</strong> Paste
+                <small>鼠标中键点击将剪贴板内容粘贴到终端</small>
+              </span>
+              <input
+                type="checkbox"
+                className="settings-toggle"
+                checked={settings.middleClickPaste}
+                onChange={(e) => update("middleClickPaste", e.target.checked)}
+              />
+            </label>
+          </section>
+
           {/* ── Theme ── */}
           <section className="settings-section">
             <h3>Theme</h3>

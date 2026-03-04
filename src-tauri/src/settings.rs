@@ -27,7 +27,18 @@ pub struct Settings {
     pub scrollback: u32,
     pub shell_path: Option<String>,
     pub theme: TerminalTheme,
+    /// Ctrl+C copies selection to clipboard when text is selected
+    #[serde(default = "default_true")]
+    pub ctrl_c_copy: bool,
+    /// Ctrl+V pastes clipboard content into the terminal
+    #[serde(default = "default_true")]
+    pub ctrl_v_paste: bool,
+    /// Middle mouse button pastes clipboard content into the terminal
+    #[serde(default = "default_true")]
+    pub middle_click_paste: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -37,6 +48,9 @@ impl Default for Settings {
             scrollback: 1000,
             shell_path: None,
             theme: TerminalTheme::default(),
+            ctrl_c_copy: true,
+            ctrl_v_paste: true,
+            middle_click_paste: true,
         }
     }
 }

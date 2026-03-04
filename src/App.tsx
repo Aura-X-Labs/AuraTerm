@@ -49,7 +49,7 @@ function App() {
 
   useEffect(() => {
     invoke<AppSettings>("get_settings")
-      .then(setSettings)
+      .then((loaded) => setSettings({ ...DEFAULT_SETTINGS, ...loaded }))
       .catch(() => setSettings(DEFAULT_SETTINGS));
   }, []);
 
