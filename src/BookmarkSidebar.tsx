@@ -5,6 +5,7 @@ import type { SshConfig } from "./ConnectDialog";
 export interface SavedConnection {
   id: string;
   name: string;
+  protocol?: "ssh" | "telnet";
   host: string;
   port: number;
   user: string;
@@ -137,16 +138,22 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
         </div>
       ) : (
         <ul className="bookmark-list">
-          {connections.map((conn) => (
-            <li
-              key={conn.id}
-              className="bookmark-item"
-              onDoubleClick={() => handleDoubleClick(conn)}
-              onContextMenu={(e) => handleContextMenu(e, conn)}
-              title={`${conn.user}@${conn.host}:${conn.port}\n双击连接`}
-            >
-              <span className="bookmark-icon">🖥</span>
-              <div className="bookmark-info">
+          {connections.map((conn) => {
+            const isTelnet = conn.protocol === "telnet";
+            const subtitle = isTelnet
+              ? `telnet://${conn.host}:${conn.port}`
+              : `${conn.user}@${conn.host}:${conn.port}`;
+            const icon = isTelnet ? "🌐" : "🖥";
+            return (
+              <li
+                key={conn.id}
+                className="bookmark-item"
+                onDoubleClick={() => handleDoubleClick(conn)}
+                onContextMenu={(e) => handleContextMenu(e, conn)}
+                title={`${subtitle}\n双击连接`}
+              >
+                <span className="bookmark-icon">{icon}</span>
+                <div className="bookmark-info">
                 {editingId === conn.id ? (
                   <input
                     className="bookmark-name-input"
@@ -164,11 +171,12 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
                   <span className="bookmark-name">{conn.name}</span>
                 )}
                 <span className="bookmark-host">
-                  {conn.user}@{conn.host}:{conn.port}
+                  {isTelnet ? `${conn.host}:${conn.port}` : `${conn.user}@${conn.host}:${conn.port}`}
                 </span>
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
 

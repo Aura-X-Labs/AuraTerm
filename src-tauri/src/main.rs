@@ -182,6 +182,26 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+                let about_item = MenuItem::with_id(app, "about", "About AuraTerm", true, None::<&str>)?;
+                let help_menu = SubmenuBuilder::new(app, "Help")
+                    .item(&about_item)
+                    .build()?;
+                let menu = MenuBuilder::new(app)
+                    .item(&help_menu)
+                    .build()?;
+                app.set_menu(menu)?;
+            }
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "about" {
+                let _ = app.emit("show-about", ());
+            }
+        })
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             start_pty,

@@ -10,8 +10,15 @@ export interface SshConfig {
 }
 
 export interface ConnectResult {
-  config: SshConfig;
+  protocol: "ssh" | "telnet";
+  sshConfig?: SshConfig;
+  telnetConfig?: TelnetConfig;
   saveAs?: string; // 非 undefined 表示需要保存，值为连接名称
+}
+
+export interface TelnetConfig {
+  host: string;
+  port: number;
 }
 
 interface ConnectDialogProps {
@@ -20,6 +27,7 @@ interface ConnectDialogProps {
 }
 
 export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
+  const [protocol, setProtocol] = useState<"ssh" | "telnet">("ssh");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("22");
   const [user, setUser] = useState("");
@@ -28,13 +36,20 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
   const [authType, setAuthType] = useState<"password" | "key">("password");
   const [saveConnection, setSaveConnection] = useState(true);
   const [connectionName, setConnectionName] = useState("");
+  // Telnet 字段
+  const [telnetPort, setTelnetPort] = useState("23");
+
+  const isSsh = protocol === "ssh";
 
   // 当 host 或 user 变化时，自动填充默认连接名
-  const defaultName = user && host ? `${user}@${host}` : "";
+  const defaultName = isSsh && user && host
+    ? `${user}@${host}`
+    : host ? `telnet://${host}:${telnetPort}` : "";
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (!host || !user) return;
+    if (!host) return;
+    if (isSsh && !user) return;
 
     const config: SshConfig = {
       host,
@@ -45,7 +60,9 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
     };
 
     onConnect({
-      config,
+      protocol: isSsh ? "ssh" : "telnet",
+      sshConfig: isSsh ? config : undefined,
+      telnetConfig: protocol === "telnet" ? { host, port: parseInt(telnetPort, 10) || 23 } : undefined,
       saveAs: saveConnection ? (connectionName.trim() || defaultName) : undefined,
     });
   };
@@ -53,7 +70,28 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
   return (
     <div className="dialog-overlay">
       <div className="dialog-content">
-        <h2 className="dialog-title">Connect to SSH</h2>
+        <h2 className="dialog-title">New Connection</h2>
+        <div className="protocol-selector">
+          <label className={isSsh ? "active" : ""}>
+            <input
+              type="radio"
+              name="protocol"
+              checked={isSsh}
+              onChange={() => setProtocol("ssh")}
+            />
+            SSH
+          </label>
+          <label className={!isSsh ? "active" : ""}>
+            <input
+              type="radio"
+              name="protocol"
+              checked={!isSsh}
+              onChange={() => setProtocol("telnet")}
+            />
+            Telnet
+          </label>
+        </div>
+
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label>Host:</label>
@@ -66,61 +104,81 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
               required
             />
           </div>
-          <div className="form-group">
-            <label>Port:</label>
-            <input
-              type="number"
-              value={port}
-              onChange={(e) => setPort(e.target.value)}
-              required
-            />
-          </div>
-          <div className="form-group">
-            <label>User:</label>
-            <input
-              type="text"
-              value={user}
-              onChange={(e) => setUser(e.target.value)}
-              required
-            />
-          </div>
-          <div className="form-group auth-type-group">
-            <label>Auth Type:</label>
-            <select
-              value={authType}
-              onChange={(e) => setAuthType(e.target.value as "password" | "key")}
-            >
-              <option value="password">Password</option>
-              <option value="key">Private Key</option>
-            </select>
-          </div>
 
-          {authType === "password" ? (
-            <div className="form-group">
-              <label>Password:</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
+          {isSsh ? (
+            <>
+              <div className="form-group">
+                <label>Port:</label>
+                <input
+                  type="number"
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="form-group">
+                <label>User:</label>
+                <input
+                  type="text"
+                  value={user}
+                  onChange={(e) => setUser(e.target.value)}
+                  required
+                />
+              </div>
+            </>
           ) : (
             <div className="form-group">
-              <label>Private Key (PEM):</label>
-              <textarea
-                value={privateKey}
-                onChange={(e) => setPrivateKey(e.target.value)}
-                placeholder="-----BEGIN RSA PRIVATE KEY-----..."
-                rows={4}
-              />
+              <label>Port:</label>
               <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Key Passphrase (optional)"
-                style={{ marginTop: "8px" }}
+                type="number"
+                value={telnetPort}
+                onChange={(e) => setTelnetPort(e.target.value)}
+                required
               />
             </div>
+          )}
+
+          {isSsh && (
+            <>
+              <div className="form-group auth-type-group">
+                <label>Auth Type:</label>
+                <select
+                  value={authType}
+                  onChange={(e) => setAuthType(e.target.value as "password" | "key")}
+                >
+                  <option value="password">Password</option>
+                  <option value="key">Private Key</option>
+                </select>
+              </div>
+
+              {authType === "password" ? (
+                <div className="form-group">
+                  <label>Password:</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+              ) : (
+                <div className="form-group">
+                  <label>Private Key (PEM):</label>
+                  <textarea
+                    value={privateKey}
+                    onChange={(e) => setPrivateKey(e.target.value)}
+                    placeholder="-----BEGIN RSA PRIVATE KEY-----..."
+                    rows={4}
+                  />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Key Passphrase (optional)"
+                    style={{ marginTop: "8px" }}
+                  />
+                </div>
+              )}
+            </>
           )}
 
           {/* 保存连接选项 */}

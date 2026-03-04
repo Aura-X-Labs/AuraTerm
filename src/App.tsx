@@ -1,4 +1,5 @@
 import { useState, useEffect, type MouseEvent } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
@@ -6,6 +7,7 @@ import { TerminalComponent } from "./TerminalComponent";
 import { ConnectDialog, type SshConfig, type ConnectResult } from "./ConnectDialog";
 import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar";
 import { SettingsDialog } from "./SettingsDialog";
+import { AboutDialog } from "./AboutDialog";
 import { type AppSettings, DEFAULT_SETTINGS } from "./settings";
 import "./App.css";
 
@@ -24,6 +26,7 @@ function App() {
   const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarRefreshToken, setSidebarRefreshToken] = useState(0);
 
@@ -43,6 +46,11 @@ function App() {
     invoke<AppSettings>("get_settings")
       .then(setSettings)
       .catch(() => setSettings(DEFAULT_SETTINGS));
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen("show-about", () => setShowAbout(true));
+    return () => { unlisten.then(f => f()); };
   }, []);
 
   const handleSaveSettings = async (newSettings: AppSettings) => {
@@ -122,12 +130,20 @@ function App() {
    */
   const handleConnectResult = async (result: ConnectResult) => {
     const newId = `tab-${nextTabId++}`;
-    const { config, saveAs } = result;
+    const { protocol, sshConfig, telnetConfig, saveAs } = result;
 
-    setTabs((prev) => [
-      ...prev,
-      { id: newId, title: `${config.user}@${config.host}`, sshConfig: config },
-    ]);
+    if (protocol === "ssh" && sshConfig) {
+      setTabs((prev) => [
+        ...prev,
+        { id: newId, title: `${sshConfig.user}@${sshConfig.host}`, sshConfig: sshConfig },
+      ]);
+    } else if (protocol === "telnet" && telnetConfig) {
+      setTabs((prev) => [
+        ...prev,
+        { id: newId, title: `telnet://${telnetConfig.host}:${telnetConfig.port}` },
+      ]);
+    }
+    
     setActiveTabId(newId);
     setShowConnectDialog(false);
 
@@ -135,12 +151,13 @@ function App() {
       const conn: SavedConnection = {
         id: crypto.randomUUID(),
         name: saveAs,
-        host: config.host,
-        port: config.port,
-        user: config.user,
-        authType: config.privateKey ? "key" : "password",
-        password: config.password,
-        privateKey: config.privateKey,
+        protocol: protocol,
+        host: protocol === "ssh" ? sshConfig!.host : telnetConfig!.host,
+        port: protocol === "ssh" ? sshConfig!.port : telnetConfig!.port,
+        user: protocol === "ssh" ? sshConfig!.user : "",
+        authType: protocol === "ssh" ? (sshConfig!.privateKey ? "key" : "password") : "password",
+        password: protocol === "ssh" ? sshConfig!.password : "",
+        privateKey: protocol === "ssh" ? sshConfig!.privateKey : undefined,
         createdAt: Date.now(),
       };
       try {
@@ -230,6 +247,14 @@ function App() {
       </div>
 
       <div className="tab-bar">
+        <button
+          className={`tab-new-btn bookmark-toggle-btn ${sidebarOpen ? 'active' : ''}`}
+          onClick={() => setSidebarOpen(v => !v)}
+          title="快捷连接"
+          style={{ marginRight: '4px' }}
+        >
+          🔖
+        </button>
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -248,22 +273,6 @@ function App() {
         ))}
         <button className="tab-new-btn" onClick={handleNewTab} title="New Local Shell">
           +
-        </button>
-        <button
-          className="tab-new-btn"
-          onClick={() => setShowConnectDialog(true)}
-          title="New SSH Connection"
-          style={{ marginLeft: '4px' }}
-        >
-          &#x1F5A7;
-        </button>
-        <button
-          className={`tab-new-btn bookmark-toggle-btn ${sidebarOpen ? 'active' : ''}`}
-          onClick={() => setSidebarOpen(v => !v)}
-          title="快捷连接"
-          style={{ marginLeft: '4px' }}
-        >
-          🔖
         </button>
         <button
           className="tab-new-btn"
@@ -307,6 +316,10 @@ function App() {
           onSave={handleSaveSettings}
           onCancel={() => setShowSettings(false)}
         />
+      )}
+
+      {showAbout && (
+        <AboutDialog onClose={() => setShowAbout(false)} />
       )}
 
       {showConnectDialog && (
