@@ -1,9 +1,9 @@
-import { useState, useEffect, type MouseEvent } from "react";
+import { useState, useEffect, useRef, type MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
-import { TerminalComponent } from "./TerminalComponent";
+import { TerminalComponent, type TerminalHandle } from "./TerminalComponent";
 import { ConnectDialog, type SshConfig, type ConnectResult } from "./ConnectDialog";
 import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar";
 import { SettingsDialog } from "./SettingsDialog";
@@ -15,6 +15,7 @@ interface Tab {
   id: string;
   title: string;
   sshConfig?: SshConfig;
+  logPath?: string;
 }
 
 let nextTabId = 1;
@@ -29,6 +30,10 @@ function App() {
   const [showAbout, setShowAbout] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarRefreshToken, setSidebarRefreshToken] = useState(0);
+  const [showNewTabMenu, setShowNewTabMenu] = useState(false);
+
+  /** Map from tab id → TerminalHandle (populated by callback refs in JSX) */
+  const termRefs = useRef<Map<string, TerminalHandle>>(new Map());
 
   useEffect(() => {
     async function determineOs() {
@@ -135,12 +140,12 @@ function App() {
     if (protocol === "ssh" && sshConfig) {
       setTabs((prev) => [
         ...prev,
-        { id: newId, title: `${sshConfig.user}@${sshConfig.host}`, sshConfig: sshConfig },
+        { id: newId, title: `${sshConfig.user}@${sshConfig.host}`, sshConfig: sshConfig, logPath: result.logPath },
       ]);
     } else if (protocol === "telnet" && telnetConfig) {
       setTabs((prev) => [
         ...prev,
-        { id: newId, title: `telnet://${telnetConfig.host}:${telnetConfig.port}` },
+        { id: newId, title: `telnet://${telnetConfig.host}:${telnetConfig.port}`, logPath: result.logPath },
       ]);
     }
     
@@ -271,7 +276,7 @@ function App() {
             </button>
           </div>
         ))}
-        <button className="tab-new-btn" onClick={handleNewTab} title="New Local Shell">
+        <button className="tab-new-btn" onClick={() => setShowNewTabMenu(true)} title="New Tab">
           +
         </button>
         <button
@@ -301,8 +306,13 @@ function App() {
             tabs.map((tab) => (
               <TerminalComponent
                 key={tab.id}
+                ref={(el) => {
+                  if (el) termRefs.current.set(tab.id, el);
+                  else termRefs.current.delete(tab.id);
+                }}
                 isActive={activeTabId === tab.id}
                 sshConfig={tab.sshConfig}
+                logPath={tab.logPath}
                 settings={settings}
               />
             ))
@@ -320,6 +330,32 @@ function App() {
 
       {showAbout && (
         <AboutDialog onClose={() => setShowAbout(false)} />
+      )}
+
+      {showNewTabMenu && (
+        <div className="newtab-overlay" onClick={() => setShowNewTabMenu(false)}>
+          <div className="newtab-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="newtab-dialog-title">New Tab</div>
+            <div className="newtab-options">
+              <button
+                className="newtab-option-btn"
+                onClick={() => { setShowNewTabMenu(false); handleNewTab(); }}
+              >
+                <span className="newtab-option-icon">🖥</span>
+                <span className="newtab-option-label">Local Shell</span>
+                <span className="newtab-option-desc">Open a local terminal session</span>
+              </button>
+              <button
+                className="newtab-option-btn"
+                onClick={() => { setShowNewTabMenu(false); setShowConnectDialog(true); }}
+              >
+                <span className="newtab-option-icon">🔗</span>
+                <span className="newtab-option-label">SSH / Telnet</span>
+                <span className="newtab-option-desc">Connect to a remote host</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {showConnectDialog && (

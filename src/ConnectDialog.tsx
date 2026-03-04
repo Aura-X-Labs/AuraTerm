@@ -14,6 +14,7 @@ export interface ConnectResult {
   sshConfig?: SshConfig;
   telnetConfig?: TelnetConfig;
   saveAs?: string; // 非 undefined 表示需要保存，值为连接名称
+  logPath?: string; // 非 undefined 表示开启持续写日志
 }
 
 export interface TelnetConfig {
@@ -38,6 +39,9 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
   const [connectionName, setConnectionName] = useState("");
   // Telnet 字段
   const [telnetPort, setTelnetPort] = useState("23");
+  // 日志字段
+  const [enableLog, setEnableLog] = useState(true);
+  const [logFilePath, setLogFilePath] = useState("");
 
   const isSsh = protocol === "ssh";
 
@@ -45,6 +49,12 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
   const defaultName = isSsh && user && host
     ? `${user}@${host}`
     : host ? `telnet://${host}:${telnetPort}` : "";
+
+  // 根据 defaultName 计算日志默认基础路径（无时间戳和后缀，连接时自动拼上）
+  const safeDefaultName = defaultName
+    .replace(/[^a-zA-Z0-9\-_@.]/g, "_")
+    || "session";
+  const defaultLogPath = `~/AuraTerm/logs/${safeDefaultName}`;
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -64,6 +74,7 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
       sshConfig: isSsh ? config : undefined,
       telnetConfig: protocol === "telnet" ? { host, port: parseInt(telnetPort, 10) || 23 } : undefined,
       saveAs: saveConnection ? (connectionName.trim() || defaultName) : undefined,
+      logPath: enableLog ? (logFilePath.trim() || defaultLogPath) : undefined,
     });
   };
 
@@ -198,6 +209,27 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
                 value={connectionName}
                 onChange={(e) => setConnectionName(e.target.value)}
                 placeholder={defaultName || "连接名称（可选）"}
+              />
+            )}
+          </div>
+
+          {/* 日志选项 */}
+          <div className="form-group save-connection-group">
+            <label className="save-connection-label">
+              <input
+                type="checkbox"
+                checked={enableLog}
+                onChange={(e) => setEnableLog(e.target.checked)}
+              />
+              <span>保存会话日志</span>
+            </label>
+            {enableLog && (
+              <input
+                type="text"
+                className="save-connection-name"
+                value={logFilePath}
+                onChange={(e) => setLogFilePath(e.target.value)}
+                placeholder={`${defaultLogPath}_YYYYMMDD_HHmmss.log`}
               />
             )}
           </div>

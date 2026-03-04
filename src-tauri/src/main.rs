@@ -175,6 +175,92 @@ fn close_pty(state: State<'_, AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+#[command]
+fn append_to_log(path: String, content: String) -> Result<(), String> {
+    // Expand leading ~/ to the home directory
+    let expanded = if path.starts_with("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(home).join(&path[2..])
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    if let Some(parent) = expanded.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&expanded)
+        .map_err(|e| e.to_string())?;
+    file.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[command]
+fn save_terminal_log(content: String, tab_name: String) -> Result<String, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let logs_dir = std::path::PathBuf::from(&home)
+        .join("AuraTerm")
+        .join("logs");
+    std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+
+    // Sanitize the tab name so it is safe for use in a filename
+    let safe_name: String = tab_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '@' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    // Human-readable timestamp (UTC seconds formatted as YYYYMMDD_HHMMSS)
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    // Rough Gregorian calendar calculation for YYYYMMDD
+    let (year, month, day) = {
+        let mut y = 1970u64;
+        let mut d = days;
+        loop {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            let days_in_year = if leap { 366 } else { 365 };
+            if d < days_in_year {
+                break;
+            }
+            d -= days_in_year;
+            y += 1;
+        }
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut mo = 1u64;
+        let mut rem = d;
+        for &mdays in &month_days {
+            if rem < mdays {
+                break;
+            }
+            rem -= mdays;
+            mo += 1;
+        }
+        (y, mo, rem + 1)
+    };
+    let ts = format!("{:04}{:02}{:02}_{:02}{:02}{:02}", year, month, day, h, m, s);
+
+    let filename = format!("{}_{}.log", ts, safe_name);
+    let path = logs_dir.join(&filename);
+    std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
 fn main() {
     let app_state = AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -218,6 +304,8 @@ fn main() {
             connections::save_connection,
             connections::delete_connection,
             connections::touch_connection,
+            save_terminal_log,
+            append_to_log,
         ])
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())

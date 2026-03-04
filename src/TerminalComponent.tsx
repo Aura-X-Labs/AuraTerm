@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, forwardRef, useImperativeHandle, type FormEvent } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { invoke } from "@tauri-apps/api/core";
@@ -7,6 +7,22 @@ import type { SshConfig } from "./ConnectDialog";
 import type { AppSettings } from "./settings";
 import { DEFAULT_SETTINGS } from "./settings";
 import "xterm/css/xterm.css";
+
+// ─── Public handle exposed via ref ─────────────────────────────────────────
+export interface TerminalHandle {
+  /** Strip ANSI codes and save buffered output to ~/AuraTerm/logs/. Returns the saved path. */
+  saveLog: (tabTitle: string) => Promise<string>;
+}
+
+/** Removes ANSI / VT escape sequences from a string. */
+function stripAnsi(str: string): string {
+  return str
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "") // OSC sequences
+    .replace(/\x1b\[[0-9;?]*[A-Za-z~]/g, "")            // CSI sequences
+    .replace(/\x1b[^[\]]/g, "")                          // other ESC sequences
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
 
 interface PtyOutputEvent {
   id: string;
@@ -21,6 +37,7 @@ interface PtyExitEvent {
 interface TerminalComponentProps {
   isActive: boolean;
   sshConfig?: SshConfig;
+  logPath?: string;
   settings?: AppSettings;
 }
 
@@ -34,13 +51,32 @@ function isAuthError(errStr: string): boolean {
   );
 }
 
-export function TerminalComponent({ isActive, sshConfig, settings }: TerminalComponentProps) {
+export const TerminalComponent = forwardRef<TerminalHandle, TerminalComponentProps>(
+function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
   const terminalRef = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
+  /** Accumulates raw PTY output for the current session. */
+  const logBufferRef = useRef<string>("");
+  /** Base log path template provided by the caller (no timestamp, no extension). */
+  const logPathRef = useRef<string | undefined>(logPath);
+  useEffect(() => { logPathRef.current = logPath; }, [logPath]);
+  /** Actual log file path for the current session (base + timestamp + .log). */
+  const actualLogPathRef = useRef<string | undefined>(undefined);
+
+  useImperativeHandle(ref, () => ({
+    saveLog: async (tabTitle: string) => {
+      const plain = stripAnsi(logBufferRef.current);
+      const path = await invoke<string>("save_terminal_log", {
+        content: plain,
+        tabName: tabTitle,
+      });
+      return path;
+    },
+  }));
 
   // 内部活跃的 SSH 配置（密码重试时会更新）
   const [activeSshConfig, setActiveSshConfig] = useState<SshConfig | undefined>(sshConfig);
@@ -167,9 +203,29 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
         if (disposed || !term.current) return;
       }
 
+      // Reset log buffer and derive a fresh timestamped log path for this session
+      logBufferRef.current = "";
+      if (logPathRef.current) {
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+        actualLogPathRef.current = `${logPathRef.current}_${ts}.log`;
+      } else {
+        actualLogPathRef.current = undefined;
+      }
+
       unlistenOutput = await listen<PtyOutputEvent>("pty-output", (event) => {
         if (event.payload.id === ptyIdRef.current) {
           term.current?.write(event.payload.data);
+          logBufferRef.current += event.payload.data;
+          // 持续追加写入日志文件（过滤 ANSI 后）
+          if (actualLogPathRef.current) {
+            const plain = stripAnsi(event.payload.data);
+            void invoke("append_to_log", {
+              path: actualLogPathRef.current,
+              content: plain,
+            }).catch((e) => console.error("append_to_log failed", e));
+          }
         }
       });
       unlistenExit = await listen<PtyExitEvent>("pty-exit", (event) => {
@@ -242,6 +298,7 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
     };
   }, [activeSshConfig]); // activeSshConfig 变化时重新连接（密码重试、新连接）
 
+
   // ─── 动态应用 settings 变化（不重启 PTY）─────────────────────────────────
   useEffect(() => {
     if (!term.current || !settings) return;
@@ -288,7 +345,7 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
       <div ref={terminalRef} style={{ flex: 1, minHeight: 0 }} />
 
       {showRetryOverlay && activeSshConfig && (
-        <div className="password-retry-overlay">
+        <div className="password-retry-overlay">  
           <div className="password-retry-dialog">
             <div className="password-retry-icon">🔐</div>
             <h3 className="password-retry-title">认证失败</h3>
@@ -323,4 +380,4 @@ export function TerminalComponent({ isActive, sshConfig, settings }: TerminalCom
       )}
     </div>
   );
-}
+});
