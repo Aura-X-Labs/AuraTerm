@@ -268,18 +268,18 @@ fn main() {
     };
 
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
-                let about_item = MenuItem::with_id(app, "about", "About AuraTerm", true, None::<&str>)?;
-                let help_menu = SubmenuBuilder::new(app, "Help")
+                let about_item = MenuItem::with_id(_app, "about", "About AuraTerm", true, None::<&str>)?;
+                let help_menu = SubmenuBuilder::new(_app, "Help")
                     .item(&about_item)
                     .build()?;
-                let menu = MenuBuilder::new(app)
+                let menu = MenuBuilder::new(_app)
                     .item(&help_menu)
                     .build()?;
-                app.set_menu(menu)?;
+                _app.set_menu(menu)?;
             }
             Ok(())
         })

@@ -1,37 +1,21 @@
 {
   "product": "AuraTerm",
-  "latest": "0.1.5.0305",
+  "latest": "0.1.3.0305",
   "releases": [
     {
-      "version": "0.1.5.0305",
-      "filename": "AuraTerm-0.1.5.0305-arm64.dmg",
-      "platform": "macos-arm64",
+      "version": "0.1.3.0305",
+      "filename": "AuraTerm-0.1.3.0305-x64.exe",
+      "platform": "windows-x64",
       "published_at": "2026-03-05",
-      "sha256": "378feffb243718451cbee1f3fd1240908e6734065eb1f9f1b921f8112b109851",
+      "sha256": "357398e09d9fe2464d3c34d3bb45cb863314728debec1dfd9ec79e8cd4c4c668",
       "notes": "automated release"
     },
     {
-      "version": "0.1.4.0305",
-      "filename": "AuraTerm-0.1.4.0305-arm64.dmg",
-      "platform": "macos-arm64",
+      "version": "0.1.2.0305",
+      "filename": "AuraTerm-0.1.2.0305-x64.exe",
+      "platform": "windows-x64",
       "published_at": "2026-03-05",
-      "sha256": "378feffb243718451cbee1f3fd1240908e6734065eb1f9f1b921f8112b109851",
-      "notes": "automated release"
-    },
-    {
-      "version": "0.1.8.0305",
-      "filename": "AuraTerm-0.1.8.0305-arm64.dmg",
-      "platform": "macos-arm64",
-      "published_at": "2026-03-05",
-      "sha256": "378feffb243718451cbee1f3fd1240908e6734065eb1f9f1b921f8112b109851",
-      "notes": "automated release"
-    },
-    {
-      "version": "0.1.4.0305",
-      "filename": "AuraTerm-0.1.4.0305-arm64.dmg",
-      "platform": "macos-arm64",
-      "published_at": "2026-03-05",
-      "sha256": "378feffb243718451cbee1f3fd1240908e6734065eb1f9f1b921f8112b109851",
+      "sha256": "357398e09d9fe2464d3c34d3bb45cb863314728debec1dfd9ec79e8cd4c4c668",
       "notes": "automated release"
     },
     {
