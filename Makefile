@@ -32,9 +32,9 @@ help:
 release:
 	@echo "Processing artifacts..."
 	@mkdir -p releases
-	$(eval VERSION_BASE := $(shell jq -r '.version' src-tauri/tauri.conf.json 2>/dev/null || grep "version" src-tauri/tauri.conf.json | head -1 | awk -F'\"' '{print $$4}' | cut -d. -f1,2))
+	$(eval VERSION_BASE := $(shell jq -r '.version' src-tauri/tauri.conf.json 2>/dev/null | cut -d. -f1,2 || grep "version" src-tauri/tauri.conf.json | head -1 | awk -F'\"' '{print $$4}' | cut -d. -f1,2))
 	$(eval MMDD := $(shell date +%m%d))
-	$(eval PATCH := $(shell ls releases/AuraTerm-$(VERSION_BASE).*.$(MMDD)-*.dmg 2>/dev/null | sed -E 's/.*-$(VERSION_BASE)\.([0-9]+)\..*/\1/' | sort -n | tail -1 | awk '{print $$1 + 1}'))
+	$(eval PATCH := $(shell ls releases/AuraTerm-$(VERSION_BASE).[0-9]*.$(MMDD)-*.dmg 2>/dev/null | sed -E 's/.*-$(VERSION_BASE)\.([0-9]+)\..*/\1/' | sort -n | tail -1 | awk '{print $$1 + 1}'))
 	$(eval PATCH_VAL := $(if $(PATCH),$(PATCH),0))
 	$(eval FULL_VERSION := $(VERSION_BASE).$(PATCH_VAL).$(MMDD))
 	$(eval ARCH := $(shell uname -m))
