@@ -43,6 +43,39 @@
   border-radius: 50%;
   padding: 0;
   cursor: pointer;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: filter 0.15s;
+}
+
+.titlebar-control-btn::after {
+  content: "";
+  font-size: 8px;
+  color: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+  font-weight: bold;
+}
+
+.titlebar-controls:hover .titlebar-control-btn::after {
+  opacity: 1;
+}
+
+.titlebar-control-close::after {
+  content: "×";
+}
+
+.titlebar-control-minimize::after {
+  content: "−";
+  font-size: 10px;
+}
+
+.titlebar-control-maximize::after {
+  content: "+";
+  font-size: 9px;
 }
 
 .titlebar-control-close {
@@ -55,6 +88,11 @@
 
 .titlebar-control-maximize {
   background: #28c840;
+}
+
+/* ── Blur state: Gray out buttons when window is not focused ───── */
+.app-container:not(:focus-within) .titlebar-control-btn {
+  background: #4a4a4a !important;
 }
 
 .titlebar-control-btn:hover {
