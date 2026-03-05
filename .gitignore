@@ -31,3 +31,6 @@ src-tauri/gen
 *.log
 
 git.diff
+
+*.dmg
+*.exe
