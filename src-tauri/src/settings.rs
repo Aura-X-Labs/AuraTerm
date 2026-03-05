@@ -21,6 +21,14 @@ impl Default for TerminalTheme {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QuickButton {
+    pub id: String,
+    pub label: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub font_size: u8,
     pub font_family: String,
@@ -36,6 +44,9 @@ pub struct Settings {
     /// Middle mouse button pastes clipboard content into the terminal
     #[serde(default = "default_true")]
     pub middle_click_paste: bool,
+    /// Quick-action buttons shown below the terminal
+    #[serde(default)]
+    pub quick_buttons: Vec<QuickButton>,
 }
 
 fn default_true() -> bool { true }
@@ -51,6 +62,7 @@ impl Default for Settings {
             ctrl_c_copy: true,
             ctrl_v_paste: true,
             middle_click_paste: true,
+            quick_buttons: vec![],
         }
     }
 }

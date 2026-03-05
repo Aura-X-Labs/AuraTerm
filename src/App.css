@@ -197,6 +197,14 @@
   min-height: 0;
 }
 
+.terminal-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
 .terminal-container {
   flex: 1;
   background: #000000;
@@ -205,6 +213,374 @@
   position: relative;
   min-width: 0;
 }
+
+/* ── Terminal Input Bar ──────────────────────────────────────────────────── */
+.terminal-input-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #1a1a1a;
+}
+
+/* Resize handle */
+.terminal-input-resize-handle {
+  height: 4px;
+  margin-top: -2px;
+  cursor: ns-resize;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  user-select: none;
+  transition: background 0.2s, height 0.2s;
+  z-index: 10;
+}
+
+.terminal-input-resize-handle:hover,
+.terminal-input-resize-handle:active {
+  background: rgba(0, 120, 212, 0.4);
+  height: 6px;
+}
+
+.terminal-input-resize-grip {
+  width: 40px;
+  height: 2px;
+  border-radius: 1px;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.2s;
+}
+
+.terminal-input-resize-handle:hover .terminal-input-resize-grip,
+.terminal-input-resize-handle:active .terminal-input-resize-grip {
+  background: #0078d4;
+}
+
+/* Collapsed state: kept invisible, only shows on hover */
+.terminal-input-resize-handle.collapsed {
+  height: 4px;
+  margin-top: 0;
+  background: transparent;
+  border-top: none;
+  gap: 8px;
+}
+
+.terminal-input-resize-handle.collapsed:hover {
+  background: rgba(0, 120, 212, 0.4);
+  height: 8px;
+}
+
+.terminal-input-collapsed-hint {
+  font-size: 10px;
+  color: #444;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  pointer-events: none;
+  user-select: none;
+  transition: color 0.2s;
+}
+
+.terminal-input-resize-handle.collapsed:hover .terminal-input-collapsed-hint {
+  color: #6ab0e0;
+}
+
+/* Quick buttons row */
+.quick-buttons-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  padding: 5px 8px 4px;
+  border-bottom: 1px solid #2a2a2a;
+  scrollbar-width: thin;
+  scrollbar-color: #444 transparent;
+  align-items: center;
+  min-height: 32px;
+}
+
+.quick-buttons-bar::-webkit-scrollbar {
+  height: 4px;
+}
+.quick-buttons-bar::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 2px;
+}
+
+.quick-btn {
+  flex-shrink: 0;
+  padding: 2px 10px;
+  height: 22px;
+  background: #2d2d2d;
+  border: 1px solid #444;
+  color: #ccc;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s;
+}
+
+.quick-btn:hover {
+  background: #3a3a3a;
+  color: #fff;
+  border-color: #555;
+}
+
+.quick-btn--edit {
+  background: transparent;
+  border-color: #3a3a3a;
+  color: #666;
+  margin-left: auto;
+}
+
+.quick-btn--edit:hover {
+  color: #aaa;
+  background: #252525;
+  border-color: #555;
+}
+
+/* Textarea + send row */
+.terminal-input-row {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+}
+
+.terminal-input-textarea {
+  flex: 1;
+  resize: none;
+  min-height: 0;
+  background: #111;
+  color: #e0e0e0;
+  border: none;
+  border-right: 1px solid #2a2a2a;
+  padding: 6px 8px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+  caret-color: #fff;
+}
+
+.terminal-input-textarea::placeholder {
+  color: #444;
+}
+
+.terminal-input-textarea:focus {
+  background: #141414;
+}
+
+.terminal-input-send-btn {
+  width: 38px;
+  flex-shrink: 0;
+  background: #1d3a52;
+  border: none;
+  color: #6ab0e0;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.terminal-input-send-btn:hover {
+  background: #0078d4;
+  color: #fff;
+}
+
+/* Quick-button editor dialog */
+.quick-btn-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(2px);
+}
+
+.quick-btn-editor {
+  background: #252525;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  width: 560px;
+  max-width: 92vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
+  color: #e0e0e0;
+}
+
+.quick-btn-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #333;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.quick-btn-editor-close {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.quick-btn-editor-close:hover {
+  color: #fff;
+  background: #3a3a3a;
+}
+
+.quick-btn-editor-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-btn-editor-empty {
+  color: #666;
+  font-size: 13px;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.quick-btn-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quick-btn-editor-order {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quick-btn-editor-order button {
+  background: none;
+  border: 1px solid #3a3a3a;
+  color: #666;
+  font-size: 9px;
+  line-height: 1;
+  padding: 1px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.quick-btn-editor-order button:hover:not(:disabled) {
+  color: #ccc;
+  border-color: #555;
+}
+
+.quick-btn-editor-order button:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.quick-btn-editor-input {
+  background: #1e1e1e;
+  border: 1px solid #424242;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 13px;
+  outline: none;
+}
+
+.quick-btn-editor-input:focus {
+  border-color: #0078d4;
+}
+
+.quick-btn-editor-input--label {
+  width: 110px;
+  flex-shrink: 0;
+}
+
+.quick-btn-editor-input--command {
+  flex: 1;
+}
+
+.quick-btn-editor-delete {
+  background: none;
+  border: 1px solid #3a3a3a;
+  color: #888;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.quick-btn-editor-delete:hover {
+  background: #5a1a1a;
+  color: #f88;
+  border-color: #7a2a2a;
+}
+
+.quick-btn-editor-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid #333;
+}
+
+.quick-btn-editor-add {
+  background: #1e3a1e;
+  border: 1px solid #2a5a2a;
+  color: #7dc97d;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quick-btn-editor-add:hover {
+  background: #2a5a2a;
+  color: #9fe29f;
+}
+
+.quick-btn-editor-cancel {
+  background: #333;
+  border: none;
+  color: #ccc;
+  padding: 5px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quick-btn-editor-cancel:hover {
+  background: #444;
+}
+
+.quick-btn-editor-save {
+  background: #0078d4;
+  border: none;
+  color: #fff;
+  padding: 5px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quick-btn-editor-save:hover {
+  background: #106ebe;
+}
+
 
 /* ── Bookmark Sidebar ──────────────────────────────────── */
 .bookmark-sidebar {
@@ -547,12 +923,6 @@
 }
 
 .settings-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 20px;
-  border-top: 1px solid #444;
-}
   display: flex;
   justify-content: flex-end;
   gap: 8px;

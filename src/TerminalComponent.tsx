@@ -12,6 +12,8 @@ import "xterm/css/xterm.css";
 export interface TerminalHandle {
   /** Strip ANSI codes and save buffered output to ~/AuraTerm/logs/. Returns the saved path. */
   saveLog: (tabTitle: string) => Promise<string>;
+  /** Write raw data to the active PTY (e.g. a command string with trailing \n). */
+  sendData: (text: string) => void;
 }
 
 /** Removes ANSI / VT escape sequences from a string. */
@@ -81,6 +83,20 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
         tabName: tabTitle,
       });
       return path;
+    },
+    sendData: (text: string) => {
+      if (!ptyIdRef.current) return;
+      const id = ptyIdRef.current;
+      const data = text.endsWith("\n") ? text : text + "\n";
+      if (activeSshConfigRef.current) {
+        void invoke("write_ssh_pty_input", { id, data }).catch((e) => {
+          console.error("write_ssh_pty_input sendData failed", e);
+        });
+      } else {
+        void invoke("write_pty_input", { id, data }).catch((e) => {
+          console.error("write_pty_input sendData failed", e);
+        });
+      }
     },
   }));
 

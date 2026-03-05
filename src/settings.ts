@@ -4,6 +4,14 @@ export interface TerminalTheme {
   cursor: string;
 }
 
+export interface QuickButton {
+  id: string;
+  /** 显示名称，为空时展示 command 的前 20 个字符 */
+  label: string;
+  /** 点击后发送到终端的命令，会自动补 \n */
+  command: string;
+}
+
 export interface AppSettings {
   fontSize: number;
   fontFamily: string;
@@ -16,6 +24,8 @@ export interface AppSettings {
   ctrlVPaste: boolean;
   /** 鼠标中键：粘贴剪贴板内容到终端 */
   middleClickPaste: boolean;
+  /** 终端下方快捷按钮列表 */
+  quickButtons: QuickButton[];
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -31,4 +41,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ctrlCCopy: true,
   ctrlVPaste: true,
   middleClickPaste: true,
+  quickButtons: [],
 };

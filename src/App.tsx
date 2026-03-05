@@ -8,7 +8,8 @@ import { ConnectDialog, type SshConfig, type ConnectResult } from "./ConnectDial
 import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar";
 import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
-import { type AppSettings, DEFAULT_SETTINGS } from "./settings";
+import { TerminalInputBar } from "./TerminalInputBar";
+import { type AppSettings, type QuickButton, DEFAULT_SETTINGS } from "./settings";
 import "./App.css";
 
 interface Tab {
@@ -62,6 +63,19 @@ function App() {
     await invoke("save_settings", { settings: newSettings }).catch(console.error);
     setSettings(newSettings);
     setShowSettings(false);
+  };
+
+  /** 向当前激活标签页的终端发送文本 */
+  const sendToActiveTerminal = (text: string) => {
+    const handle = termRefs.current.get(activeTabId);
+    if (handle) handle.sendData(text);
+  };
+
+  /** 快捷按钮列表更新（直接写入配置，不关闭设置面板） */
+  const handleButtonsChange = async (buttons: QuickButton[]) => {
+    const newSettings: AppSettings = { ...settings, quickButtons: buttons };
+    await invoke("save_settings", { settings: newSettings }).catch(console.error);
+    setSettings(newSettings);
   };
 
   const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
@@ -297,26 +311,33 @@ function App() {
           />
         )}
 
-        <div className="terminal-container">
-          {tabs.length === 0 ? (
-            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', color: '#666' }}>
-              No open tabs. Click + to open a new tab.
-            </div>
-          ) : (
-            tabs.map((tab) => (
-              <TerminalComponent
-                key={tab.id}
-                ref={(el) => {
-                  if (el) termRefs.current.set(tab.id, el);
-                  else termRefs.current.delete(tab.id);
-                }}
-                isActive={activeTabId === tab.id}
-                sshConfig={tab.sshConfig}
-                logPath={tab.logPath}
-                settings={settings}
-              />
-            ))
-          )}
+        <div className="terminal-wrapper">
+          <div className="terminal-container">
+            {tabs.length === 0 ? (
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', color: '#666' }}>
+                No open tabs. Click + to open a new tab.
+              </div>
+            ) : (
+              tabs.map((tab) => (
+                <TerminalComponent
+                  key={tab.id}
+                  ref={(el) => {
+                    if (el) termRefs.current.set(tab.id, el);
+                    else termRefs.current.delete(tab.id);
+                  }}
+                  isActive={activeTabId === tab.id}
+                  sshConfig={tab.sshConfig}
+                  logPath={tab.logPath}
+                  settings={settings}
+                />
+              ))
+            )}
+          </div>
+          <TerminalInputBar
+            quickButtons={settings.quickButtons}
+            onSend={sendToActiveTerminal}
+            onButtonsChange={handleButtonsChange}
+          />
         </div>
       </div>
 
