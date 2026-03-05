@@ -32,9 +32,9 @@ help:
 release:
 	@echo "Processing artifacts..."
 	@mkdir -p releases
-	$(eval VERSION_BASE := $(shell grep "version" src-tauri/tauri.conf.json | head -1 | awk -F\" "{print $$4}" | cut -d. -f1,2))
+	$(eval VERSION_BASE := $(shell jq -r '.version' src-tauri/tauri.conf.json 2>/dev/null || grep "version" src-tauri/tauri.conf.json | head -1 | awk -F'\"' '{print $$4}' | cut -d. -f1,2))
 	$(eval MMDD := $(shell date +%m%d))
-	$(eval PATCH := $(shell ls releases/AuraTerm-$(VERSION_BASE).*.$(MMDD)-*.dmg 2>/dev/null | sed -E "s/.*-$(VERSION_BASE)\.([0-9]+)\..*/\1/" | sort -n | tail -1 | awk "{print $$1 + 1}"))
+	$(eval PATCH := $(shell ls releases/AuraTerm-$(VERSION_BASE).*.$(MMDD)-*.dmg 2>/dev/null | sed -E 's/.*-$(VERSION_BASE)\.([0-9]+)\..*/\1/' | sort -n | tail -1 | awk '{print $$1 + 1}'))
 	$(eval PATCH_VAL := $(if $(PATCH),$(PATCH),0))
 	$(eval FULL_VERSION := $(VERSION_BASE).$(PATCH_VAL).$(MMDD))
 	$(eval ARCH := $(shell uname -m))
@@ -46,7 +46,7 @@ release:
 	$(eval DEST_NAME := AuraTerm-$(FULL_VERSION)-$(ARCH).$(EXT))
 	cp "$(ACTUAL_SRC)" releases/$(DEST_NAME)
 	cp "$(ACTUAL_SRC)" releases/AuraTerm-latest-$(ARCH).$(EXT)
-	$(eval SHA256 := $(shell shasum -a 256 "$(ACTUAL_SRC)" | awk "{print $$1}"))
+	$(eval SHA256 := $(shell shasum -a 256 "$(ACTUAL_SRC)" | awk '{print $$1}'))
 	$(eval PUBLISH_DATE := $(shell date +%Y-%m-%d))
 	@if [ -f releases/auraterm-releases.json ]; then \
 		cat releases/auraterm-releases.json | jq ".latest = \"$(FULL_VERSION)\" | .releases = [{\"version\": \"$(FULL_VERSION)\", \"filename\": \"$(DEST_NAME)\", \"platform\": \"$(if $(filter dmg,$(EXT)),macos-$(ARCH),windows-x64)\", \"published_at\": \"$(PUBLISH_DATE)\", \"sha256\": \"$(SHA256)\", \"notes\": \"automated release\"}] + .releases" > releases/auraterm-releases.json.tmp && mv releases/auraterm-releases.json.tmp releases/auraterm-releases.json; \
