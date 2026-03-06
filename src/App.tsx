@@ -32,9 +32,31 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarRefreshToken, setSidebarRefreshToken] = useState(0);
   const [showNewTabMenu, setShowNewTabMenu] = useState(false);
+  const [isWindowFocused, setIsWindowFocused] = useState(true);
 
   /** Map from tab id → TerminalHandle (populated by callback refs in JSX) */
   const termRefs = useRef<Map<string, TerminalHandle>>(new Map());
+
+  useEffect(() => {
+    let unlistenFocus: (() => void) | null = null;
+    let unlistenBlur: (() => void) | null = null;
+
+    async function setupWindowFocusListeners() {
+      try {
+        unlistenFocus = await listen("tauri://focus", () => setIsWindowFocused(true));
+        unlistenBlur = await listen("tauri://blur", () => setIsWindowFocused(false));
+      } catch (err) {
+        console.error("Failed to setup window focus listeners:", err);
+      }
+    }
+
+    setupWindowFocusListeners();
+
+    return () => {
+      unlistenFocus?.();
+      unlistenBlur?.();
+    };
+  }, []);
 
   useEffect(() => {
     async function determineOs() {
@@ -204,7 +226,7 @@ function App() {
   };
 
   return (
-    <div className={`app-container ${osType}`}>
+    <div className={`app-container ${osType} ${isWindowFocused ? 'focused' : 'blurred'}`}>
       <div className="titlebar" onMouseDown={handleTitlebarMouseDown}>
         {osType !== "windows" && (
           <div className="titlebar-controls" aria-label="Window controls">

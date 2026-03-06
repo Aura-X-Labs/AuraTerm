@@ -148,6 +148,7 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
 
     const terminal = new Terminal({
       cursorBlink: true,
+      cursorStyle: "block",
       fontFamily: effectiveSettings.fontFamily,
       fontSize: effectiveSettings.fontSize,
       scrollback: effectiveSettings.scrollback,
@@ -156,6 +157,9 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
         foreground: effectiveSettings.theme.foreground,
         cursor: effectiveSettings.theme.cursor,
       },
+      convertEol: true,
+      allowProposedApi: true,
+      macOptionIsMeta: true,
     });
 
     const fit = new FitAddon();

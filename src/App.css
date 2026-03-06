@@ -91,7 +91,7 @@
 }
 
 /* ── Blur state: Gray out buttons when window is not focused ───── */
-.app-container:not(:focus-within) .titlebar-control-btn {
+.app-container.blurred .titlebar-control-btn {
   background: #4a4a4a !important;
 }
 
