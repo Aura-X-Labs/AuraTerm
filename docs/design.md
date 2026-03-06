@@ -140,8 +140,8 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
 * **目标**: 实现 SSH2、Telnet 和串口通信。
 * **任务**:
   * Rust 后端集成 \ssh2-rs\，实现 SSH 登录、数据收发、HostKey 验证。 --Done
-  * 实现 Telnet 协议解析。
-  * 集成 \serialport-rs\，实现串口设备的枚举和连接。
+  * 实现 Telnet 协议解析。 --Done
+   * 集成 \serialport-rs\，实现串口设备的枚举和连接。 --Done
   * 前端实现新建连接对话框（支持 SSH/Telnet/Serial 切换）。
 
 ### Phase 2.5: 快捷连接增强

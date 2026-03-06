@@ -1,7 +1,15 @@
 {
   "product": "AuraTerm",
-  "latest": "0.1.3.0305",
+  "latest": "0.1.3.0306",
   "releases": [
+    {
+      "version": "0.1.3.0306",
+      "filename": "AuraTerm-0.1.3.0306-arm64.dmg",
+      "platform": "macos-arm64",
+      "published_at": "2026-03-06",
+      "sha256": "2d3e029b0a3049061539ad84aef384cca92dfdbe6062f754718ded9d91bb8f3a",
+      "notes": "automated release"
+    },
     {
       "version": "0.1.3.0305",
       "filename": "AuraTerm-0.1.3.0305-x64.exe",

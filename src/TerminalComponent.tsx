@@ -3,25 +3,27 @@ import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SshConfig } from "./ConnectDialog";
+import type { SshConfig, TelnetConfig, SerialConfig } from "./ConnectDialog";
 import type { AppSettings } from "./settings";
 import { DEFAULT_SETTINGS } from "./settings";
 import "xterm/css/xterm.css";
 
-// ─── Public handle exposed via ref ─────────────────────────────────────────
+export type SessionConfig =
+  | { protocol: "local" }
+  | { protocol: "ssh"; sshConfig: SshConfig }
+  | { protocol: "telnet"; telnetConfig: TelnetConfig }
+  | { protocol: "serial"; serialConfig: SerialConfig };
+
 export interface TerminalHandle {
-  /** Strip ANSI codes and save buffered output to ~/AuraTerm/logs/. Returns the saved path. */
   saveLog: (tabTitle: string) => Promise<string>;
-  /** Write raw data to the active PTY (e.g. a command string with trailing \n). */
   sendData: (text: string) => void;
 }
 
-/** Removes ANSI / VT escape sequences from a string. */
 function stripAnsi(str: string): string {
   return str
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "") // OSC sequences
-    .replace(/\x1b\[[0-9;?]*[A-Za-z~]/g, "")            // CSI sequences
-    .replace(/\x1b[^[\]]/g, "")                          // other ESC sequences
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z~]/g, "")
+    .replace(/\x1b[^\[\]]/g, "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n");
 }
@@ -50,7 +52,7 @@ interface SshMfaPromptEvent {
 
 interface TerminalComponentProps {
   isActive: boolean;
-  sshConfig?: SshConfig;
+  session: SessionConfig;
   logPath?: string;
   settings?: AppSettings;
 }
@@ -65,27 +67,87 @@ function isAuthError(errStr: string): boolean {
   );
 }
 
+function writeSessionInput(id: string, data: string, session: SessionConfig) {
+  switch (session.protocol) {
+    case "ssh":
+      return invoke("write_ssh_pty_input", { id, data });
+    case "telnet":
+      return invoke("write_telnet_input", { id, data });
+    case "serial":
+      return invoke("write_serial_input", { id, data });
+    case "local":
+      return invoke("write_pty_input", { id, data });
+  }
+}
+
+function resizeSession(id: string, cols: number, rows: number, session: SessionConfig) {
+  switch (session.protocol) {
+    case "ssh":
+      return invoke("resize_ssh_pty", { id, cols, rows });
+    case "local":
+      return invoke("resize_pty", { id, cols, rows });
+    case "telnet":
+    case "serial":
+      return Promise.resolve();
+  }
+}
+
+function closeSession(id: string, session: SessionConfig) {
+  switch (session.protocol) {
+    case "ssh":
+      return invoke("close_ssh_pty", { id });
+    case "telnet":
+      return invoke("close_telnet_session", { id });
+    case "serial":
+      return invoke("close_serial_session", { id });
+    case "local":
+      return invoke("close_pty", { id });
+  }
+}
+
 export const TerminalComponent = forwardRef<TerminalHandle, TerminalComponentProps>(
-function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
+function TerminalComponent({ isActive, session, logPath, settings }, ref) {
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
-  // 始终保持最新的 settings，供 Effect 1 内的事件处理器使用（避免闭包读取旧值）
   const settingsRef = useRef<AppSettings>(effectiveSettings);
   useEffect(() => {
     settingsRef.current = effectiveSettings;
-  }, [settings]);
+  }, [settings, effectiveSettings]);
 
   const terminalRef = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
-  /** Accumulates raw PTY output for the current session. */
   const logBufferRef = useRef<string>("");
-  /** Base log path template provided by the caller (no timestamp, no extension). */
   const logPathRef = useRef<string | undefined>(logPath);
-  useEffect(() => { logPathRef.current = logPath; }, [logPath]);
-  /** Actual log file path for the current session (base + timestamp + .log). */
+  useEffect(() => {
+    logPathRef.current = logPath;
+  }, [logPath]);
   const actualLogPathRef = useRef<string | undefined>(undefined);
+
+  const [activeSession, setActiveSession] = useState<SessionConfig>(session);
+  const activeSessionRef = useRef<SessionConfig>(session);
+
+  const activeSshConfig = activeSession.protocol === "ssh" ? activeSession.sshConfig : undefined;
+
+  const [showRetryOverlay, setShowRetryOverlay] = useState(false);
+  const [retryPassword, setRetryPassword] = useState("");
+  const [mfaEvent, setMfaEvent] = useState<SshMfaPromptEvent | null>(null);
+  const [mfaResponses, setMfaResponses] = useState<string[]>([]);
+  const [showMfaOverlay, setShowMfaOverlay] = useState(false);
+
+  useEffect(() => {
+    setActiveSession(session);
+    setShowRetryOverlay(false);
+    setRetryPassword("");
+    setMfaEvent(null);
+    setMfaResponses([]);
+    setShowMfaOverlay(false);
+  }, [session]);
+
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+  }, [activeSession]);
 
   useImperativeHandle(ref, () => ({
     saveLog: async (tabTitle: string) => {
@@ -100,49 +162,12 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       if (!ptyIdRef.current) return;
       const id = ptyIdRef.current;
       const data = text.endsWith("\n") ? text : text + "\n";
-      if (activeSshConfigRef.current) {
-        void invoke("write_ssh_pty_input", { id, data }).catch((e) => {
-          console.error("write_ssh_pty_input sendData failed", e);
-        });
-      } else {
-        void invoke("write_pty_input", { id, data }).catch((e) => {
-          console.error("write_pty_input sendData failed", e);
-        });
-      }
+      void writeSessionInput(id, data, activeSessionRef.current).catch((e) => {
+        console.error("sendData failed", e);
+      });
     },
   }));
 
-  // 内部活跃的 SSH 配置（密码重试时会更新）
-  const [activeSshConfig, setActiveSshConfig] = useState<SshConfig | undefined>(sshConfig);
-  // 供 Effect 1 的 event handler 读取最新 SSH 配置（避免闭包捕获旧值）
-  const activeSshConfigRef = useRef<SshConfig | undefined>(sshConfig);
-
-  // 密码重试 overlay
-  const [showRetryOverlay, setShowRetryOverlay] = useState(false);
-  const [retryPassword, setRetryPassword] = useState("");
-
-  // MFA 验证对话框状态
-  const [mfaEvent, setMfaEvent] = useState<SshMfaPromptEvent | null>(null);
-  const [mfaResponses, setMfaResponses] = useState<string[]>([]);
-  const [showMfaOverlay, setShowMfaOverlay] = useState(false);
-
-  // 当 prop sshConfig 变化时（新连接），重置内部状态
-  useEffect(() => {
-    setActiveSshConfig(sshConfig);
-    setShowRetryOverlay(false);
-    setRetryPassword("");
-
-    setMfaEvent(null);
-    setMfaResponses([]);
-    setShowMfaOverlay(false);
-  }, [sshConfig]);
-
-  // 同步 activeSshConfig 到 ref，供 Effect 1 的 handlers 使用
-  useEffect(() => {
-    activeSshConfigRef.current = activeSshConfig;
-  }, [activeSshConfig]);
-
-  // ─── Effect 1：初始化 xterm（只在 mount/unmount 时执行一次）────────────────
   useEffect(() => {
     if (!terminalRef.current) return;
 
@@ -170,33 +195,20 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     term.current = terminal;
     fitAddon.current = fit;
 
-    // ─── 自定义键盘事件处理：Ctrl+C / Ctrl+V ─────────────────────────────────
     terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
 
-      // Ctrl+C：有选中文本时消费事件（不发送 ^C 给 PTY），复制由 onSelectionChange 已处理
       if (event.ctrlKey && event.key === "c" && settingsRef.current.ctrlCCopy) {
         const selection = terminal.getSelection();
-        if (selection) {
-          // 选中内容已经由 onSelectionChange 写入剪贴板，直接消费按键即可
-          return false;
-        }
+        if (selection) return false;
       }
 
-      // Ctrl+V：从剪贴板粘贴到 PTY
       if (event.ctrlKey && event.key === "v" && settingsRef.current.ctrlVPaste) {
         void navigator.clipboard.readText().then((text) => {
           if (!text || !ptyIdRef.current) return;
-          const id = ptyIdRef.current;
-          if (activeSshConfigRef.current) {
-            void invoke("write_ssh_pty_input", { id, data: text }).catch((e) => {
-              console.error("write_ssh_pty_input paste failed", e);
-            });
-          } else {
-            void invoke("write_pty_input", { id, data: text }).catch((e) => {
-              console.error("write_pty_input paste failed", e);
-            });
-          }
+          void writeSessionInput(ptyIdRef.current, text, activeSessionRef.current).catch((e) => {
+            console.error("paste failed", e);
+          });
         }).catch((e) => {
           console.error("clipboard read failed", e);
         });
@@ -206,7 +218,6 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       return true;
     });
 
-    // ─── 选中即复制：每当 selection 变化时，若有内容则写入剪贴板 ──────────────
     const selectionDisposable = terminal.onSelectionChange(() => {
       if (!settingsRef.current.ctrlCCopy) return;
       const selection = terminal.getSelection();
@@ -216,10 +227,8 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       });
     });
 
-    // ─── 鼠标中键粘贴 ──────────────────────────────────────────────────────
     const terminalEl = terminalRef.current;
 
-    // mousedown 阶段就 preventDefault，阻止系统/浏览器弹出粘贴菜单
     const handleMiddleMouseDown = (event: MouseEvent) => {
       if (event.button !== 1) return;
       if (!settingsRef.current.middleClickPaste) return;
@@ -227,7 +236,6 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       event.stopPropagation();
     };
 
-    // auxclick 在中键 release 后触发，此时执行实际粘贴
     const handleMiddleClick = (event: MouseEvent) => {
       if (event.button !== 1) return;
       if (!settingsRef.current.middleClickPaste) return;
@@ -235,16 +243,9 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       event.stopPropagation();
       void navigator.clipboard.readText().then((text) => {
         if (!text || !ptyIdRef.current) return;
-        const id = ptyIdRef.current;
-        if (activeSshConfigRef.current) {
-          void invoke("write_ssh_pty_input", { id, data: text }).catch((e) => {
-            console.error("write_ssh_pty_input middle paste failed", e);
-          });
-        } else {
-          void invoke("write_pty_input", { id, data: text }).catch((e) => {
-            console.error("write_pty_input middle paste failed", e);
-          });
-        }
+        void writeSessionInput(ptyIdRef.current, text, activeSessionRef.current).catch((e) => {
+          console.error("middle paste failed", e);
+        });
       }).catch((e) => {
         console.error("clipboard read (middle click) failed", e);
       });
@@ -253,32 +254,18 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     terminalEl.addEventListener("mousedown", handleMiddleMouseDown);
     terminalEl.addEventListener("auxclick", handleMiddleClick);
 
-    // 输入 handler：通过 ref 读取当前的 activeSshConfig
     const inputDisposable = terminal.onData((data) => {
       if (!ptyIdRef.current) return;
-      if (activeSshConfigRef.current) {
-        void invoke("write_ssh_pty_input", { id: ptyIdRef.current, data }).catch((e) => {
-          console.error("write_ssh_pty_input failed", e);
-        });
-      } else {
-        void invoke("write_pty_input", { id: ptyIdRef.current, data }).catch((e) => {
-          console.error("write_pty_input failed", e);
-        });
-      }
+      void writeSessionInput(ptyIdRef.current, data, activeSessionRef.current).catch((e) => {
+        console.error("input failed", e);
+      });
     });
 
-    // resize handler
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
       if (!ptyIdRef.current) return;
-      if (activeSshConfigRef.current) {
-        void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
-          console.error("resize_ssh_pty failed", e);
-        });
-      } else {
-        void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
-          console.error("resize_pty failed", e);
-        });
-      }
+      void resizeSession(ptyIdRef.current, cols, rows, activeSessionRef.current).catch((e) => {
+        console.error("resize failed", e);
+      });
     });
 
     const handleWindowResize = () => {
@@ -286,15 +273,9 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       if (!ptyIdRef.current) return;
       const cols = terminal.cols ?? 80;
       const rows = terminal.rows ?? 24;
-      if (activeSshConfigRef.current) {
-        void invoke("resize_ssh_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
-          console.error("resize_ssh_pty on window resize failed", e);
-        });
-      } else {
-        void invoke("resize_pty", { id: ptyIdRef.current, cols, rows }).catch((e) => {
-          console.error("resize_pty on window resize failed", e);
-        });
-      }
+      void resizeSession(ptyIdRef.current, cols, rows, activeSessionRef.current).catch((e) => {
+        console.error("resize on window resize failed", e);
+      });
     };
     window.addEventListener("resize", handleWindowResize);
 
@@ -305,26 +286,18 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       selectionDisposable.dispose();
       inputDisposable.dispose();
       resizeDisposable.dispose();
-      // 关闭 PTY（如果 Effect 2 cleanup 已经清空了 ptyIdRef，这里不会重复关闭）
       if (ptyIdRef.current) {
         const id = ptyIdRef.current;
         ptyIdRef.current = null;
-        if (activeSshConfigRef.current) {
-          void invoke("close_ssh_pty", { id }).catch(() => {});
-        } else {
-          void invoke("close_pty", { id }).catch(() => {});
-        }
+        void closeSession(id, activeSessionRef.current).catch(() => {});
       }
       terminal.dispose();
       term.current = null;
       fitAddon.current = null;
     };
-  }, []); // 空依赖：xterm 只初始化一次
+  }, []);
 
-  // ─── Effect 2：管理连接生命周期（依赖 activeSshConfig）────────────────────
   useEffect(() => {
-    // xterm 可能还未初始化（Effect 1 尚未运行完）
-    // 用 setTimeout 0 确保在 Effect 1 之后执行
     let disposed = false;
     let unlistenOutput: UnlistenFn | null = null;
     let unlistenExit: UnlistenFn | null = null;
@@ -332,13 +305,11 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     let unlistenConnected: UnlistenFn | null = null;
 
     const connect = async () => {
-      // 等待 xterm 初始化
       if (!term.current) {
         await new Promise<void>((resolve) => setTimeout(resolve, 50));
         if (disposed || !term.current) return;
       }
 
-      // Reset log buffer and derive a fresh timestamped log path for this session
       logBufferRef.current = "";
       if (logPathRef.current) {
         const now = new Date();
@@ -353,7 +324,6 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
         if (event.payload.id === ptyIdRef.current) {
           term.current?.write(event.payload.data);
           logBufferRef.current += event.payload.data;
-          // 持续追加写入日志文件（过滤 ANSI 后）
           if (actualLogPathRef.current) {
             const plain = stripAnsi(event.payload.data);
             void invoke("append_to_log", {
@@ -366,9 +336,8 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       unlistenExit = await listen<PtyExitEvent>("pty-exit", (event) => {
         if (event.payload.id === ptyIdRef.current) {
           const msg = event.payload.message;
-          term.current?.writeln(`\r\n[PTY exited] ${msg}`);
-          // 认证失败时弹出重试对话框
-          if (activeSshConfig && isAuthError(msg)) {
+          term.current?.writeln(`\r\n[Session exited] ${msg}`);
+          if (activeSessionRef.current.protocol === "ssh" && isAuthError(msg)) {
             ptyIdRef.current = null;
             setShowRetryOverlay(true);
           }
@@ -401,30 +370,58 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       ptyIdRef.current = newId;
 
       try {
-        if (activeSshConfig) {
-          term.current?.writeln(
-            `Connecting to ${activeSshConfig.user}@${activeSshConfig.host}:${activeSshConfig.port}...`
-          );
-          await invoke<string>("start_ssh_pty", {
-            id: newId,
-            host: activeSshConfig.host,
-            port: activeSshConfig.port,
-            user: activeSshConfig.user,
-            password: activeSshConfig.password ?? null,
-            privateKey: activeSshConfig.privateKey ?? null,
-            cols,
-            rows,
-          });
-          // [Connected] 由后端 ssh-connected 事件触发，不在这里写
-        } else {
-          term.current?.writeln("Starting local shell PTY...");
-          await invoke<string>("start_pty", { id: newId, cols, rows });
+        switch (activeSession.protocol) {
+          case "ssh":
+            term.current?.writeln(
+              `Connecting to ${activeSession.sshConfig.user}@${activeSession.sshConfig.host}:${activeSession.sshConfig.port}...`
+            );
+            await invoke<string>("start_ssh_pty", {
+              id: newId,
+              host: activeSession.sshConfig.host,
+              port: activeSession.sshConfig.port,
+              user: activeSession.sshConfig.user,
+              password: activeSession.sshConfig.password ?? null,
+              privateKey: activeSession.sshConfig.privateKey ?? null,
+              cols,
+              rows,
+            });
+            break;
+          case "telnet":
+            term.current?.writeln(
+              `Connecting to telnet://${activeSession.telnetConfig.host}:${activeSession.telnetConfig.port}...`
+            );
+            await invoke("start_telnet_session", {
+              id: newId,
+              host: activeSession.telnetConfig.host,
+              port: activeSession.telnetConfig.port,
+            });
+            term.current?.writeln("\r\n[Connected]");
+            break;
+          case "serial":
+            term.current?.writeln(
+              `Opening serial port ${activeSession.serialConfig.portName} @ ${activeSession.serialConfig.baudRate}...`
+            );
+            await invoke("start_serial_session", {
+              id: newId,
+              portName: activeSession.serialConfig.portName,
+              baudRate: activeSession.serialConfig.baudRate,
+              dataBits: activeSession.serialConfig.dataBits,
+              stopBits: activeSession.serialConfig.stopBits,
+              parity: activeSession.serialConfig.parity,
+              flowControl: activeSession.serialConfig.flowControl,
+            });
+            term.current?.writeln("\r\n[Connected]");
+            break;
+          case "local":
+            term.current?.writeln("Starting local shell PTY...");
+            await invoke<string>("start_pty", { id: newId, cols, rows });
+            break;
         }
       } catch (error) {
         if (disposed) return;
         ptyIdRef.current = null;
         const errStr = String(error);
-        term.current?.writeln(`\r\n[Failed to start PTY] ${errStr}`);
+        term.current?.writeln(`\r\n[Failed to start session] ${errStr}`);
         console.error("connect failed", error);
       }
     };
@@ -437,21 +434,14 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       unlistenExit?.();
       unlistenMfa?.();
       unlistenConnected?.();
-      // 关闭当前 PTY 连接（activeSshConfig 变化时触发，用于关闭旧连接）
       if (ptyIdRef.current) {
         const id = ptyIdRef.current;
         ptyIdRef.current = null;
-        if (activeSshConfig) {
-          void invoke("close_ssh_pty", { id }).catch(() => {});
-        } else {
-          void invoke("close_pty", { id }).catch(() => {});
-        }
+        void closeSession(id, activeSession).catch(() => {});
       }
     };
-  }, [activeSshConfig]); // activeSshConfig 变化时重新连接（密码重试、新连接）
+  }, [activeSession]);
 
-
-  // ─── 动态应用 settings 变化（不重启 PTY）─────────────────────────────────
   useEffect(() => {
     if (!term.current || !settings) return;
     term.current.options.fontSize = settings.fontSize;
@@ -465,7 +455,6 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     fitAddon.current?.fit();
   }, [settings]);
 
-  // ─── 激活时调整大小──────────────────────────────────────────────────────
   useEffect(() => {
     if (isActive) {
       setTimeout(() => {
@@ -474,14 +463,13 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     }
   }, [isActive]);
 
-  // ─── 密码重试处理────────────────────────────────────────────────────────
   const handlePasswordRetry = (e: FormEvent) => {
     e.preventDefault();
     if (!activeSshConfig) return;
     const newConfig: SshConfig = { ...activeSshConfig, password: retryPassword };
     setShowRetryOverlay(false);
     setRetryPassword("");
-    setActiveSshConfig(newConfig);
+    setActiveSession({ protocol: "ssh", sshConfig: newConfig });
   };
 
   const handleMfaSubmit = (e: FormEvent) => {
@@ -507,7 +495,7 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       <div ref={terminalRef} style={{ flex: 1, minHeight: 0 }} />
 
       {showRetryOverlay && activeSshConfig && (
-        <div className="password-retry-overlay">  
+        <div className="password-retry-overlay">
           <div className="password-retry-dialog">
             <div className="password-retry-icon">🔐</div>
             <h3 className="password-retry-title">认证失败</h3>
@@ -543,7 +531,7 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       )}
 
       {showMfaOverlay && mfaEvent && (
-        <div className="password-retry-overlay">  
+        <div className="password-retry-overlay">
           <div className="password-retry-dialog">
             <div className="password-retry-icon">🛡️</div>
             <h3 className="password-retry-title">{mfaEvent.name || "需要两步验证"}</h3>
@@ -564,7 +552,6 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
                       setMfaResponses(newResponses);
                     }}
                     onKeyDown={(e) => {
-                      // 阻止事件冒泡到 xterm，防止回退键、空格等触发终端行为
                       e.stopPropagation();
                     }}
                     autoFocus={index === 0}
@@ -578,7 +565,6 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
                   className="password-retry-btn cancel"
                   onClick={() => {
                     setShowMfaOverlay(false);
-                    // 发送空响应或取消标识，后端会因认证失败而退出
                     void invoke("answer_ssh_mfa", {
                       id: ptyIdRef.current,
                       responses: mfaEvent.prompts.map(() => ""),

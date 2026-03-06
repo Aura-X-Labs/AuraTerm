@@ -31,7 +31,7 @@ help:
 
 release:
 	@echo "Processing artifacts..."
-	@python scripts/release.py
+	@python3 scripts/release.py
 
 upload:	
 	@echo "Uploading ..."

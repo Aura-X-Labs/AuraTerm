@@ -3,8 +3,15 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
-import { TerminalComponent, type TerminalHandle } from "./TerminalComponent";
-import { ConnectDialog, type SshConfig, type ConnectResult } from "./ConnectDialog";
+import { TerminalComponent, type TerminalHandle } from "./TerminalComponent.tsx";
+import {
+  ConnectDialog,
+  type SshConfig,
+  type TelnetConfig,
+  type SerialConfig,
+  type ConnectResult,
+  type ConnectionProtocol,
+} from "./ConnectDialog";
 import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar";
 import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
@@ -12,20 +19,27 @@ import { TerminalInputBar } from "./TerminalInputBar";
 import { type AppSettings, type QuickButton, DEFAULT_SETTINGS } from "./settings";
 import "./App.css";
 
+type TabSession =
+  | { protocol: "local" }
+  | { protocol: "ssh"; sshConfig: SshConfig }
+  | { protocol: "telnet"; telnetConfig: TelnetConfig }
+  | { protocol: "serial"; serialConfig: SerialConfig };
+
 interface Tab {
   id: string;
   title: string;
-  sshConfig?: SshConfig;
+  session: TabSession;
   logPath?: string;
 }
 
 let nextTabId = 1;
 
 function App() {
-  const [tabs, setTabs] = useState<Tab[]>([{ id: `tab-0`, title: "Local Shell" }]);
+  const [tabs, setTabs] = useState<Tab[]>([{ id: `tab-0`, title: "Local Shell", session: { protocol: "local" } }]);
   const [activeTabId, setActiveTabId] = useState<string>("tab-0");
   const [osType, setOsType] = useState<string>("windows");
   const [showConnectDialog, setShowConnectDialog] = useState(false);
+  const [connectDialogProtocol, setConnectDialogProtocol] = useState<ConnectionProtocol>("ssh");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -142,10 +156,15 @@ function App() {
     event.stopPropagation();
   };
 
-  const handleNewTab = () => {
+  const handleNewLocalSession = () => {
     const newId = `tab-${nextTabId++}`;
-    setTabs(prev => [...prev, { id: newId, title: "Local Shell" }]);
+    setTabs(prev => [...prev, { id: newId, title: "Local Shell", session: { protocol: "local" } }]);
     setActiveTabId(newId);
+  };
+
+  const openConnectDialog = (protocol: ConnectionProtocol) => {
+    setConnectDialogProtocol(protocol);
+    setShowConnectDialog(true);
   };
 
   const handleCloseTab = (id: string, event: MouseEvent) => {
@@ -171,17 +190,37 @@ function App() {
    */
   const handleConnectResult = async (result: ConnectResult) => {
     const newId = `tab-${nextTabId++}`;
-    const { protocol, sshConfig, telnetConfig, saveAs } = result;
+    const { protocol, sshConfig, telnetConfig, serialConfig, saveAs } = result;
 
     if (protocol === "ssh" && sshConfig) {
       setTabs((prev) => [
         ...prev,
-        { id: newId, title: `${sshConfig.user}@${sshConfig.host}`, sshConfig: sshConfig, logPath: result.logPath },
+        {
+          id: newId,
+          title: `${sshConfig.user}@${sshConfig.host}`,
+          session: { protocol: "ssh", sshConfig },
+          logPath: result.logPath,
+        },
       ]);
     } else if (protocol === "telnet" && telnetConfig) {
       setTabs((prev) => [
         ...prev,
-        { id: newId, title: `telnet://${telnetConfig.host}:${telnetConfig.port}`, logPath: result.logPath },
+        {
+          id: newId,
+          title: `telnet://${telnetConfig.host}:${telnetConfig.port}`,
+          session: { protocol: "telnet", telnetConfig },
+          logPath: result.logPath,
+        },
+      ]);
+    } else if (protocol === "serial" && serialConfig) {
+      setTabs((prev) => [
+        ...prev,
+        {
+          id: newId,
+          title: `${serialConfig.portName} @ ${serialConfig.baudRate}`,
+          session: { protocol: "serial", serialConfig },
+          logPath: result.logPath,
+        },
       ]);
     }
     
@@ -193,12 +232,18 @@ function App() {
         id: crypto.randomUUID(),
         name: saveAs,
         protocol: protocol,
-        host: protocol === "ssh" ? sshConfig!.host : telnetConfig!.host,
-        port: protocol === "ssh" ? sshConfig!.port : telnetConfig!.port,
+        host: protocol === "ssh" ? sshConfig!.host : protocol === "telnet" ? telnetConfig!.host : "",
+        port: protocol === "ssh" ? sshConfig!.port : protocol === "telnet" ? telnetConfig!.port : 0,
         user: protocol === "ssh" ? sshConfig!.user : "",
-        authType: protocol === "ssh" ? (sshConfig!.privateKey ? "key" : "password") : "password",
-        password: protocol === "ssh" ? sshConfig!.password : "",
+        authType: protocol === "ssh" ? (sshConfig!.privateKey ? "key" : "password") : "none",
+        password: protocol === "ssh" ? sshConfig!.password : undefined,
         privateKey: protocol === "ssh" ? sshConfig!.privateKey : undefined,
+        portName: protocol === "serial" ? serialConfig!.portName : undefined,
+        baudRate: protocol === "serial" ? serialConfig!.baudRate : undefined,
+        dataBits: protocol === "serial" ? serialConfig!.dataBits : undefined,
+        stopBits: protocol === "serial" ? serialConfig!.stopBits : undefined,
+        parity: protocol === "serial" ? serialConfig!.parity : undefined,
+        flowControl: protocol === "serial" ? serialConfig!.flowControl : undefined,
         createdAt: Date.now(),
       };
       try {
@@ -216,11 +261,59 @@ function App() {
   /**
    * 侧边栏双击已保存的连接，直接开新标签页
    */
-  const handleBookmarkConnect = (config: SshConfig, _connectionId: string) => {
+  const handleBookmarkConnect = (connection: SavedConnection, _connectionId: string) => {
     const newId = `tab-${nextTabId++}`;
+    const protocol = connection.protocol ?? "ssh";
+
+    let tab: Tab;
+    if (protocol === "serial" && connection.portName && connection.baudRate) {
+      tab = {
+        id: newId,
+        title: `${connection.portName} @ ${connection.baudRate}`,
+        session: {
+          protocol: "serial",
+          serialConfig: {
+            portName: connection.portName,
+            baudRate: connection.baudRate,
+            dataBits: connection.dataBits ?? 8,
+            stopBits: connection.stopBits ?? 1,
+            parity: connection.parity ?? "none",
+            flowControl: connection.flowControl ?? "none",
+          },
+        },
+      };
+    } else if (protocol === "telnet") {
+      tab = {
+        id: newId,
+        title: `telnet://${connection.host}:${connection.port}`,
+        session: {
+          protocol: "telnet",
+          telnetConfig: {
+            host: connection.host,
+            port: connection.port,
+          },
+        },
+      };
+    } else {
+      tab = {
+        id: newId,
+        title: `${connection.user}@${connection.host}`,
+        session: {
+          protocol: "ssh",
+          sshConfig: {
+            host: connection.host,
+            port: connection.port,
+            user: connection.user,
+            password: connection.authType === "password" ? connection.password : undefined,
+            privateKey: connection.authType === "key" ? connection.privateKey : undefined,
+          },
+        },
+      };
+    }
+
     setTabs((prev) => [
       ...prev,
-      { id: newId, title: `${config.user}@${config.host}`, sshConfig: config },
+      tab,
     ]);
     setActiveTabId(newId);
   };
@@ -343,12 +436,12 @@ function App() {
               tabs.map((tab) => (
                 <TerminalComponent
                   key={tab.id}
-                  ref={(el) => {
+                  ref={(el: TerminalHandle | null) => {
                     if (el) termRefs.current.set(tab.id, el);
                     else termRefs.current.delete(tab.id);
                   }}
                   isActive={activeTabId === tab.id}
-                  sshConfig={tab.sshConfig}
+                  session={tab.session}
                   logPath={tab.logPath}
                   settings={settings}
                 />
@@ -378,11 +471,11 @@ function App() {
       {showNewTabMenu && (
         <div className="newtab-overlay" onClick={() => setShowNewTabMenu(false)}>
           <div className="newtab-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="newtab-dialog-title">New Tab</div>
+            <div className="newtab-dialog-title">New Session</div>
             <div className="newtab-options">
               <button
                 className="newtab-option-btn"
-                onClick={() => { setShowNewTabMenu(false); handleNewTab(); }}
+                onClick={() => { setShowNewTabMenu(false); handleNewLocalSession(); }}
               >
                 <span className="newtab-option-icon">🖥</span>
                 <span className="newtab-option-label">Local Shell</span>
@@ -390,11 +483,27 @@ function App() {
               </button>
               <button
                 className="newtab-option-btn"
-                onClick={() => { setShowNewTabMenu(false); setShowConnectDialog(true); }}
+                onClick={() => { setShowNewTabMenu(false); openConnectDialog("ssh"); }}
               >
                 <span className="newtab-option-icon">🔗</span>
-                <span className="newtab-option-label">SSH / Telnet</span>
-                <span className="newtab-option-desc">Connect to a remote host</span>
+                <span className="newtab-option-label">SSH</span>
+                <span className="newtab-option-desc">Connect to a remote shell over SSH</span>
+              </button>
+              <button
+                className="newtab-option-btn"
+                onClick={() => { setShowNewTabMenu(false); openConnectDialog("telnet"); }}
+              >
+                <span className="newtab-option-icon">🌐</span>
+                <span className="newtab-option-label">Telnet</span>
+                <span className="newtab-option-desc">Open a TCP terminal session</span>
+              </button>
+              <button
+                className="newtab-option-btn"
+                onClick={() => { setShowNewTabMenu(false); openConnectDialog("serial"); }}
+              >
+                <span className="newtab-option-icon">🔌</span>
+                <span className="newtab-option-label">Serial</span>
+                <span className="newtab-option-desc">Enumerate and connect to a serial device</span>
               </button>
             </div>
           </div>
@@ -403,6 +512,7 @@ function App() {
 
       {showConnectDialog && (
         <ConnectDialog
+          initialProtocol={connectDialogProtocol}
           onConnect={handleConnectResult}
           onCancel={() => setShowConnectDialog(false)}
         />

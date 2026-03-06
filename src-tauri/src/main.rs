@@ -12,8 +12,10 @@ use std::{
 use tauri::{command, AppHandle, Emitter, State};
 
 mod connections;
+mod serial;
 mod settings;
 mod ssh;
+mod telnet;
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -28,13 +30,13 @@ struct AppState {
 }
 
 #[derive(Clone, Serialize)]
-struct PtyOutputEvent {
+pub(crate) struct PtyOutputEvent {
     id: String,
     data: String,
 }
 
 #[derive(Clone, Serialize)]
-struct PtyExitEvent {
+pub(crate) struct PtyExitEvent {
     id: String,
     message: String,
 }
@@ -290,6 +292,8 @@ fn main() {
         })
         .manage(app_state)
         .manage(ssh::SshState::default())
+        .manage(telnet::TelnetState::default())
+        .manage(serial::SerialState::default())
         .invoke_handler(tauri::generate_handler![
             start_pty,
             write_pty_input,
@@ -300,6 +304,13 @@ fn main() {
             ssh::resize_ssh_pty,
             ssh::close_ssh_pty,
             ssh::answer_ssh_mfa,
+            telnet::start_telnet_session,
+            telnet::write_telnet_input,
+            telnet::close_telnet_session,
+            serial::list_serial_ports,
+            serial::start_serial_session,
+            serial::write_serial_input,
+            serial::close_serial_session,
             settings::get_settings,
             settings::save_settings,
             connections::get_connections,

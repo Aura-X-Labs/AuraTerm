@@ -2,19 +2,45 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use tauri::{AppHandle, Manager};
 
+fn default_protocol() -> String {
+    "ssh".to_string()
+}
+
+fn default_auth_type() -> String {
+    "password".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedConnection {
     pub id: String,
     pub name: String,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    #[serde(default)]
     pub host: String,
+    #[serde(default)]
     pub port: u16,
+    #[serde(default)]
     pub user: String,
-    pub auth_type: String, // "password" | "key"
+    #[serde(default = "default_auth_type")]
+    pub auth_type: String, // "password" | "key" | "none"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baud_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_bits: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_bits: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_control: Option<String>,
     pub created_at: u64,
     pub last_used: Option<u64>,
 }

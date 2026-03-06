@@ -1,23 +1,28 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { SshConfig } from "./ConnectDialog";
 
 export interface SavedConnection {
   id: string;
   name: string;
-  protocol?: "ssh" | "telnet";
+  protocol?: "ssh" | "telnet" | "serial";
   host: string;
   port: number;
   user: string;
-  authType: "password" | "key";
+  authType: "password" | "key" | "none";
   password?: string;
   privateKey?: string;
+  portName?: string;
+  baudRate?: number;
+  dataBits?: 5 | 6 | 7 | 8;
+  stopBits?: 1 | 2;
+  parity?: "none" | "odd" | "even";
+  flowControl?: "none" | "hardware" | "software";
   createdAt: number;
   lastUsed?: number;
 }
 
 interface BookmarkSidebarProps {
-  onConnect: (config: SshConfig, connectionId: string) => void;
+  onConnect: (connection: SavedConnection, connectionId: string) => void;
   /** 每次递增该值，侧边栏会自动重新加载连接列表 */
   refreshToken?: number;
 }
@@ -67,16 +72,7 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
       await invoke("touch_connection", { id: conn.id, timestamp: Date.now() });
     } catch (_) {}
 
-    onConnect(
-      {
-        host: conn.host,
-        port: conn.port,
-        user: conn.user,
-        password: conn.authType === "password" ? conn.password : undefined,
-        privateKey: conn.authType === "key" ? conn.privateKey : undefined,
-      },
-      conn.id
-    );
+    onConnect(conn, conn.id);
   };
 
   const handleContextMenu = (e: React.MouseEvent, conn: SavedConnection) => {
@@ -140,10 +136,13 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
         <ul className="bookmark-list">
           {connections.map((conn) => {
             const isTelnet = conn.protocol === "telnet";
+            const isSerial = conn.protocol === "serial";
             const subtitle = isTelnet
               ? `telnet://${conn.host}:${conn.port}`
-              : `${conn.user}@${conn.host}:${conn.port}`;
-            const icon = isTelnet ? "🌐" : "🖥";
+              : isSerial
+                ? `${conn.portName ?? "serial"} @ ${conn.baudRate ?? 9600}`
+                : `${conn.user}@${conn.host}:${conn.port}`;
+            const icon = isSerial ? "🔌" : isTelnet ? "🌐" : "🖥";
             return (
               <li
                 key={conn.id}
@@ -171,7 +170,11 @@ export function BookmarkSidebar({ onConnect, refreshToken }: BookmarkSidebarProp
                   <span className="bookmark-name">{conn.name}</span>
                 )}
                 <span className="bookmark-host">
-                  {isTelnet ? `${conn.host}:${conn.port}` : `${conn.user}@${conn.host}:${conn.port}`}
+                  {isTelnet
+                    ? `${conn.host}:${conn.port}`
+                    : isSerial
+                      ? `${conn.portName ?? "serial"} · ${conn.baudRate ?? 9600} baud`
+                      : `${conn.user}@${conn.host}:${conn.port}`}
                 </span>
               </div>
             </li>
