@@ -274,20 +274,34 @@ fn main() {
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+
+                let exit_item = MenuItem::with_id(_app, "exit", "Exit", true, None::<&str>)?;
                 let about_item = MenuItem::with_id(_app, "about", "About AuraTerm", true, None::<&str>)?;
+
+                let file_menu = SubmenuBuilder::new(_app, "File")
+                    .item(&exit_item)
+                    .build()?;
                 let help_menu = SubmenuBuilder::new(_app, "Help")
                     .item(&about_item)
                     .build()?;
                 let menu = MenuBuilder::new(_app)
+                    .item(&file_menu)
                     .item(&help_menu)
                     .build()?;
+
                 _app.set_menu(menu)?;
             }
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "about" {
-                let _ = app.emit("show-about", ());
+            match event.id().as_ref() {
+                "about" => {
+                    let _ = app.emit("show-about", ());
+                }
+                "exit" => {
+                    app.exit(0);
+                }
+                _ => {}
             }
         })
         .manage(app_state)

@@ -32,6 +32,8 @@ interface Tab {
   logPath?: string;
 }
 
+type AppMenuId = "file" | "help";
+
 let nextTabId = 1;
 
 function formatSerialFrame(serialConfig: SerialConfig) {
@@ -53,7 +55,9 @@ function App() {
   const [showNewTabMenu, setShowNewTabMenu] = useState(false);
   const [isWindowFocused, setIsWindowFocused] = useState(true);
   const [serialConnectionStates, setSerialConnectionStates] = useState<Record<string, SerialConnectionState>>({});
+  const [openMenuId, setOpenMenuId] = useState<AppMenuId | null>(null);
   const settingsRef = useRef<AppSettings>(DEFAULT_SETTINGS);
+  const menuBarRef = useRef<HTMLDivElement | null>(null);
 
   /** Map from tab id → TerminalHandle (populated by callback refs in JSX) */
   const termRefs = useRef<Map<string, TerminalHandle>>(new Map());
@@ -105,6 +109,31 @@ function App() {
     const unlisten = listen("show-about", () => setShowAbout(true));
     return () => { unlisten.then(f => f()); };
   }, []);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (menuBarRef.current?.contains(target)) return;
+      setOpenMenuId(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenMenuId(null);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openMenuId]);
 
   const handleSaveSettings = async (newSettings: AppSettings) => {
     await invoke("save_settings", { settings: newSettings }).catch(console.error);
@@ -168,7 +197,7 @@ function App() {
 
   const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
-    if ((event.target as HTMLElement).closest(".titlebar-controls")) return;
+    if ((event.target as HTMLElement).closest("[data-no-drag='true']")) return;
     getCurrentWindow().startDragging().catch((error) => {
       console.error("startDragging failed", error);
     });
@@ -203,7 +232,23 @@ function App() {
     });
   };
 
-  const stopDragPropagation = (event: MouseEvent<HTMLButtonElement>) => {
+  const handleExitApp = async () => {
+    setOpenMenuId(null);
+    await getCurrentWindow().close().catch((error) => {
+      console.error("exit failed", error);
+    });
+  };
+
+  const handleOpenAbout = () => {
+    setOpenMenuId(null);
+    setShowAbout(true);
+  };
+
+  const toggleMenu = (menuId: AppMenuId) => {
+    setOpenMenuId((current) => current === menuId ? null : menuId);
+  };
+
+  const stopDragPropagation = (event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
     event.stopPropagation();
   };
@@ -403,7 +448,7 @@ function App() {
     <div className={`app-container ${osType} ${isWindowFocused ? 'focused' : 'blurred'}`}>
       <div className="titlebar" onMouseDown={handleTitlebarMouseDown}>
         {osType !== "windows" && (
-          <div className="titlebar-controls" aria-label="Window controls">
+          <div className="titlebar-controls" aria-label="Window controls" data-no-drag="true">
             <button
               className="titlebar-control-btn titlebar-control-close"
               onMouseDown={stopDragPropagation}
@@ -427,9 +472,66 @@ function App() {
             />
           </div>
         )}
-        <div className="titlebar-title">AuraTerm</div>
+        {osType === "windows" ? (
+          <div className="titlebar-windows-main">
+            <div className="titlebar-title">AuraTerm</div>
+            <div
+              ref={menuBarRef}
+              className="titlebar-menubar"
+              data-no-drag="true"
+            >
+              <div
+                className="titlebar-menu-group"
+                onMouseEnter={() => {
+                  if (openMenuId) setOpenMenuId("file");
+                }}
+              >
+                <button
+                  className={`titlebar-menu-btn ${openMenuId === "file" ? "open" : ""}`}
+                  onMouseDown={stopDragPropagation}
+                  onClick={() => toggleMenu("file")}
+                  type="button"
+                >
+                  File
+                </button>
+                {openMenuId === "file" && (
+                  <div className="titlebar-menu-dropdown" onMouseDown={stopDragPropagation}>
+                    <button className="titlebar-menu-item" onClick={handleExitApp} type="button">
+                      <span>Exit</span>
+                      <span className="titlebar-menu-item-hint">Alt+F4</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div
+                className="titlebar-menu-group"
+                onMouseEnter={() => {
+                  if (openMenuId) setOpenMenuId("help");
+                }}
+              >
+                <button
+                  className={`titlebar-menu-btn ${openMenuId === "help" ? "open" : ""}`}
+                  onMouseDown={stopDragPropagation}
+                  onClick={() => toggleMenu("help")}
+                  type="button"
+                >
+                  Help
+                </button>
+                {openMenuId === "help" && (
+                  <div className="titlebar-menu-dropdown" onMouseDown={stopDragPropagation}>
+                    <button className="titlebar-menu-item" onClick={handleOpenAbout} type="button">
+                      <span>About AuraTerm</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="titlebar-title">AuraTerm</div>
+        )}
         {osType === "windows" && (
-          <div className="titlebar-controls-win" aria-label="Window controls">
+          <div className="titlebar-controls-win" aria-label="Window controls" data-no-drag="true">
             <button
               className="titlebar-control-win-btn"
               onMouseDown={stopDragPropagation}
