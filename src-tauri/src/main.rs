@@ -24,7 +24,7 @@ struct PtySession {
 #[derive(Clone)]
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
-    ssh_state: ssh::SshState,
+    
 }
 
 #[derive(Clone, Serialize)]
@@ -264,7 +264,7 @@ fn save_terminal_log(content: String, tab_name: String) -> Result<String, String
 fn main() {
     let app_state = AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
-        ssh_state: ssh::SshState::default(),
+        
     };
 
     tauri::Builder::default()
@@ -289,6 +289,7 @@ fn main() {
             }
         })
         .manage(app_state)
+        .manage(ssh::SshState::default())
         .invoke_handler(tauri::generate_handler![
             start_pty,
             write_pty_input,
@@ -298,6 +299,7 @@ fn main() {
             ssh::write_ssh_pty_input,
             ssh::resize_ssh_pty,
             ssh::close_ssh_pty,
+            ssh::answer_ssh_mfa,
             settings::get_settings,
             settings::save_settings,
             connections::get_connections,

@@ -36,6 +36,18 @@ interface PtyExitEvent {
   message: string;
 }
 
+interface SshMfaPrompt {
+  text: string;
+  echo: boolean;
+}
+
+interface SshMfaPromptEvent {
+  id: string;
+  name: string;
+  instruction: string;
+  prompts: SshMfaPrompt[];
+}
+
 interface TerminalComponentProps {
   isActive: boolean;
   sshConfig?: SshConfig;
@@ -109,11 +121,20 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
   const [showRetryOverlay, setShowRetryOverlay] = useState(false);
   const [retryPassword, setRetryPassword] = useState("");
 
+  // MFA 验证对话框状态
+  const [mfaEvent, setMfaEvent] = useState<SshMfaPromptEvent | null>(null);
+  const [mfaResponses, setMfaResponses] = useState<string[]>([]);
+  const [showMfaOverlay, setShowMfaOverlay] = useState(false);
+
   // 当 prop sshConfig 变化时（新连接），重置内部状态
   useEffect(() => {
     setActiveSshConfig(sshConfig);
     setShowRetryOverlay(false);
     setRetryPassword("");
+
+    setMfaEvent(null);
+    setMfaResponses([]);
+    setShowMfaOverlay(false);
   }, [sshConfig]);
 
   // 同步 activeSshConfig 到 ref，供 Effect 1 的 handlers 使用
@@ -303,6 +324,8 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     let disposed = false;
     let unlistenOutput: UnlistenFn | null = null;
     let unlistenExit: UnlistenFn | null = null;
+    let unlistenMfa: UnlistenFn | null = null;
+    let unlistenConnected: UnlistenFn | null = null;
 
     const connect = async () => {
       // 等待 xterm 初始化
@@ -338,13 +361,33 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       });
       unlistenExit = await listen<PtyExitEvent>("pty-exit", (event) => {
         if (event.payload.id === ptyIdRef.current) {
-          term.current?.writeln(`\r\n[PTY exited] ${event.payload.message}`);
+          const msg = event.payload.message;
+          term.current?.writeln(`\r\n[PTY exited] ${msg}`);
+          // 认证失败时弹出重试对话框
+          if (activeSshConfig && isAuthError(msg)) {
+            ptyIdRef.current = null;
+            setShowRetryOverlay(true);
+          }
+        }
+      });
+      unlistenConnected = await listen<{ id: string }>("ssh-connected", (event) => {
+        if (event.payload.id === ptyIdRef.current) {
+          term.current?.writeln("\r\n[Connected]");
+        }
+      });
+      unlistenMfa = await listen<SshMfaPromptEvent>("ssh-mfa-prompt", (event) => {
+        if (event.payload.id === ptyIdRef.current) {
+          setMfaEvent(event.payload);
+          setMfaResponses(new Array(event.payload.prompts.length).fill(""));
+          setShowMfaOverlay(true);
         }
       });
 
       if (disposed) {
         unlistenOutput();
         unlistenExit();
+        unlistenMfa();
+        unlistenConnected?.();
         return;
       }
 
@@ -368,7 +411,7 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
             cols,
             rows,
           });
-          term.current?.writeln("\r\n[Connected]");
+          // [Connected] 由后端 ssh-connected 事件触发，不在这里写
         } else {
           term.current?.writeln("Starting local shell PTY...");
           await invoke<string>("start_pty", { id: newId, cols, rows });
@@ -379,11 +422,6 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
         const errStr = String(error);
         term.current?.writeln(`\r\n[Failed to start PTY] ${errStr}`);
         console.error("connect failed", error);
-
-        // 如果是 SSH 认证失败，显示密码重试 overlay
-        if (activeSshConfig && isAuthError(errStr)) {
-          setShowRetryOverlay(true);
-        }
       }
     };
 
@@ -393,6 +431,8 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
       disposed = true;
       unlistenOutput?.();
       unlistenExit?.();
+      unlistenMfa?.();
+      unlistenConnected?.();
       // 关闭当前 PTY 连接（activeSshConfig 变化时触发，用于关闭旧连接）
       if (ptyIdRef.current) {
         const id = ptyIdRef.current;
@@ -440,6 +480,16 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
     setActiveSshConfig(newConfig);
   };
 
+  const handleMfaSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!mfaEvent || !ptyIdRef.current) return;
+    void invoke("answer_ssh_mfa", {
+      id: ptyIdRef.current,
+      responses: mfaResponses,
+    });
+    setShowMfaOverlay(false);
+  };
+
   return (
     <div
       style={{
@@ -468,6 +518,7 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
                 value={retryPassword}
                 onChange={(e) => setRetryPassword(e.target.value)}
                 placeholder="输入密码"
+                onKeyDown={(e) => e.stopPropagation()}
                 autoFocus
               />
               <div className="password-retry-actions">
@@ -480,6 +531,60 @@ function TerminalComponent({ isActive, sshConfig, logPath, settings }, ref) {
                 </button>
                 <button type="submit" className="password-retry-btn retry">
                   重试连接
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showMfaOverlay && mfaEvent && (
+        <div className="password-retry-overlay">  
+          <div className="password-retry-dialog">
+            <div className="password-retry-icon">🛡️</div>
+            <h3 className="password-retry-title">{mfaEvent.name || "需要两步验证"}</h3>
+            <p className="password-retry-desc">{mfaEvent.instruction}</p>
+            <form onSubmit={handleMfaSubmit} className="password-retry-form">
+              {mfaEvent.prompts.map((prompt, index) => (
+                <div key={index} style={{ marginBottom: "10px" }}>
+                  <label style={{ display: "block", marginBottom: "5px", fontSize: "12px", opacity: 0.8 }}>
+                    {prompt.text}
+                  </label>
+                  <input
+                    type={prompt.echo ? "text" : "password"}
+                    className="password-retry-input"
+                    value={mfaResponses[index] || ""}
+                    onChange={(e) => {
+                      const newResponses = [...mfaResponses];
+                      newResponses[index] = e.target.value;
+                      setMfaResponses(newResponses);
+                    }}
+                    onKeyDown={(e) => {
+                      // 阻止事件冒泡到 xterm，防止回退键、空格等触发终端行为
+                      e.stopPropagation();
+                    }}
+                    autoFocus={index === 0}
+                    placeholder={prompt.text.replace(/[:：]\s*$/, "")}
+                  />
+                </div>
+              ))}
+              <div className="password-retry-actions">
+                <button
+                  type="button"
+                  className="password-retry-btn cancel"
+                  onClick={() => {
+                    setShowMfaOverlay(false);
+                    // 发送空响应或取消标识，后端会因认证失败而退出
+                    void invoke("answer_ssh_mfa", {
+                      id: ptyIdRef.current,
+                      responses: mfaEvent.prompts.map(() => ""),
+                    });
+                  }}
+                >
+                  取消
+                </button>
+                <button type="submit" className="password-retry-btn retry">
+                  验证
                 </button>
               </div>
             </form>

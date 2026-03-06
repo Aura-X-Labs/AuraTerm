@@ -1,260 +1,332 @@
-use ssh2::Session;
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use tauri::{AppHandle, Emitter};
+use russh::{client, ChannelMsg};
 
-#[derive(Clone, serde::Serialize)]
-struct PtyOutputEvent {
-    id: String,
-    data: String,
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::{mpsc, Mutex};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SshMfaPrompt {
+    pub text: String,
+    pub echo: bool,
 }
 
-#[derive(Clone, serde::Serialize)]
-struct PtyExitEvent {
-    id: String,
-    message: String,
+#[derive(Clone, Serialize, Deserialize)]
+pub struct KeyboardInteractivePromptPayload {
+    pub id: String,
+    pub name: String,
+    pub instruction: String,
+    pub prompts: Vec<SshMfaPrompt>,
 }
 
-pub struct SshSession {
-    pub channel: Arc<Mutex<ssh2::Channel>>,
-    #[allow(dead_code)]
-    pub session: Arc<Mutex<ssh2::Session>>,
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TerminalDataPayload {
+    pub id: String,
+    pub data: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PtyExitPayload {
+    pub id: String,
+    pub message: String,
+}
+
+struct ClientHandler {}
+
+impl client::Handler for ClientHandler {
+    type Error = russh::Error;
+
+    fn check_server_key(self: &mut Self, _server_public_key: &russh::keys::PublicKey) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        async { Ok(true) }
+    }
 }
 
 #[derive(Clone)]
 pub struct SshState {
-    pub sessions: Arc<Mutex<std::collections::HashMap<String, SshSession>>>,
+    pub connections: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
+    pub auth_responses: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
+    pub resize_channels: Arc<Mutex<HashMap<String, mpsc::Sender<(u32, u32)>>>>,
 }
 
 impl Default for SshState {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SshState {
+    pub fn new() -> Self {
         Self {
-            sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            auth_responses: Arc::new(Mutex::new(HashMap::new())),
+            resize_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 #[tauri::command]
-pub fn start_ssh_pty(
-    app: AppHandle,
-    state: tauri::State<'_, super::AppState>,
-    host: String,
-    port: u16,
-    user: String,
-    password: Option<String>,
-    private_key: Option<String>,
-    cols: u32,
-    rows: u32,
+pub async fn answer_ssh_mfa(
+    state: State<'_, SshState>,
     id: String,
-) -> Result<String, String> {
-    let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
-    // Enable TCP keepalive to prevent random "transport read" disconnects on idle
-    let _ = tcp.set_nodelay(true);
-
-    let mut sess = Session::new().map_err(|e| e.to_string())?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake().map_err(|e| e.to_string())?;
-
-    // Enable SSH protocol keepalive
-    sess.set_keepalive(true, 15);
-
-    if let Some(_pk) = private_key {
-        // Need to parse or use a file path? The simple way is via file, but since we get file contents...
-        // Let's assume it's just trying password for now to get it compiling, or we can use the `userauth_pubkey_memory` if we enable vendored-openssl
-        sess.userauth_password(&user, password.as_deref().unwrap_or("")).map_err(|e| e.to_string())?;
-    } else if let Some(pw) = password {
-        sess.userauth_password(&user, &pw).map_err(|e| e.to_string())?;
-    } else {
-        return Err("No authentication method provided".to_string());
-    };
-
-    if !sess.authenticated() {
-        return Err("Authentication failed".to_string());
-    }
-
-    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-    channel.request_pty("xterm", None, Some((cols, rows, 0, 0))).map_err(|e| e.to_string())?;
-    channel.shell().map_err(|e| e.to_string())?;
-
-    // Make channel non-blocking for reading
-    sess.set_blocking(false);
-
-    let sess_arc = Arc::new(Mutex::new(sess));
-    let channel_arc = Arc::new(Mutex::new(channel));
-
-    {
-        let mut guard = state.ssh_state.sessions.lock().unwrap();
-        guard.insert(
-            id.clone(),
-            SshSession {
-                channel: channel_arc.clone(),
-                session: sess_arc.clone(),
-            },
-        );
-    }
-
-    let pty_id = id.clone();
-    let app_handle = app.clone();
-    
-    let channel_clone = channel_arc.clone();
-    
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 4096];
-        loop {
-            let mut read_amount = 0;
-            let mut err_msg = None;
-            let mut should_exit = false;
-
-            {
-                if let Ok(mut c) = channel_clone.lock() {
-                    match c.read(&mut buffer) {
-                        Ok(0) => {
-                            if c.eof() {
-                                should_exit = true;
-                            }
-                        }
-                        Ok(size) => {
-                            read_amount = size;
-                        }
-                        Err(e) => {
-                            let e_str = e.to_string();
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e_str.to_lowercase().contains("would block")
-                                || e_str.to_uppercase().contains("EAGAIN")
-                            {
-                                // 非阻塞模式下的正常情况，忽略
-                            } else {
-                                err_msg = Some(e_str);
-                                should_exit = true;
-                            }
-                        }
-                    }
-                } else {
-                    should_exit = true;
-                }
-            }
-
-            if should_exit {
-                let _ = app_handle.emit(
-                    "pty-exit",
-                    PtyExitEvent {
-                        id: pty_id.clone(),
-                        message: err_msg.unwrap_or_else(|| "SSH PTY closed".to_string()),
-                    },
-                );
-                break;
-            }
-
-            if read_amount > 0 {
-                let output = String::from_utf8_lossy(&buffer[..read_amount]).to_string();
-                let _ = app_handle.emit(
-                    "pty-output",
-                    PtyOutputEvent {
-                        id: pty_id.clone(),
-                        data: output,
-                    },
-                );
-            } else {
-                thread::sleep(std::time::Duration::from_millis(10));
-            }
+    responses: Vec<String>,
+) -> Result<(), String> {
+    let mut auth_responses = state.auth_responses.lock().await;
+    if let Some(tx) = auth_responses.get_mut(&id) {
+        for response in responses {
+            tx.send(response)
+                .await
+                .map_err(|_| "Failed to send MFA response".to_string())?;
         }
-    });
-
-    Ok(id)
+        Ok(())
+    } else {
+        Err("Auth response channel not found".to_string())
+    }
 }
 
 #[tauri::command]
-pub fn write_ssh_pty_input(
-    state: tauri::State<'_, super::AppState>,
+pub async fn write_ssh_pty_input(
+    state: State<'_, SshState>,
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let channel_arc = {
-        let mut guard = state.ssh_state.sessions.lock().map_err(|error| error.to_string())?;
-        let Some(session) = guard.get_mut(&id) else {
-            return Err("SSH session not found".to_string());
-        };
-        session.channel.clone()
-    };
+    let mut connections = state.connections.lock().await;
+    if let Some(tx) = connections.get_mut(&id) {
+        let _ = tx.send(data).await;
+        Ok(())
+    } else {
+        Err("Connection not found".to_string())
+    }
+}
 
-    // Write data iteratively in non-blocking mode
-    let bytes = data.as_bytes();
-    let mut written = 0;
-    while written < bytes.len() {
-        let mut channel = channel_arc.lock().map_err(|error| error.to_string())?;
-        match channel.write(&bytes[written..]) {
-            Ok(n) => {
-                if n == 0 {
-                    return Err("Failed to write to SSH channel: 0 bytes written".to_string());
-                }
-                written += n;
-            }
-            Err(e) => {
-                let e_str = e.to_string();
-                if e.kind() == std::io::ErrorKind::WouldBlock || e_str.to_lowercase().contains("would block") || e_str.to_uppercase().contains("EAGAIN") {
-                    drop(channel); // Release lock before sleeping
-                    std::thread::yield_now();
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                    continue;
-                }
-                return Err(e_str);
-            }
-        }
+#[tauri::command]
+pub async fn resize_ssh_pty(
+    state: State<'_, SshState>,
+    id: String,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
+    let mut resize_channels = state.resize_channels.lock().await;
+    if let Some(tx) = resize_channels.get_mut(&id) {
+        let _ = tx.send((cols, rows)).await;
+        Ok(())
+    } else {
+        Err("Connection not found".to_string())
     }
-    if let Ok(mut channel) = channel_arc.lock() {
-        let _ = channel.flush();
-    }
+}
+
+#[tauri::command]
+pub async fn close_ssh_pty(
+    state: State<'_, SshState>,
+    id: String,
+) -> Result<(), String> {
+    let mut connections = state.connections.lock().await;
+    let mut resize_channels = state.resize_channels.lock().await;
+    let mut auth_responses = state.auth_responses.lock().await;
+    
+    connections.remove(&id);
+    resize_channels.remove(&id);
+    auth_responses.remove(&id);
+    
     Ok(())
 }
 
 #[tauri::command]
-pub fn resize_ssh_pty(
-    state: tauri::State<'_, super::AppState>,
+pub async fn start_ssh_pty(
+    app: AppHandle,
+    state: State<'_, SshState>,
     id: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: Option<String>,
+    _private_key: Option<String>,
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
-    let channel_arc = {
-        let mut guard = state.ssh_state.sessions.lock().map_err(|error| error.to_string())?;
-        let Some(session) = guard.get_mut(&id) else {
-            return Ok(());
-        };
-        session.channel.clone()
+    println!(
+        "Starting SSH connection to {}@{}:{} with JumpServer bypass for MFA",
+        user, host, port
+    );
+
+    let (auth_response_tx, mut auth_response_rx) = mpsc::channel(1);
+
+    state
+        .auth_responses
+        .lock()
+        .await
+        .insert(id.clone(), auth_response_tx);
+
+    let handler = ClientHandler {};
+
+    let config = std::sync::Arc::new(client::Config {
+        ..Default::default()
+    });
+
+    let addr = format!("{}:{}", host, port);
+    println!("Connecting to {}...", addr);
+
+    let session_res = client::connect(config, addr, handler).await;
+    if let Err(e) = session_res {
+         return Err(format!("Connection error: {}", e));
+    }
+    let mut session = session_res.unwrap();
+    
+
+    println!("Authenticating as {}...", user);
+
+    let auth_res_start = if let Some(pwd) = password {
+        // Try password first if provided
+        let res = session.authenticate_password(user.clone(), pwd).await;
+        match res {
+            Ok(russh::client::AuthResult::Success) => {
+                println!("Password authentication successful!");
+                // we should continue
+                None
+            }
+            Ok(russh::client::AuthResult::Failure { .. }) => {
+                println!("Password auth failed, falling back to keyboard-interactive");
+                Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await)
+            }
+            Err(e) => return Err(format!("Password auth error: {}", e)),
+        }
+    } else {
+        Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await)
     };
 
-    loop {
-        let mut channel = channel_arc.lock().map_err(|error| error.to_string())?;
-        match channel.request_pty_size(cols, rows, None, None) {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                let e_str = e.to_string();
-                if e_str.to_lowercase().contains("would block") || e_str.to_uppercase().contains("EAGAIN") {
-                    drop(channel);
-                    std::thread::yield_now();
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                    continue;
+    if let Some(auth_res_future) = auth_res_start {
+        let mut auth_res = auth_res_future.map_err(|e| format!("Keyboard interactive init failed: {}", e))?;
+
+        loop {
+            match auth_res {
+                russh::client::KeyboardInteractiveAuthResponse::Success => {
+                    println!("Authentication successful!");
+                    break;
                 }
-                return Err(e_str);
+                russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
+                    return Err("Authentication failed".into());
+                }
+                russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
+                    name,
+                    instructions,
+                    prompts,
+                } => {
+                    let prompt_payloads: Vec<SshMfaPrompt> = prompts
+                        .iter()
+                        .map(|p| SshMfaPrompt {
+                            text: p.prompt.clone(),
+                            echo: p.echo,
+                        })
+                        .collect();
+
+                    let payload = KeyboardInteractivePromptPayload {
+                        id: id.clone(),
+                        name: name.clone(),
+                        instruction: instructions.clone(),
+                        prompts: prompt_payloads,
+                    };
+
+                    let _ = app.emit("ssh-mfa-prompt", payload);
+
+                    let mut answers = Vec::new();
+                    for _ in prompts.iter() {
+                        if let Some(resp) = auth_response_rx.recv().await {
+                            answers.push(resp);
+                        } else {
+                            return Err("Failed to get response".into());
+                        }
+                    }
+
+                    auth_res = session
+                        .authenticate_keyboard_interactive_respond(answers)
+                        .await
+                        .map_err(|e| format!("Failed auth step: {}", e))?;
+                }
             }
         }
     }
-}
 
-#[tauri::command]
-pub fn close_ssh_pty(
-    state: tauri::State<'_, super::AppState>,
-    id: String,
-) -> Result<(), String> {
-    let mut guard = state.ssh_state.sessions.lock().map_err(|error| error.to_string())?;
-    if let Some(session) = guard.remove(&id) {
-        if let Ok(mut channel) = session.channel.lock() {
-            let _ = channel.send_eof();
-            let _ = channel.close();
-            // We won't block to wait_close to avoid freezing UI
-            // let _ = channel.wait_close();
-        }
+    println!("Requesting PTY and shell...");
+    let channel_res = session.channel_open_session().await;
+    if channel_res.is_err() {
+        return Err(format!("Channel error: {}", channel_res.unwrap_err()));
     }
+    let mut channel = channel_res.unwrap();
+
+    channel.request_pty(false, "xterm-256color", cols, rows, 0, 0, &[]).await
+        .map_err(|e| format!("PTY request failed: {}", e))?;
+
+    channel.request_shell(true).await
+        .map_err(|e| format!("Shell request failed: {}", e))?;
+
+    let (input_tx, mut input_rx) = mpsc::channel::<String>(32);
+    let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
+    
+    state.connections.lock().await.insert(id.clone(), input_tx);
+    state.resize_channels.lock().await.insert(id.clone(), resize_tx);
+
+    let connection_id_clone = id.clone();
+    let app_handle = app.clone();
+
+    let _ = app.emit("ssh-connected", TerminalDataPayload {
+        id: id.clone(),
+        data: String::new(),
+    });
+
+    tokio::spawn(async move {
+        let mut _session_handle = session;
+        loop {
+            tokio::select! {
+                Some(msg) = channel.wait() => {
+                    match msg {
+                        ChannelMsg::Data { ref data } => {
+                            let payload = TerminalDataPayload {
+                                id: connection_id_clone.clone(),
+                                data: String::from_utf8_lossy(data).to_string(),
+                            };
+                            let _ = app_handle.emit("pty-output", payload);
+                        }
+                        ChannelMsg::ExtendedData { ref data, .. } => {
+                            let payload = TerminalDataPayload {
+                                id: connection_id_clone.clone(),
+                                data: String::from_utf8_lossy(data).to_string(),
+                            };
+                            let _ = app_handle.emit("pty-output", payload);
+                        }
+                        ChannelMsg::Eof => {
+                            let _ = app_handle.emit(
+                                "pty-exit",
+                                PtyExitPayload {
+                                    id: connection_id_clone.clone(),
+                                    message: "SSH channel closed".to_string(),
+                                },
+                            );
+                            break;
+                        }
+                        ChannelMsg::Close => {
+                            let _ = app_handle.emit(
+                                "pty-exit",
+                                PtyExitPayload {
+                                    id: connection_id_clone.clone(),
+                                    message: "SSH connection closed".to_string(),
+                                },
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                Some(input) = input_rx.recv() => {
+                    let _ = channel.data(input.into_bytes().as_slice()).await;
+                }
+                Some((c, r)) = resize_rx.recv() => {
+                    let _ = channel.window_change(c, r, 0, 0).await;
+                }
+                else => break,
+            }
+        }
+        
+    });
+
     Ok(())
 }

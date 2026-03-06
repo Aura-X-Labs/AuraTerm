@@ -112,6 +112,9 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
               onChange={(e) => setHost(e.target.value)}
               placeholder="e.g. 192.168.1.100"
               autoFocus
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               required
             />
           </div>
@@ -133,6 +136,9 @@ export function ConnectDialog({ onConnect, onCancel }: ConnectDialogProps) {
                   type="text"
                   value={user}
                   onChange={(e) => setUser(e.target.value)}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   required
                 />
               </div>
