@@ -21,6 +21,11 @@
   color: #eee;
 }
 
+.dialog-content--wide {
+  width: 520px;
+  max-width: calc(100vw - 40px);
+}
+
 .dialog-title {
   margin-top: 0;
   margin-bottom: 20px;
@@ -97,6 +102,12 @@
   font-family: monospace;
 }
 
+.two-column-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .serial-port-row {
   display: flex;
   gap: 8px;
@@ -125,6 +136,14 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 12px;
+}
+
+.serial-settings-grid--compact {
+  gap: 0 12px;
+}
+
+.serial-settings-grid-span-2 {
+  grid-column: span 2;
 }
 
 .form-hint {
@@ -221,4 +240,21 @@
 
 .save-connection-name:focus {
   border-color: #0078d4;
+}
+
+@media (max-width: 560px) {
+  .dialog-content--wide {
+    width: calc(100vw - 24px);
+    padding: 16px;
+  }
+
+  .protocol-selector,
+  .two-column-grid,
+  .serial-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .serial-settings-grid-span-2 {
+    grid-column: span 1;
+  }
 }

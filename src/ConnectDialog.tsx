@@ -1,5 +1,6 @@
-import { useEffect, useState, FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { SerialHistoryItem } from "./settings";
 import "./ConnectDialog.css";
 
 export type ConnectionProtocol = "ssh" | "telnet" | "serial";
@@ -10,15 +11,6 @@ export interface SshConfig {
   user: string;
   password?: string;
   privateKey?: string;
-}
-
-export interface ConnectResult {
-  protocol: ConnectionProtocol;
-  sshConfig?: SshConfig;
-  telnetConfig?: TelnetConfig;
-  serialConfig?: SerialConfig;
-  saveAs?: string; // 非 undefined 表示需要保存，值为连接名称
-  logPath?: string; // 非 undefined 表示开启持续写日志
 }
 
 export interface TelnetConfig {
@@ -35,6 +27,16 @@ export interface SerialConfig {
   flowControl: "none" | "hardware" | "software";
 }
 
+export interface ConnectResult {
+  protocol: ConnectionProtocol;
+  sshConfig?: SshConfig;
+  telnetConfig?: TelnetConfig;
+  serialConfig?: SerialConfig;
+  saveAs?: string;
+  saveGroup?: string;
+  logPath?: string;
+}
+
 interface SerialPortInfo {
   portName: string;
   portType: string;
@@ -44,13 +46,49 @@ interface SerialPortInfo {
   pid?: number | null;
 }
 
+interface SerialPresetOption {
+  id: string;
+  name: string;
+  portName?: string;
+  baudRate: number;
+  dataBits: 5 | 6 | 7 | 8;
+  stopBits: 1 | 2;
+  parity: "none" | "odd" | "even";
+  flowControl: "none" | "hardware" | "software";
+}
+
 interface ConnectDialogProps {
   initialProtocol?: ConnectionProtocol;
+  lastSerialConfig?: SerialHistoryItem | null;
+  recentSerialConfigs?: SerialHistoryItem[];
   onConnect: (result: ConnectResult) => void;
   onCancel: () => void;
 }
 
-export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: ConnectDialogProps) {
+const BUILTIN_SERIAL_PRESETS: SerialPresetOption[] = [
+  { id: "builtin-115200-8n1", name: "115200 · 8N1", baudRate: 115200, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" },
+  { id: "builtin-9600-8n1", name: "9600 · 8N1", baudRate: 9600, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" },
+  { id: "builtin-57600-8n1", name: "57600 · 8N1", baudRate: 57600, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" },
+  { id: "builtin-38400-8n1", name: "38400 · 8N1", baudRate: 38400, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" },
+  { id: "builtin-9600-7e1", name: "9600 · 7E1", baudRate: 9600, dataBits: 7, stopBits: 1, parity: "even", flowControl: "none" },
+];
+
+function applySerialOption(option: Pick<SerialPresetOption, "portName" | "baudRate" | "dataBits" | "stopBits" | "parity" | "flowControl">, setPortName: (value: string) => void, setBaudRate: (value: string) => void, setDataBits: (value: "5" | "6" | "7" | "8") => void, setStopBits: (value: "1" | "2") => void, setParity: (value: "none" | "odd" | "even") => void, setFlowControl: (value: "none" | "hardware" | "software") => void) {
+  if (option.portName) setPortName(option.portName);
+  setBaudRate(String(option.baudRate));
+  setDataBits(String(option.dataBits) as "5" | "6" | "7" | "8");
+  setStopBits(String(option.stopBits) as "1" | "2");
+  setParity(option.parity);
+  setFlowControl(option.flowControl);
+}
+
+export function ConnectDialog({
+  initialProtocol = "ssh",
+  lastSerialConfig = null,
+  recentSerialConfigs = [],
+  onConnect,
+  onCancel,
+}: ConnectDialogProps) {
   const [protocol, setProtocol] = useState<ConnectionProtocol>(initialProtocol);
   const [host, setHost] = useState("");
   const [port, setPort] = useState("22");
@@ -60,19 +98,18 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
   const [authType, setAuthType] = useState<"password" | "key">("password");
   const [saveConnection, setSaveConnection] = useState(true);
   const [connectionName, setConnectionName] = useState("");
-  // Telnet 字段
+  const [connectionGroup, setConnectionGroup] = useState("");
   const [telnetPort, setTelnetPort] = useState("23");
-  // Serial 字段
-  const [serialPortName, setSerialPortName] = useState("");
-  const [serialBaudRate, setSerialBaudRate] = useState("9600");
-  const [serialDataBits, setSerialDataBits] = useState<"5" | "6" | "7" | "8">("8");
-  const [serialStopBits, setSerialStopBits] = useState<"1" | "2">("1");
-  const [serialParity, setSerialParity] = useState<"none" | "odd" | "even">("none");
-  const [serialFlowControl, setSerialFlowControl] = useState<"none" | "hardware" | "software">("none");
+  const [serialPortName, setSerialPortName] = useState(lastSerialConfig?.portName ?? "");
+  const [serialBaudRate, setSerialBaudRate] = useState(String(lastSerialConfig?.baudRate ?? 9600));
+  const [serialDataBits, setSerialDataBits] = useState<"5" | "6" | "7" | "8">(String(lastSerialConfig?.dataBits ?? 8) as "5" | "6" | "7" | "8");
+  const [serialStopBits, setSerialStopBits] = useState<"1" | "2">(String(lastSerialConfig?.stopBits ?? 1) as "1" | "2");
+  const [serialParity, setSerialParity] = useState<"none" | "odd" | "even">(lastSerialConfig?.parity ?? "none");
+  const [serialFlowControl, setSerialFlowControl] = useState<"none" | "hardware" | "software">(lastSerialConfig?.flowControl ?? "none");
+  const [selectedSerialPresetId, setSelectedSerialPresetId] = useState("custom");
   const [serialPorts, setSerialPorts] = useState<SerialPortInfo[]>([]);
   const [loadingSerialPorts, setLoadingSerialPorts] = useState(false);
   const [serialError, setSerialError] = useState("");
-  // 日志字段
   const [enableLog, setEnableLog] = useState(true);
   const [logFilePath, setLogFilePath] = useState("");
 
@@ -80,9 +117,57 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
   const isTelnet = protocol === "telnet";
   const isSerial = protocol === "serial";
 
+  const recentPresetOptions = useMemo<SerialPresetOption[]>(() => {
+    const seen = new Set<string>();
+    return recentSerialConfigs
+      .filter((item) => {
+        const key = `${item.portName}|${item.baudRate}|${item.dataBits}|${item.stopBits}|${item.parity}|${item.flowControl}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        portName: item.portName,
+        baudRate: item.baudRate,
+        dataBits: item.dataBits,
+        stopBits: item.stopBits,
+        parity: item.parity,
+        flowControl: item.flowControl,
+      }));
+  }, [recentSerialConfigs]);
+
+  const serialPresetOptions = useMemo(() => [...recentPresetOptions, ...BUILTIN_SERIAL_PRESETS], [recentPresetOptions]);
+
   useEffect(() => {
     setProtocol(initialProtocol);
-  }, [initialProtocol]);
+    if (lastSerialConfig) {
+      applySerialOption(
+        lastSerialConfig,
+        setSerialPortName,
+        setSerialBaudRate,
+        setSerialDataBits,
+        setSerialStopBits,
+        setSerialParity,
+        setSerialFlowControl,
+      );
+    }
+  }, [initialProtocol, lastSerialConfig]);
+
+  useEffect(() => {
+    const matched = serialPresetOptions.find((option) =>
+      option.portName === undefined || option.portName === serialPortName
+        ? option.baudRate === (parseInt(serialBaudRate, 10) || 9600) &&
+          option.dataBits === (parseInt(serialDataBits, 10) as 5 | 6 | 7 | 8) &&
+          option.stopBits === (parseInt(serialStopBits, 10) as 1 | 2) &&
+          option.parity === serialParity &&
+          option.flowControl === serialFlowControl &&
+          (option.portName ? option.portName === serialPortName : true)
+        : false
+    );
+    setSelectedSerialPresetId(matched?.id ?? "custom");
+  }, [serialBaudRate, serialDataBits, serialFlowControl, serialParity, serialPortName, serialPresetOptions, serialStopBits]);
 
   const loadSerialPorts = async () => {
     setLoadingSerialPorts(true);
@@ -108,26 +193,38 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
     }
   }, [isSerial]);
 
-  // 当 host 或 user 变化时，自动填充默认连接名
   const defaultName = isSsh
     ? (user && host ? `${user}@${host}` : host)
     : isTelnet
       ? (host ? `telnet://${host}:${telnetPort}` : "")
       : (serialPortName ? `serial://${serialPortName}@${serialBaudRate}` : "");
 
-  // 根据 defaultName 计算日志默认基础路径（无时间戳和后缀，连接时自动拼上）
-  const safeDefaultName = defaultName
-    .replace(/[^a-zA-Z0-9\-_@.]/g, "_")
-    || "session";
+  const safeDefaultName = defaultName.replace(/[^a-zA-Z0-9\-_@.]/g, "_") || "session";
   const defaultLogPath = `~/AuraTerm/logs/${safeDefaultName}`;
+
+  const handleSerialPresetChange = (presetId: string) => {
+    setSelectedSerialPresetId(presetId);
+    if (presetId === "custom") return;
+    const preset = serialPresetOptions.find((item) => item.id === presetId);
+    if (!preset) return;
+    applySerialOption(
+      preset,
+      setSerialPortName,
+      setSerialBaudRate,
+      setSerialDataBits,
+      setSerialStopBits,
+      setSerialParity,
+      setSerialFlowControl,
+    );
+  };
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if ((isSsh || isTelnet) && !host) return;
-    if (isSsh && !user) return;
+    if ((isSsh || isTelnet) && !host.trim()) return;
+    if (isSsh && !user.trim()) return;
     if (isSerial && !serialPortName.trim()) return;
 
-    const config: SshConfig = {
+    const sshConfig: SshConfig = {
       host,
       port: parseInt(port, 10) || 22,
       user,
@@ -137,19 +234,18 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
 
     onConnect({
       protocol,
-      sshConfig: isSsh ? config : undefined,
+      sshConfig: isSsh ? sshConfig : undefined,
       telnetConfig: isTelnet ? { host, port: parseInt(telnetPort, 10) || 23 } : undefined,
-      serialConfig: isSerial
-        ? {
-            portName: serialPortName.trim(),
-            baudRate: parseInt(serialBaudRate, 10) || 9600,
-            dataBits: parseInt(serialDataBits, 10) as 5 | 6 | 7 | 8,
-            stopBits: parseInt(serialStopBits, 10) as 1 | 2,
-            parity: serialParity,
-            flowControl: serialFlowControl,
-          }
-        : undefined,
+      serialConfig: isSerial ? {
+        portName: serialPortName.trim(),
+        baudRate: parseInt(serialBaudRate, 10) || 9600,
+        dataBits: parseInt(serialDataBits, 10) as 5 | 6 | 7 | 8,
+        stopBits: parseInt(serialStopBits, 10) as 1 | 2,
+        parity: serialParity,
+        flowControl: serialFlowControl,
+      } : undefined,
       saveAs: saveConnection ? (connectionName.trim() || defaultName) : undefined,
+      saveGroup: saveConnection && connectionGroup.trim() ? connectionGroup.trim() : undefined,
       logPath: enableLog ? (logFilePath.trim() || defaultLogPath) : undefined,
     });
   };
@@ -162,34 +258,19 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog-content">
+      <div className="dialog-content dialog-content--wide">
         <h2 className="dialog-title">New Session</h2>
         <div className="protocol-selector">
           <label className={isSsh ? "active" : ""}>
-            <input
-              type="radio"
-              name="protocol"
-              checked={isSsh}
-              onChange={() => setProtocol("ssh")}
-            />
+            <input type="radio" name="protocol" checked={isSsh} onChange={() => setProtocol("ssh")} />
             SSH
           </label>
           <label className={isTelnet ? "active" : ""}>
-            <input
-              type="radio"
-              name="protocol"
-              checked={isTelnet}
-              onChange={() => setProtocol("telnet")}
-            />
+            <input type="radio" name="protocol" checked={isTelnet} onChange={() => setProtocol("telnet")} />
             Telnet
           </label>
           <label className={isSerial ? "active" : ""}>
-            <input
-              type="radio"
-              name="protocol"
-              checked={isSerial}
-              onChange={() => setProtocol("serial")}
-            />
+            <input type="radio" name="protocol" checked={isSerial} onChange={() => setProtocol("serial")} />
             Serial
           </label>
         </div>
@@ -214,94 +295,91 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
 
           {isSsh ? (
             <>
-              <div className="form-group">
-                <label>Port:</label>
-                <input
-                  type="number"
-                  value={port}
-                  onChange={(e) => setPort(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label>User:</label>
-                <input
-                  type="text"
-                  value={user}
-                  onChange={(e) => setUser(e.target.value)}
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  required
-                />
+              <div className="two-column-grid">
+                <div className="form-group">
+                  <label>Port:</label>
+                  <input type="number" value={port} onChange={(e) => setPort(e.target.value)} required />
+                </div>
+                <div className="form-group">
+                  <label>User:</label>
+                  <input
+                    type="text"
+                    value={user}
+                    onChange={(e) => setUser(e.target.value)}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    required
+                  />
+                </div>
               </div>
             </>
           ) : isTelnet ? (
             <div className="form-group">
               <label>Port:</label>
-              <input
-                type="number"
-                value={telnetPort}
-                onChange={(e) => setTelnetPort(e.target.value)}
-                required
-              />
+              <input type="number" value={telnetPort} onChange={(e) => setTelnetPort(e.target.value)} required />
             </div>
           ) : (
             <>
-              <div className="form-group">
-                <label>Serial Port:</label>
-                <div className="serial-port-row">
-                  <input
-                    type="text"
-                    value={serialPortName}
-                    onChange={(e) => setSerialPortName(e.target.value)}
-                    placeholder="e.g. /dev/cu.usbserial-1410"
-                    autoFocus
-                    list="serial-port-options"
-                    required
-                  />
-                  <button
-                    type="button"
-                    className="serial-refresh-btn"
-                    onClick={() => void loadSerialPorts()}
-                    disabled={loadingSerialPorts}
-                  >
-                    {loadingSerialPorts ? "..." : "↻"}
-                  </button>
+              <div className="serial-settings-grid serial-settings-grid--compact">
+                <div className="form-group serial-settings-grid-span-2">
+                  <label>Preset:</label>
+                  <select value={selectedSerialPresetId} onChange={(e) => handleSerialPresetChange(e.target.value)}>
+                    <option value="custom">Custom</option>
+                    {recentPresetOptions.length > 0 && (
+                      <optgroup label="Recent">
+                        {recentPresetOptions.map((preset) => (
+                          <option key={preset.id} value={preset.id}>{preset.name}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    <optgroup label="Common">
+                      {BUILTIN_SERIAL_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.name}</option>
+                      ))}
+                    </optgroup>
+                  </select>
                 </div>
-                <datalist id="serial-port-options">
-                  {serialPorts.map((portInfo) => (
-                    <option key={portInfo.portName} value={portInfo.portName}>
-                      {portInfo.manufacturer ? `${portInfo.manufacturer} (${portInfo.portType})` : portInfo.portType}
-                    </option>
-                  ))}
-                </datalist>
-                {serialError ? (
-                  <div className="form-hint error">串口枚举失败：{serialError}</div>
-                ) : serialPorts.length > 0 ? (
-                  <div className="form-hint">
-                    已发现 {serialPorts.length} 个设备：{serialPorts.map((item) => item.portName).join(", ")}
+
+                <div className="form-group serial-settings-grid-span-2">
+                  <label>Serial Port:</label>
+                  <div className="serial-port-row">
+                    <input
+                      type="text"
+                      value={serialPortName}
+                      onChange={(e) => setSerialPortName(e.target.value)}
+                      placeholder="e.g. /dev/cu.usbserial-1410"
+                      autoFocus
+                      list="serial-port-options"
+                      required
+                    />
+                    <button type="button" className="serial-refresh-btn" onClick={() => void loadSerialPorts()} disabled={loadingSerialPorts}>
+                      {loadingSerialPorts ? "..." : "↻"}
+                    </button>
                   </div>
-                ) : (
-                  <div className="form-hint">未发现串口设备，可手动输入设备路径后连接。</div>
-                )}
-              </div>
+                  <datalist id="serial-port-options">
+                    {serialPorts.map((portInfo) => (
+                      <option key={portInfo.portName} value={portInfo.portName}>
+                        {portInfo.manufacturer ? `${portInfo.manufacturer} (${portInfo.portType})` : portInfo.portType}
+                      </option>
+                    ))}
+                  </datalist>
+                  {serialError ? (
+                    <div className="form-hint error">串口枚举失败：{serialError}</div>
+                  ) : serialPorts.length > 0 ? (
+                    <div className="form-hint">已发现 {serialPorts.length} 个设备：{serialPorts.map((item) => item.portName).join(", ")}</div>
+                  ) : (
+                    <div className="form-hint">未发现串口设备，可手动输入设备路径后连接。</div>
+                  )}
+                </div>
 
-              <div className="form-group">
-                <label>Baud Rate:</label>
-                <input
-                  type="number"
-                  value={serialBaudRate}
-                  onChange={(e) => setSerialBaudRate(e.target.value)}
-                  min="1"
-                  required
-                />
-              </div>
-
-              <div className="serial-settings-grid">
+                <div className="form-group">
+                  <label>Baud Rate:</label>
+                  <input type="number" value={serialBaudRate} onChange={(e) => setSerialBaudRate(e.target.value)} min="1" required />
+                </div>
                 <div className="form-group">
                   <label>Data Bits:</label>
-                  <select value={serialDataBits} onChange={(e) => setSerialDataBits(e.target.value as "5" | "6" | "7" | "8") }>
+                  <select value={serialDataBits} onChange={(e) => setSerialDataBits(e.target.value as "5" | "6" | "7" | "8")}>
                     <option value="5">5</option>
                     <option value="6">6</option>
                     <option value="7">7</option>
@@ -310,22 +388,22 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
                 </div>
                 <div className="form-group">
                   <label>Stop Bits:</label>
-                  <select value={serialStopBits} onChange={(e) => setSerialStopBits(e.target.value as "1" | "2") }>
+                  <select value={serialStopBits} onChange={(e) => setSerialStopBits(e.target.value as "1" | "2")}>
                     <option value="1">1</option>
                     <option value="2">2</option>
                   </select>
                 </div>
                 <div className="form-group">
                   <label>Parity:</label>
-                  <select value={serialParity} onChange={(e) => setSerialParity(e.target.value as "none" | "odd" | "even") }>
+                  <select value={serialParity} onChange={(e) => setSerialParity(e.target.value as "none" | "odd" | "even")}>
                     <option value="none">None</option>
                     <option value="odd">Odd</option>
                     <option value="even">Even</option>
                   </select>
                 </div>
-                <div className="form-group">
+                <div className="form-group serial-settings-grid-span-2">
                   <label>Flow Control:</label>
-                  <select value={serialFlowControl} onChange={(e) => setSerialFlowControl(e.target.value as "none" | "hardware" | "software") }>
+                  <select value={serialFlowControl} onChange={(e) => setSerialFlowControl(e.target.value as "none" | "hardware" | "software")}>
                     <option value="none">None</option>
                     <option value="hardware">Hardware</option>
                     <option value="software">Software</option>
@@ -339,10 +417,7 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
             <>
               <div className="form-group auth-type-group">
                 <label>Auth Type:</label>
-                <select
-                  value={authType}
-                  onChange={(e) => setAuthType(e.target.value as "password" | "key")}
-                >
+                <select value={authType} onChange={(e) => setAuthType(e.target.value as "password" | "key")}>
                   <option value="password">Password</option>
                   <option value="key">Private Key</option>
                 </select>
@@ -351,11 +426,7 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
               {authType === "password" ? (
                 <div className="form-group">
                   <label>Password:</label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
+                  <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
                 </div>
               ) : (
                 <div className="form-group">
@@ -378,35 +449,34 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
             </>
           )}
 
-          {/* 保存连接选项 */}
           <div className="form-group save-connection-group">
             <label className="save-connection-label">
-              <input
-                type="checkbox"
-                checked={saveConnection}
-                onChange={(e) => setSaveConnection(e.target.checked)}
-              />
+              <input type="checkbox" checked={saveConnection} onChange={(e) => setSaveConnection(e.target.checked)} />
               <span>保存此连接</span>
             </label>
             {saveConnection && (
-              <input
-                type="text"
-                className="save-connection-name"
-                value={connectionName}
-                onChange={(e) => setConnectionName(e.target.value)}
-                placeholder={defaultName || "连接名称（可选）"}
-              />
+              <div className="two-column-grid">
+                <input
+                  type="text"
+                  className="save-connection-name"
+                  value={connectionName}
+                  onChange={(e) => setConnectionName(e.target.value)}
+                  placeholder={defaultName || "连接名称（可选）"}
+                />
+                <input
+                  type="text"
+                  className="save-connection-name"
+                  value={connectionGroup}
+                  onChange={(e) => setConnectionGroup(e.target.value)}
+                  placeholder="分组（可选）"
+                />
+              </div>
             )}
           </div>
 
-          {/* 日志选项 */}
           <div className="form-group save-connection-group">
             <label className="save-connection-label">
-              <input
-                type="checkbox"
-                checked={enableLog}
-                onChange={(e) => setEnableLog(e.target.checked)}
-              />
+              <input type="checkbox" checked={enableLog} onChange={(e) => setEnableLog(e.target.checked)} />
               <span>保存会话日志</span>
             </label>
             {enableLog && (
@@ -421,12 +491,8 @@ export function ConnectDialog({ initialProtocol = "ssh", onConnect, onCancel }: 
           </div>
 
           <div className="dialog-actions">
-            <button type="button" className="btn-cancel" onClick={onCancel}>
-              Cancel
-            </button>
-            <button type="submit" className="btn-connect" disabled={!canConnect}>
-              Connect
-            </button>
+            <button type="button" className="btn-cancel" onClick={onCancel}>Cancel</button>
+            <button type="submit" className="btn-connect" disabled={!canConnect}>Connect</button>
           </div>
         </form>
       </div>

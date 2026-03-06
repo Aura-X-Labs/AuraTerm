@@ -15,6 +15,8 @@ fn default_auth_type() -> String {
 pub struct SavedConnection {
     pub id: String,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default = "default_protocol")]
     pub protocol: String,
     #[serde(default)]

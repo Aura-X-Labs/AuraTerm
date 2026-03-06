@@ -3,7 +3,7 @@ import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SshConfig, TelnetConfig, SerialConfig } from "./ConnectDialog";
+import type { SshConfig, TelnetConfig, SerialConfig } from "./ConnectDialog.tsx";
 import type { AppSettings } from "./settings";
 import { DEFAULT_SETTINGS } from "./settings";
 import "xterm/css/xterm.css";
@@ -55,7 +55,10 @@ interface TerminalComponentProps {
   session: SessionConfig;
   logPath?: string;
   settings?: AppSettings;
+  onSerialConnectionStateChange?: (state: SerialConnectionState) => void;
 }
+
+export type SerialConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 
 function isAuthError(errStr: string): boolean {
   const lower = errStr.toLowerCase();
@@ -106,7 +109,7 @@ function closeSession(id: string, session: SessionConfig) {
 }
 
 export const TerminalComponent = forwardRef<TerminalHandle, TerminalComponentProps>(
-function TerminalComponent({ isActive, session, logPath, settings }, ref) {
+function TerminalComponent({ isActive, session, logPath, settings, onSerialConnectionStateChange }, ref) {
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
   const settingsRef = useRef<AppSettings>(effectiveSettings);
@@ -135,6 +138,11 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
   const [mfaEvent, setMfaEvent] = useState<SshMfaPromptEvent | null>(null);
   const [mfaResponses, setMfaResponses] = useState<string[]>([]);
   const [showMfaOverlay, setShowMfaOverlay] = useState(false);
+  const onSerialConnectionStateChangeRef = useRef(onSerialConnectionStateChange);
+
+  useEffect(() => {
+    onSerialConnectionStateChangeRef.current = onSerialConnectionStateChange;
+  }, [onSerialConnectionStateChange]);
 
   useEffect(() => {
     setActiveSession(session);
@@ -143,11 +151,20 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
     setMfaEvent(null);
     setMfaResponses([]);
     setShowMfaOverlay(false);
+    if (session.protocol === "serial") {
+      onSerialConnectionStateChangeRef.current?.("connecting");
+    }
   }, [session]);
 
   useEffect(() => {
     activeSessionRef.current = activeSession;
   }, [activeSession]);
+
+  const notifySerialConnectionStateChange = (state: SerialConnectionState) => {
+    if (activeSessionRef.current.protocol === "serial") {
+      onSerialConnectionStateChangeRef.current?.(state);
+    }
+  };
 
   useImperativeHandle(ref, () => ({
     saveLog: async (tabTitle: string) => {
@@ -302,7 +319,8 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
     let unlistenOutput: UnlistenFn | null = null;
     let unlistenExit: UnlistenFn | null = null;
     let unlistenMfa: UnlistenFn | null = null;
-    let unlistenConnected: UnlistenFn | null = null;
+    let unlistenSshConnected: UnlistenFn | null = null;
+    let unlistenSerialConnected: UnlistenFn | null = null;
 
     const connect = async () => {
       if (!term.current) {
@@ -337,14 +355,23 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
         if (event.payload.id === ptyIdRef.current) {
           const msg = event.payload.message;
           term.current?.writeln(`\r\n[Session exited] ${msg}`);
+          if (activeSessionRef.current.protocol === "serial") {
+            notifySerialConnectionStateChange("closed");
+          }
           if (activeSessionRef.current.protocol === "ssh" && isAuthError(msg)) {
             ptyIdRef.current = null;
             setShowRetryOverlay(true);
           }
         }
       });
-      unlistenConnected = await listen<{ id: string }>("ssh-connected", (event) => {
+      unlistenSshConnected = await listen<{ id: string }>("ssh-connected", (event) => {
         if (event.payload.id === ptyIdRef.current) {
+          term.current?.writeln("\r\n[Connected]");
+        }
+      });
+      unlistenSerialConnected = await listen<{ id: string }>("serial-connected", (event) => {
+        if (event.payload.id === ptyIdRef.current) {
+          notifySerialConnectionStateChange("connected");
           term.current?.writeln("\r\n[Connected]");
         }
       });
@@ -360,7 +387,8 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
         unlistenOutput();
         unlistenExit();
         unlistenMfa();
-        unlistenConnected?.();
+        unlistenSshConnected?.();
+        unlistenSerialConnected?.();
         return;
       }
 
@@ -398,6 +426,7 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
             term.current?.writeln("\r\n[Connected]");
             break;
           case "serial":
+            notifySerialConnectionStateChange("connecting");
             term.current?.writeln(
               `Opening serial port ${activeSession.serialConfig.portName} @ ${activeSession.serialConfig.baudRate}...`
             );
@@ -410,7 +439,6 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
               parity: activeSession.serialConfig.parity,
               flowControl: activeSession.serialConfig.flowControl,
             });
-            term.current?.writeln("\r\n[Connected]");
             break;
           case "local":
             term.current?.writeln("Starting local shell PTY...");
@@ -421,6 +449,9 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
         if (disposed) return;
         ptyIdRef.current = null;
         const errStr = String(error);
+        if (activeSession.protocol === "serial") {
+          notifySerialConnectionStateChange("error");
+        }
         term.current?.writeln(`\r\n[Failed to start session] ${errStr}`);
         console.error("connect failed", error);
       }
@@ -433,7 +464,8 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
       unlistenOutput?.();
       unlistenExit?.();
       unlistenMfa?.();
-      unlistenConnected?.();
+      unlistenSshConnected?.();
+      unlistenSerialConnected?.();
       if (ptyIdRef.current) {
         const id = ptyIdRef.current;
         ptyIdRef.current = null;
@@ -498,10 +530,10 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
         <div className="password-retry-overlay">
           <div className="password-retry-dialog">
             <div className="password-retry-icon">🔐</div>
-            <h3 className="password-retry-title">认证失败</h3>
+            <h3 className="password-retry-title">Authentication Failed</h3>
             <p className="password-retry-desc">
-              无法连接到 <strong>{activeSshConfig.user}@{activeSshConfig.host}</strong>，
-              密码不正确，请重新输入。
+              Could not connect to <strong>{activeSshConfig.user}@{activeSshConfig.host}</strong>.
+              Incorrect password, please try again.
             </p>
             <form onSubmit={handlePasswordRetry} className="password-retry-form">
               <input
@@ -509,7 +541,7 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
                 className="password-retry-input"
                 value={retryPassword}
                 onChange={(e) => setRetryPassword(e.target.value)}
-                placeholder="输入密码"
+                placeholder="Enter password"
                 onKeyDown={(e) => e.stopPropagation()}
                 autoFocus
               />
@@ -519,10 +551,10 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
                   className="password-retry-btn cancel"
                   onClick={() => setShowRetryOverlay(false)}
                 >
-                  取消
+                  Cancel
                 </button>
                 <button type="submit" className="password-retry-btn retry">
-                  重试连接
+                  Retry
                 </button>
               </div>
             </form>
@@ -534,7 +566,7 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
         <div className="password-retry-overlay">
           <div className="password-retry-dialog">
             <div className="password-retry-icon">🛡️</div>
-            <h3 className="password-retry-title">{mfaEvent.name || "需要两步验证"}</h3>
+            <h3 className="password-retry-title">{mfaEvent.name || "MFA Required"}</h3>
             <p className="password-retry-desc">{mfaEvent.instruction}</p>
             <form onSubmit={handleMfaSubmit} className="password-retry-form">
               {mfaEvent.prompts.map((prompt, index) => (
@@ -571,10 +603,10 @@ function TerminalComponent({ isActive, session, logPath, settings }, ref) {
                     });
                   }}
                 >
-                  取消
+                  Cancel
                 </button>
                 <button type="submit" className="password-retry-btn retry">
-                  验证
+                  Verify
                 </button>
               </div>
             </form>

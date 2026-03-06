@@ -12,6 +12,17 @@ export interface QuickButton {
   command: string;
 }
 
+export interface SerialHistoryItem {
+  id: string;
+  name: string;
+  portName: string;
+  baudRate: number;
+  dataBits: 5 | 6 | 7 | 8;
+  stopBits: 1 | 2;
+  parity: "none" | "odd" | "even";
+  flowControl: "none" | "hardware" | "software";
+}
+
 export interface AppSettings {
   fontSize: number;
   fontFamily: string;
@@ -26,6 +37,10 @@ export interface AppSettings {
   middleClickPaste: boolean;
   /** 终端下方快捷按钮列表 */
   quickButtons: QuickButton[];
+  /** 最近一次使用的串口参数 */
+  lastSerialConfig: SerialHistoryItem | null;
+  /** 最近使用过的串口参数历史，用于快速预设 */
+  recentSerialConfigs: SerialHistoryItem[];
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -42,4 +57,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ctrlVPaste: true,
   middleClickPaste: true,
   quickButtons: [],
+  lastSerialConfig: null,
+  recentSerialConfigs: [],
 };

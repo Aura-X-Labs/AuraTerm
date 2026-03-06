@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
-import { TerminalComponent, type TerminalHandle } from "./TerminalComponent.tsx";
+import { TerminalComponent, type SerialConnectionState, type TerminalHandle } from "./TerminalComponent.tsx";
 import {
   ConnectDialog,
   type SshConfig,
@@ -11,12 +11,12 @@ import {
   type SerialConfig,
   type ConnectResult,
   type ConnectionProtocol,
-} from "./ConnectDialog";
-import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar";
+} from "./ConnectDialog.tsx";
+import { BookmarkSidebar, type SavedConnection } from "./BookmarkSidebar.tsx";
 import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
 import { TerminalInputBar } from "./TerminalInputBar";
-import { type AppSettings, type QuickButton, DEFAULT_SETTINGS } from "./settings";
+import { type AppSettings, type QuickButton, type SerialHistoryItem, DEFAULT_SETTINGS } from "./settings";
 import "./App.css";
 
 type TabSession =
@@ -34,6 +34,11 @@ interface Tab {
 
 let nextTabId = 1;
 
+function formatSerialFrame(serialConfig: SerialConfig) {
+  const parity = serialConfig.parity === "none" ? "N" : serialConfig.parity === "even" ? "E" : "O";
+  return `${serialConfig.dataBits}${parity}${serialConfig.stopBits}`;
+}
+
 function App() {
   const [tabs, setTabs] = useState<Tab[]>([{ id: `tab-0`, title: "Local Shell", session: { protocol: "local" } }]);
   const [activeTabId, setActiveTabId] = useState<string>("tab-0");
@@ -47,9 +52,15 @@ function App() {
   const [sidebarRefreshToken, setSidebarRefreshToken] = useState(0);
   const [showNewTabMenu, setShowNewTabMenu] = useState(false);
   const [isWindowFocused, setIsWindowFocused] = useState(true);
+  const [serialConnectionStates, setSerialConnectionStates] = useState<Record<string, SerialConnectionState>>({});
+  const settingsRef = useRef<AppSettings>(DEFAULT_SETTINGS);
 
   /** Map from tab id → TerminalHandle (populated by callback refs in JSX) */
   const termRefs = useRef<Map<string, TerminalHandle>>(new Map());
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   useEffect(() => {
     let unlistenFocus: (() => void) | null = null;
@@ -101,17 +112,58 @@ function App() {
     setShowSettings(false);
   };
 
-  /** 向当前激活标签页的终端发送文本 */
+  const persistSettingsSilently = (newSettings: AppSettings) => {
+    settingsRef.current = newSettings;
+    setSettings(newSettings);
+    void invoke("save_settings", { settings: newSettings }).catch((error) => {
+      console.error("save_settings failed", error);
+    });
+  };
+
+  const rememberSerialConfig = (serialConfig: SerialConfig) => {
+    const configKey = `${serialConfig.portName}|${serialConfig.baudRate}|${serialConfig.dataBits}|${serialConfig.stopBits}|${serialConfig.parity}|${serialConfig.flowControl}`;
+    const historyItem: SerialHistoryItem = {
+      id: crypto.randomUUID(),
+      name: `${serialConfig.portName} · ${serialConfig.baudRate} ${serialConfig.dataBits}${serialConfig.parity === "none" ? "N" : serialConfig.parity === "even" ? "E" : "O"}${serialConfig.stopBits}`,
+      portName: serialConfig.portName,
+      baudRate: serialConfig.baudRate,
+      dataBits: serialConfig.dataBits,
+      stopBits: serialConfig.stopBits,
+      parity: serialConfig.parity,
+      flowControl: serialConfig.flowControl,
+    };
+
+    const current = settingsRef.current;
+    const recentSerialConfigs = [historyItem, ...current.recentSerialConfigs.filter((item) => {
+      const itemKey = `${item.portName}|${item.baudRate}|${item.dataBits}|${item.stopBits}|${item.parity}|${item.flowControl}`;
+      return itemKey !== configKey;
+    })].slice(0, 8);
+
+    persistSettingsSilently({
+      ...current,
+      lastSerialConfig: historyItem,
+      recentSerialConfigs,
+    });
+  };
+
+  /** Send text to the currently active tab's terminal */
   const sendToActiveTerminal = (text: string) => {
     const handle = termRefs.current.get(activeTabId);
     if (handle) handle.sendData(text);
   };
 
-  /** 快捷按钮列表更新（直接写入配置，不关闭设置面板） */
+  /** Update quick buttons list (write directly to config without closing settings panel) */
   const handleButtonsChange = async (buttons: QuickButton[]) => {
     const newSettings: AppSettings = { ...settings, quickButtons: buttons };
     await invoke("save_settings", { settings: newSettings }).catch(console.error);
     setSettings(newSettings);
+  };
+
+  const updateSerialConnectionState = (tabId: string, state: SerialConnectionState) => {
+    setSerialConnectionStates((prev) => {
+      if (prev[tabId] === state) return prev;
+      return { ...prev, [tabId]: state };
+    });
   };
 
   const handleTitlebarMouseDown = (event: MouseEvent<HTMLDivElement>) => {
@@ -181,16 +233,22 @@ function App() {
       }
       return newTabs;
     });
+    setSerialConnectionStates((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   };
 
   /**
-   * 处理 ConnectDialog 的连接结果：
-   * - 开新标签页建立 SSH 连接
-   * - 如果 saveAs 有值，则保存到 connections.json
+   * Handle ConnectDialog result:
+   * - Open new tab to establish SSH/Telnet/Serial connection
+   * - If saveAs has a value, save connection to connections.json
    */
   const handleConnectResult = async (result: ConnectResult) => {
     const newId = `tab-${nextTabId++}`;
-    const { protocol, sshConfig, telnetConfig, serialConfig, saveAs } = result;
+    const { protocol, sshConfig, telnetConfig, serialConfig, saveAs, saveGroup } = result;
 
     if (protocol === "ssh" && sshConfig) {
       setTabs((prev) => [
@@ -223,6 +281,11 @@ function App() {
         },
       ]);
     }
+
+    if (protocol === "serial" && serialConfig) {
+      rememberSerialConfig(serialConfig);
+      updateSerialConnectionState(newId, "connecting");
+    }
     
     setActiveTabId(newId);
     setShowConnectDialog(false);
@@ -231,6 +294,7 @@ function App() {
       const conn: SavedConnection = {
         id: crypto.randomUUID(),
         name: saveAs,
+        group: saveGroup,
         protocol: protocol,
         host: protocol === "ssh" ? sshConfig!.host : protocol === "telnet" ? telnetConfig!.host : "",
         port: protocol === "ssh" ? sshConfig!.port : protocol === "telnet" ? telnetConfig!.port : 0,
@@ -248,9 +312,9 @@ function App() {
       };
       try {
         await invoke("save_connection", { connection: conn });
-        // 通知侧边栏刷新（递增 token）
+        // Notify sidebar to refresh
         setSidebarRefreshToken(t => t + 1);
-        // 如果侧边栏是关闭的，自动展开提示用户
+        // Expand sidebar automatically if it's closed
         setSidebarOpen(true);
       } catch (e) {
         console.error("Failed to save connection", e);
@@ -259,7 +323,7 @@ function App() {
   };
 
   /**
-   * 侧边栏双击已保存的连接，直接开新标签页
+   * Sidebar double-click on saved connection: Opens a new tab immediately
    */
   const handleBookmarkConnect = (connection: SavedConnection, _connectionId: string) => {
     const newId = `tab-${nextTabId++}`;
@@ -267,6 +331,14 @@ function App() {
 
     let tab: Tab;
     if (protocol === "serial" && connection.portName && connection.baudRate) {
+      rememberSerialConfig({
+        portName: connection.portName,
+        baudRate: connection.baudRate,
+        dataBits: connection.dataBits ?? 8,
+        stopBits: connection.stopBits ?? 1,
+        parity: connection.parity ?? "none",
+        flowControl: connection.flowControl ?? "none",
+      });
       tab = {
         id: newId,
         title: `${connection.portName} @ ${connection.baudRate}`,
@@ -311,12 +383,21 @@ function App() {
       };
     }
 
+    if (tab.session.protocol === "serial") {
+      updateSerialConnectionState(newId, "connecting");
+    }
+
     setTabs((prev) => [
       ...prev,
       tab,
     ]);
     setActiveTabId(newId);
   };
+
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const activeSerialConfig = activeTab?.session.protocol === "serial" ? activeTab.session.serialConfig : null;
+  const activeSerialConnectionState =
+    activeTab && activeSerialConfig ? serialConnectionStates[activeTab.id] ?? "connecting" : null;
 
   return (
     <div className={`app-container ${osType} ${isWindowFocused ? 'focused' : 'blurred'}`}>
@@ -384,7 +465,7 @@ function App() {
         <button
           className={`tab-new-btn bookmark-toggle-btn ${sidebarOpen ? 'active' : ''}`}
           onClick={() => setSidebarOpen(v => !v)}
-          title="快捷连接"
+          title="Bookmarks"
           style={{ marginRight: '4px' }}
         >
           🔖
@@ -444,6 +525,7 @@ function App() {
                   session={tab.session}
                   logPath={tab.logPath}
                   settings={settings}
+                  onSerialConnectionStateChange={(state) => updateSerialConnectionState(tab.id, state)}
                 />
               ))
             )}
@@ -453,6 +535,20 @@ function App() {
             onSend={sendToActiveTerminal}
             onButtonsChange={handleButtonsChange}
           />
+          {activeTab && activeSerialConfig && activeSerialConnectionState && (
+            <div className="terminal-statusbar">
+              <div className="terminal-statusbar-left">
+                <span className={`terminal-status-indicator ${activeSerialConnectionState}`} />
+                <span>{activeSerialConfig.portName}</span>
+                <span className="terminal-status-pill">{activeSerialConnectionState}</span>
+              </div>
+              <div className="terminal-statusbar-right">
+                <span>{activeSerialConfig.baudRate} baud</span>
+                <span>{formatSerialFrame(activeSerialConfig)}</span>
+                <span>{activeSerialConfig.flowControl}</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -513,6 +609,8 @@ function App() {
       {showConnectDialog && (
         <ConnectDialog
           initialProtocol={connectDialogProtocol}
+          lastSerialConfig={settings.lastSerialConfig}
+          recentSerialConfigs={settings.recentSerialConfigs}
           onConnect={handleConnectResult}
           onCancel={() => setShowConnectDialog(false)}
         />

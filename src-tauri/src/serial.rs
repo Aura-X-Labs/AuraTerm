@@ -32,6 +32,11 @@ pub struct SerialPortInfo {
     pub pid: Option<u16>,
 }
 
+#[derive(Clone, Serialize)]
+struct SerialConnectedEvent {
+    id: String,
+}
+
 fn parse_data_bits(bits: u8) -> Result<DataBits, String> {
     match bits {
         5 => Ok(DataBits::Five),
@@ -134,6 +139,13 @@ pub async fn start_serial_session(
             },
         );
     }
+
+    let _ = app.emit(
+        "serial-connected",
+        SerialConnectedEvent {
+            id: id.clone(),
+        },
+    );
 
     let app_handle = app.clone();
     let session_id = id.clone();

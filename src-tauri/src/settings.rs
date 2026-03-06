@@ -29,6 +29,19 @@ pub struct QuickButton {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SerialHistoryItem {
+    pub id: String,
+    pub name: String,
+    pub port_name: String,
+    pub baud_rate: u32,
+    pub data_bits: u8,
+    pub stop_bits: u8,
+    pub parity: String,
+    pub flow_control: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub font_size: u8,
     pub font_family: String,
@@ -47,6 +60,12 @@ pub struct Settings {
     /// Quick-action buttons shown below the terminal
     #[serde(default)]
     pub quick_buttons: Vec<QuickButton>,
+    /// Most recently used serial connection parameters
+    #[serde(default)]
+    pub last_serial_config: Option<SerialHistoryItem>,
+    /// Recent serial parameter presets inferred from usage history
+    #[serde(default)]
+    pub recent_serial_configs: Vec<SerialHistoryItem>,
 }
 
 fn default_true() -> bool { true }
@@ -63,6 +82,8 @@ impl Default for Settings {
             ctrl_v_paste: true,
             middle_click_paste: true,
             quick_buttons: vec![],
+            last_serial_config: None,
+            recent_serial_configs: vec![],
         }
     }
 }
