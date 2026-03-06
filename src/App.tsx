@@ -17,6 +17,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
 import { TerminalInputBar } from "./TerminalInputBar";
 import { type AppSettings, type QuickButton, type SerialHistoryItem, DEFAULT_SETTINGS } from "./settings";
+import logoUrl from "./logo.png";
 import "./App.css";
 
 type TabSession =
@@ -474,7 +475,9 @@ function App() {
         )}
         {osType === "windows" ? (
           <div className="titlebar-windows-main">
-            <div className="titlebar-title">AuraTerm</div>
+            <div className="titlebar-logo" data-no-drag="true">
+              <img src={logoUrl} alt="logo" />
+            </div>
             <div
               ref={menuBarRef}
               className="titlebar-menubar"
@@ -526,6 +529,7 @@ function App() {
                 )}
               </div>
             </div>
+            <div className="titlebar-title center">AuraTerm</div>
           </div>
         ) : (
           <div className="titlebar-title">AuraTerm</div>

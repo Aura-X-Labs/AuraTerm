@@ -6,28 +6,44 @@
 }
 
 .titlebar {
-  height: 30px;
-  background: #2d2d2d;
+  height: 35px;
+  background: #181818;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 10px;
+  padding: 0;
   user-select: none;
   -webkit-user-select: none;
-  cursor: move;
+  cursor: default;
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   z-index: 1000;
+  border-bottom: 1px solid #2b2b2b;
 }
 
 .titlebar-windows-main {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex: 1;
   min-width: 0;
-  padding-right: 138px;
+  height: 100%;
+}
+
+.titlebar-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  height: 100%;
+}
+
+.titlebar-logo img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  opacity: 0.9;
 }
 
 .titlebar-title {
@@ -35,10 +51,20 @@
   font-weight: bold;
 }
 
+.titlebar-title.center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  color: #969696;
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .titlebar-menubar {
   display: flex;
   align-items: stretch;
-  gap: 2px;
   height: 100%;
 }
 
@@ -49,19 +75,19 @@
 }
 
 .titlebar-menu-btn {
-  height: 24px;
-  padding: 0 10px;
+  height: 100%;
+  padding: 0 8px;
   border: none;
-  border-radius: 4px;
+  border-radius: 0;
   background: transparent;
-  color: #c8c8c8;
-  font-size: 12px;
+  color: #cccccc;
+  font-size: 13px;
   cursor: default;
 }
 
 .titlebar-menu-btn:hover,
 .titlebar-menu-btn.open {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.1);
   color: #ffffff;
 }
 
@@ -182,7 +208,7 @@
   top: 0;
   bottom: 0;
   display: flex;
-  -webkit-app-region: no-drag;
+  height: 100%;
 }
 
 .titlebar-control-win-btn {
@@ -190,13 +216,14 @@
   width: 46px;
   background: transparent;
   border: none;
-  color: #fff;
+  color: #ffffff;
   font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
   font-size: 10px;
   cursor: default;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background 0.1s ease;
 }
 
 .titlebar-control-win-btn:hover {
@@ -205,7 +232,7 @@
 
 .titlebar-control-win-btn.close:hover {
   background: #e81123;
-  color: white;
+  color: #ffffff;
 }
 
 .app-container.windows .titlebar {
@@ -213,48 +240,45 @@
   background: #181818;
 }
 
-.app-container.windows .titlebar-title {
-  padding-left: 4px;
-  color: #f3f3f3;
-  letter-spacing: 0.02em;
-}
-
 .tab-bar {
-  height: 36px;
-  background: #252525;
+  height: 35px;
+  background: #1e1e1e;
   display: flex;
   align-items: flex-end;
-  padding: 0 10px;
-  gap: 4px;
-  margin-top: 30px;
+  padding: 0;
+  gap: 1px;
+  margin-top: 35px;
   overflow-x: auto;
 }
 
 .tab-item {
-  height: 28px;
+  height: 100%;
   min-width: 120px;
   max-width: 200px;
-  background: #333;
-  border-radius: 6px 6px 0 0;
+  background: #2d2d2d;
+  border-radius: 0;
+  border-right: 1px solid #252525;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 10px;
   cursor: pointer;
-  color: #aaa;
-  font-size: 12px;
+  color: #969696;
+  font-size: 13px;
   flex: 1;
-  transition: background 0.2s, color 0.2s;
+  transition: background 0.1s, color 0.1s;
   user-select: none;
 }
 
 .tab-item:hover {
-  background: #3c3c3c;
+  background: #2b2b2b;
+  color: #cccccc;
 }
 
 .tab-item.active {
-  background: #000000;
-  color: #fff;
+  background: #1e1e1e;
+  color: #ffffff;
+  border-top: 1px solid #007acc;
 }
 
 .tab-title {

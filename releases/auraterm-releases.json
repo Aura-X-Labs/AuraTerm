@@ -1,7 +1,15 @@
 {
   "product": "AuraTerm",
-  "latest": "0.1.3.0306",
+  "latest": "0.1.4.0307",
   "releases": [
+    {
+      "version": "0.1.4.0307",
+      "filename": "AuraTerm-0.1.4.0307-x64.exe",
+      "platform": "windows-x64",
+      "published_at": "2026-03-07",
+      "sha256": "f03464ac48befe2e1710e931d9b658ddb5cf8b5974f187a85728a6c17367ab6e",
+      "notes": "automated release"
+    },
     {
       "version": "0.1.3.0306",
       "filename": "AuraTerm-0.1.3.0306-arm64.dmg",
