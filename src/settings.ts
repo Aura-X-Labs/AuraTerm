@@ -58,7 +58,7 @@ const DEFAULT_THEME: TerminalTheme = {
 export const DEFAULT_SETTINGS: AppSettings = {
   fontSize: 15,
   fontFamily: 'Consolas, "Courier New", monospace',
-  scrollback: 1000,
+  scrollback: 10000,
   shellPath: null,
   theme: DEFAULT_THEME,
   ctrlCCopy: true,
