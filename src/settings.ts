@@ -43,16 +43,24 @@ export interface AppSettings {
   recentSerialConfigs: SerialHistoryItem[];
 }
 
+const LEGACY_DEFAULT_THEME: TerminalTheme = {
+  background: "#000000",
+  foreground: "#ffffff",
+  cursor: "#ffffff",
+};
+
+const DEFAULT_THEME: TerminalTheme = {
+  background: "#000000",
+  foreground: "#dcdcdc",
+  cursor: "#ffffff",
+};
+
 export const DEFAULT_SETTINGS: AppSettings = {
-  fontSize: 14,
+  fontSize: 15,
   fontFamily: 'Consolas, "Courier New", monospace',
   scrollback: 1000,
   shellPath: null,
-  theme: {
-    background: "#000000",
-    foreground: "#ffffff",
-    cursor: "#ffffff",
-  },
+  theme: DEFAULT_THEME,
   ctrlCCopy: true,
   ctrlVPaste: true,
   middleClickPaste: true,
@@ -60,3 +68,33 @@ export const DEFAULT_SETTINGS: AppSettings = {
   lastSerialConfig: null,
   recentSerialConfigs: [],
 };
+
+function normalizeColor(value?: string | null) {
+  return value?.trim().toLowerCase();
+}
+
+function shouldMigrateLegacyTheme(theme?: Partial<TerminalTheme> | null) {
+  return normalizeColor(theme?.background) === LEGACY_DEFAULT_THEME.background
+    && normalizeColor(theme?.foreground) === LEGACY_DEFAULT_THEME.foreground
+    && normalizeColor(theme?.cursor) === LEGACY_DEFAULT_THEME.cursor;
+}
+
+export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSettings {
+  const nextTheme: TerminalTheme = {
+    ...DEFAULT_THEME,
+    ...(value?.theme ?? {}),
+  };
+
+  if (shouldMigrateLegacyTheme(value?.theme)) {
+    nextTheme.foreground = DEFAULT_THEME.foreground;
+  }
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...value,
+    theme: nextTheme,
+    quickButtons: value?.quickButtons ?? DEFAULT_SETTINGS.quickButtons,
+    lastSerialConfig: value?.lastSerialConfig ?? DEFAULT_SETTINGS.lastSerialConfig,
+    recentSerialConfigs: value?.recentSerialConfigs ?? DEFAULT_SETTINGS.recentSerialConfigs,
+  };
+}

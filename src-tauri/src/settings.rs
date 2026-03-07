@@ -13,7 +13,7 @@ impl Default for TerminalTheme {
     fn default() -> Self {
         Self {
             background: "#000000".to_string(),
-            foreground: "#ffffff".to_string(),
+            foreground: "#dcdcdc".to_string(),
             cursor: "#ffffff".to_string(),
         }
     }

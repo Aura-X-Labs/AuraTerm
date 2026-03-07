@@ -103,6 +103,10 @@
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 
+.titlebar-menu-submenu-group {
+  position: relative;
+}
+
 .titlebar-menu-item {
   width: 100%;
   min-height: 30px;
@@ -119,9 +123,36 @@
   cursor: default;
 }
 
+.titlebar-menu-item--submenu {
+  padding-right: 8px;
+}
+
 .titlebar-menu-item:hover {
   background: #04395e;
   color: #ffffff;
+}
+
+.titlebar-menu-item-arrow {
+  margin-left: 18px;
+  color: #8e8e8e;
+}
+
+.titlebar-menu-submenu {
+  position: absolute;
+  top: -6px;
+  left: calc(100% - 2px);
+  min-width: 180px;
+  padding: 6px;
+  border: 1px solid #2f2f2f;
+  border-radius: 8px;
+  background: #252526;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.titlebar-menu-separator {
+  height: 1px;
+  margin: 6px 4px;
+  background: #343434;
 }
 
 .titlebar-menu-item-hint {
@@ -241,14 +272,34 @@
 }
 
 .tab-bar {
-  height: 35px;
+  height: 36px;
   background: #1e1e1e;
   display: flex;
-  align-items: flex-end;
+  align-items: stretch;
   padding: 0;
-  gap: 1px;
   margin-top: 35px;
+  min-width: 0;
+  position: relative;
+  z-index: 2;
+}
+
+.tab-strip {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
   overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.tab-bar-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+  border-left: 1px solid #252525;
+  background: #1e1e1e;
 }
 
 .tab-item {
@@ -265,9 +316,11 @@
   cursor: pointer;
   color: #969696;
   font-size: 13px;
-  flex: 1;
+  flex: 0 0 auto;
   transition: background 0.1s, color 0.1s;
   user-select: none;
+  box-sizing: border-box;
+  border-top: 2px solid transparent;
 }
 
 .tab-item:hover {
@@ -278,7 +331,7 @@
 .tab-item.active {
   background: #1e1e1e;
   color: #ffffff;
-  border-top: 1px solid #007acc;
+  border-top-color: #007acc;
 }
 
 .tab-title {
@@ -311,23 +364,35 @@
 }
 
 .tab-new-btn {
-  height: 26px;
-  width: 26px;
+  height: 100%;
+  width: 30px;
   background: transparent;
   border: none;
   color: #aaa;
-  font-size: 18px;
+  font-size: 15px;
+  line-height: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
-  margin-bottom: 2px;
+  border-radius: 0;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 3;
 }
 
 .tab-new-btn:hover {
-  background: #444;
+  background: #2b2b2b;
   color: #fff;
+}
+
+.bookmark-toggle-btn {
+  font-size: 14px;
+}
+
+.tab-settings-btn {
+  width: 34px;
+  font-size: 14px;
 }
 
 /* ── Workspace (Sidebar + Terminal area horizontal layout) ─────────────── */
@@ -1427,7 +1492,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 2200;
   backdrop-filter: blur(3px);
 }
 

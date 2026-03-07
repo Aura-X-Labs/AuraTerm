@@ -10,7 +10,7 @@ import BookmarkSidebar from "./BookmarkSidebar.vue";
 import SettingsDialog from "./SettingsDialog.vue";
 import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
-import { DEFAULT_SETTINGS, type AppSettings, type QuickButton, type SerialHistoryItem } from "./settings";
+import { DEFAULT_SETTINGS, normalizeAppSettings, type AppSettings, type QuickButton, type SerialHistoryItem } from "./settings";
 import type {
   ConnectResult,
   ConnectionProtocol,
@@ -31,6 +31,7 @@ interface Tab {
 }
 
 type AppMenuId = "file" | "help";
+type FileSubmenuId = "preferences";
 
 let nextTabId = 1;
 
@@ -53,6 +54,7 @@ const showNewTabMenu = ref(false);
 const isWindowFocused = ref(true);
 const serialConnectionStates = ref<Record<string, SerialConnectionState>>({});
 const openMenuId = ref<AppMenuId | null>(null);
+const openFileSubmenuId = ref<FileSubmenuId | null>(null);
 const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const termRefs = new Map<string, TerminalHandle>();
@@ -63,6 +65,10 @@ watch(settings, (value) => {
 }, { deep: true, immediate: true });
 
 watch(openMenuId, (menuId, _previous, onCleanup) => {
+  if (menuId !== "file") {
+    openFileSubmenuId.value = null;
+  }
+
   if (!menuId) {
     return;
   }
@@ -113,9 +119,9 @@ onMounted(async () => {
 
   try {
     const loaded = await invoke<AppSettings>("get_settings");
-    settings.value = { ...DEFAULT_SETTINGS, ...loaded };
+    settings.value = normalizeAppSettings(loaded);
   } catch {
-    settings.value = DEFAULT_SETTINGS;
+    settings.value = normalizeAppSettings();
   }
 
   try {
@@ -151,15 +157,17 @@ const appClassName = computed(() => [
 ]);
 
 async function handleSaveSettings(newSettings: AppSettings) {
-  await invoke("save_settings", { settings: newSettings }).catch(console.error);
-  settings.value = newSettings;
+  const normalizedSettings = normalizeAppSettings(newSettings);
+  await invoke("save_settings", { settings: normalizedSettings }).catch(console.error);
+  settings.value = normalizedSettings;
   showSettings.value = false;
 }
 
 function persistSettingsSilently(newSettings: AppSettings) {
-  settingsRef.value = newSettings;
-  settings.value = newSettings;
-  void invoke("save_settings", { settings: newSettings }).catch((error) => {
+  const normalizedSettings = normalizeAppSettings(newSettings);
+  settingsRef.value = normalizedSettings;
+  settings.value = normalizedSettings;
+  void invoke("save_settings", { settings: normalizedSettings }).catch((error) => {
     console.error("save_settings failed", error);
   });
 }
@@ -201,7 +209,7 @@ function sendToActiveTerminal(text: string) {
 }
 
 async function handleButtonsChange(buttons: QuickButton[]) {
-  const newSettings: AppSettings = { ...settings.value, quickButtons: buttons };
+  const newSettings = normalizeAppSettings({ ...settings.value, quickButtons: buttons });
   await invoke("save_settings", { settings: newSettings }).catch(console.error);
   settings.value = newSettings;
 }
@@ -279,15 +287,35 @@ async function handleExitApp() {
 
 function handleOpenAbout() {
   openMenuId.value = null;
+  openFileSubmenuId.value = null;
   showAbout.value = true;
 }
 
+function handleOpenSettings() {
+  openMenuId.value = null;
+  openFileSubmenuId.value = null;
+  showSettings.value = true;
+}
+
+function handleOpenNewTabMenu() {
+  openMenuId.value = null;
+  openFileSubmenuId.value = null;
+  showNewTabMenu.value = true;
+}
+
 function toggleMenu(menuId: AppMenuId) {
-  openMenuId.value = openMenuId.value === menuId ? null : menuId;
+  const nextMenuId = openMenuId.value === menuId ? null : menuId;
+  openMenuId.value = nextMenuId;
+  if (nextMenuId !== "file") {
+    openFileSubmenuId.value = null;
+  }
+}
+
+function toggleFileSubmenu(submenuId: FileSubmenuId) {
+  openFileSubmenuId.value = openFileSubmenuId.value === submenuId ? null : submenuId;
 }
 
 function stopDragPropagation(event: MouseEvent) {
-  event.preventDefault();
   event.stopPropagation();
 }
 
@@ -498,6 +526,21 @@ function handleBookmarkConnect(connection: SavedConnection) {
               File
             </button>
             <div v-if="openMenuId === 'file'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
+              <div
+                class="titlebar-menu-submenu-group"
+                @mouseenter="openFileSubmenuId = 'preferences'"
+              >
+                <button class="titlebar-menu-item titlebar-menu-item--submenu" type="button" @click="toggleFileSubmenu('preferences')">
+                  <span>Preferences</span>
+                  <span class="titlebar-menu-item-arrow">›</span>
+                </button>
+                <div v-if="openFileSubmenuId === 'preferences'" class="titlebar-menu-submenu" @mousedown="stopDragPropagation">
+                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenSettings">
+                    <span>Settings</span>
+                  </button>
+                </div>
+              </div>
+              <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleExitApp">
                 <span>Exit</span>
                 <span class="titlebar-menu-item-hint">Alt+F4</span>
@@ -559,29 +602,34 @@ function handleBookmarkConnect(connection: SavedConnection) {
     </div>
 
     <div class="tab-bar">
-      <button
-        class="tab-new-btn bookmark-toggle-btn"
-        :class="{ active: sidebarOpen }"
-        title="Bookmarks"
-        style="margin-right: 4px"
-        @click="sidebarOpen = !sidebarOpen"
-      >
-        🔖
-      </button>
+      <div class="tab-strip">
+        <button
+          class="tab-new-btn bookmark-toggle-btn"
+          :class="{ active: sidebarOpen }"
+          title="Bookmarks"
+          style="margin-right: 4px"
+          @click="sidebarOpen = !sidebarOpen"
+        >
+          🔖
+        </button>
 
-      <div
-        v-for="tab in tabs"
-        :key="tab.id"
-        class="tab-item"
-        :class="{ active: activeTabId === tab.id }"
-        @click="selectTab(tab.id)"
-      >
-        <span class="tab-title">{{ tab.title }}</span>
-        <button class="tab-close-btn" title="Close Tab" @click.stop="handleCloseTab(tab.id)">×</button>
+        <div
+          v-for="tab in tabs"
+          :key="tab.id"
+          class="tab-item"
+          :class="{ active: activeTabId === tab.id }"
+          @click="selectTab(tab.id)"
+        >
+          <span class="tab-title">{{ tab.title }}</span>
+          <button class="tab-close-btn" title="Close Tab" @click.stop="handleCloseTab(tab.id)">×</button>
+        </div>
+
+        <button class="tab-new-btn" type="button" title="New Tab" @mousedown.stop @click="handleOpenNewTabMenu">+</button>
       </div>
 
-      <button class="tab-new-btn" title="New Tab" @click="showNewTabMenu = true">+</button>
-      <button class="tab-new-btn" title="Settings" style="margin-left: auto" @click="showSettings = true">&#x2699;</button>
+      <div class="tab-bar-actions">
+        <button class="tab-new-btn tab-settings-btn" type="button" title="Settings" @mousedown.stop @click.stop="handleOpenSettings">&#x2699;</button>
+      </div>
     </div>
 
     <div class="workspace">

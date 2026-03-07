@@ -41,6 +41,39 @@ pub(crate) struct PtyExitEvent {
     message: String,
 }
 
+/// Detect default shell on Windows: Git Bash -> PowerShell -> CMD
+fn detect_default_shell_windows() -> String {
+    // 1. Check Git Bash in common locations
+    let git_bash_paths = vec![
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ];
+    
+    for path in &git_bash_paths {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    
+    // 2. Check via ProgramFiles environment variable
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        let git_bash = format!("{}\\Git\\bin\\bash.exe", program_files);
+        if std::path::Path::new(&git_bash).exists() {
+            return git_bash;
+        }
+    }
+    
+    if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+        let git_bash = format!("{}\\Git\\bin\\bash.exe", program_files_x86);
+        if std::path::Path::new(&git_bash).exists() {
+            return git_bash;
+        }
+    }
+    
+    // 3. Fallback to CMD
+    std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+}
+
 #[command]
 fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, id: String) -> Result<String, String> {
     let pty_system = native_pty_system();
@@ -53,10 +86,26 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
         })
         .map_err(|error| error.to_string())?;
 
-    let shell_path = if cfg!(target_os = "windows") {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    // Get shell path from settings or detect default
+    let settings = settings::get_settings(app.clone()).unwrap_or_default();
+    let shell_path = if let Some(custom_shell) = settings.shell_path {
+        if !custom_shell.trim().is_empty() {
+            custom_shell
+        } else {
+            // Empty string, use default
+            if cfg!(target_os = "windows") {
+                detect_default_shell_windows()
+            } else {
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+            }
+        }
     } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        // Not configured, use default
+        if cfg!(target_os = "windows") {
+            detect_default_shell_windows()
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        }
     };
 
     let command = CommandBuilder::new(shell_path);

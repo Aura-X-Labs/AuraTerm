@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import type { AppSettings } from "./settings";
+import { ref, computed } from "vue";
+import { normalizeAppSettings, type AppSettings } from "./settings";
 
 const props = defineProps<{
   initial: AppSettings;
@@ -11,7 +11,57 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-const settings = ref<AppSettings>(structuredClone(props.initial));
+const settings = ref<AppSettings>(normalizeAppSettings(props.initial));
+
+type ShellPresetValue = "auto" | "git-bash" | "powershell" | "cmd" | "custom";
+
+// Shell preset options
+const shellPresets: Array<{ value: ShellPresetValue; label: string }> = [
+  { value: "auto", label: "Auto Detect (Git Bash → CMD)" },
+  { value: "git-bash", label: "Git Bash" },
+  { value: "powershell", label: "PowerShell" },
+  { value: "cmd", label: "Command Prompt (cmd.exe)" },
+  { value: "custom", label: "Custom Path" },
+];
+
+// Determine which preset is selected based on shellPath
+const selectedShellPreset = computed<ShellPresetValue>({
+  get: () => {
+    const path = settings.value.shellPath;
+    if (!path) return "auto";
+    if (path.includes("Git\\bin\\bash.exe") || path.includes("Git/bin/bash.exe")) return "git-bash";
+    if (path.toLowerCase().includes("powershell")) return "powershell";
+    if (path.toLowerCase().includes("cmd.exe")) return "cmd";
+    return "custom";
+  },
+  set: (value: ShellPresetValue) => {
+    switch (value) {
+      case "auto":
+        settings.value = { ...settings.value, shellPath: null };
+        break;
+      case "git-bash":
+        settings.value = { ...settings.value, shellPath: "C:\\Program Files\\Git\\bin\\bash.exe" };
+        break;
+      case "powershell":
+        settings.value = { ...settings.value, shellPath: "powershell.exe" };
+        break;
+      case "cmd":
+        settings.value = { ...settings.value, shellPath: "cmd.exe" };
+        break;
+      case "custom":
+        // Keep current custom path or set empty
+        if (!settings.value.shellPath || 
+            settings.value.shellPath.includes("Git") || 
+            settings.value.shellPath.toLowerCase().includes("powershell") ||
+            settings.value.shellPath.toLowerCase().includes("cmd.exe")) {
+          settings.value = { ...settings.value, shellPath: "" };
+        }
+        break;
+    }
+  },
+});
+
+const showCustomPath = computed(() => selectedShellPreset.value === "custom");
 
 function update<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
   settings.value = { ...settings.value, [key]: value };
@@ -77,10 +127,19 @@ function inputChecked(event: Event) {
           </label>
 
           <label class="settings-field">
-            <span>Shell Path</span>
+            <span>Shell</span>
+            <select :value="selectedShellPreset" @change="selectedShellPreset = inputValue($event) as ShellPresetValue">
+              <option v-for="preset in shellPresets" :key="preset.value" :value="preset.value">
+                {{ preset.label }}
+              </option>
+            </select>
+          </label>
+
+          <label v-if="showCustomPath" class="settings-field">
+            <span>Custom Shell Path</span>
             <input
               type="text"
-              placeholder="Default (uses $SHELL)"
+              placeholder="e.g., C:\Program Files\Git\bin\bash.exe"
               :value="settings.shellPath ?? ''"
               @input="update('shellPath', inputValue($event) || null)"
             >
