@@ -2,7 +2,7 @@
   "name": "auraterm",
   "private": true,
   "version": "0.1.5",
-  "license": "BSL-1.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -4,7 +4,7 @@ version = "0.1.5"
 description = "AuraTerm - Modern TeraTerm alternative"
 authors = ["William Yang"]
 edition = "2021"
-license = "BSL-1.0"
+license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }

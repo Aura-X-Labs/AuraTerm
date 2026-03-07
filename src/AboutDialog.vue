@@ -47,8 +47,7 @@ function openExternal(url: string) {
 
 <div class="about-info">
             <p><strong>Built with:</strong> Tauri + Vue + TypeScript</p>
-            <p><strong>License:</strong> <a href="#" @click.prevent="openExternal('https://auraterm.com/license')">Commercial Source License</a></p>
-            <p class="license-note">Free for personal use. Commercial use requires license.</p>
+            <p><strong>License:</strong> MIT</p>
           </div>
 
           <div class="about-links">
