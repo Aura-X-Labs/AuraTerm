@@ -65,6 +65,9 @@ const port = ref("22");
 const user = ref("");
 const password = ref("");
 const privateKey = ref("");
+const privateKeyFileName = ref("");
+const privateKeyError = ref("");
+const privateKeyFileInput = ref<HTMLInputElement | null>(null);
 const authType = ref<"password" | "key">("password");
 const saveConnection = ref(true);
 const connectionName = ref("");
@@ -176,7 +179,11 @@ const safeDefaultName = computed(() => defaultName.value.replace(/[^a-zA-Z0-9\-_
 const defaultLogPath = computed(() => `~/AuraTerm/logs/${safeDefaultName.value}`);
 const canConnect = computed(() => {
   if (isSsh.value) {
-    return Boolean(host.value.trim() && user.value.trim());
+    return Boolean(
+      host.value.trim()
+      && user.value.trim()
+      && (authType.value !== "key" || privateKey.value.trim()),
+    );
   }
   if (isTelnet.value) {
     return Boolean(host.value.trim());
@@ -196,6 +203,42 @@ function handleSerialPresetChange(event: Event) {
   }
 }
 
+function triggerPrivateKeyPicker() {
+  privateKeyError.value = "";
+  privateKeyFileInput.value?.click();
+}
+
+async function handlePrivateKeyFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const [file] = input.files ?? [];
+
+  if (!file) {
+    return;
+  }
+
+  try {
+    privateKey.value = await file.text();
+    privateKeyFileName.value = file.name;
+    privateKeyError.value = "";
+  } catch (error) {
+    console.error("Failed to read private key file", error);
+    privateKey.value = "";
+    privateKeyFileName.value = "";
+    privateKeyError.value = "Unable to read the selected private key file.";
+  } finally {
+    input.value = "";
+  }
+}
+
+function clearPrivateKeySelection() {
+  privateKey.value = "";
+  privateKeyFileName.value = "";
+  privateKeyError.value = "";
+  if (privateKeyFileInput.value) {
+    privateKeyFileInput.value.value = "";
+  }
+}
+
 function handleSubmit(event: Event) {
   event.preventDefault();
   if ((isSsh.value || isTelnet.value) && !host.value.trim()) {
@@ -204,9 +247,14 @@ function handleSubmit(event: Event) {
   if (isSsh.value && !user.value.trim()) {
     return;
   }
+  if (isSsh.value && authType.value === "key" && !privateKey.value.trim()) {
+    return;
+  }
   if (isSerial.value && !serialPortName.value.trim()) {
     return;
   }
+
+  const sshSecret = password.value !== "" ? password.value : undefined;
 
   const serialConfig: SerialConfig | undefined = isSerial.value ? {
     portName: serialPortName.value.trim(),
@@ -223,7 +271,7 @@ function handleSubmit(event: Event) {
       host: host.value,
       port: parseInt(port.value, 10) || 22,
       user: user.value,
-      password: authType.value === "password" ? password.value : undefined,
+      password: sshSecret,
       privateKey: authType.value === "key" ? privateKey.value : undefined,
     } : undefined,
     telnetConfig: isTelnet.value ? { host: host.value, port: parseInt(telnetPort.value, 10) || 23 } : undefined,
@@ -392,8 +440,31 @@ function handleSubmit(event: Event) {
           </div>
 
           <div v-else class="form-group">
-            <label>Private Key (PEM):</label>
-            <textarea v-model="privateKey" placeholder="-----BEGIN RSA PRIVATE KEY-----..." rows="4" />
+            <label>Private Key:</label>
+            <input
+              ref="privateKeyFileInput"
+              type="file"
+              class="private-key-file-input"
+              @change="handlePrivateKeyFileChange"
+            >
+            <div class="private-key-picker-row">
+              <input
+                :value="privateKeyFileName || 'No private key selected'"
+                type="text"
+                class="private-key-display"
+                readonly
+              >
+              <button type="button" class="private-key-picker-btn" @click="triggerPrivateKeyPicker">Browse...</button>
+              <button
+                v-if="privateKeyFileName"
+                type="button"
+                class="private-key-clear-btn"
+                @click="clearPrivateKeySelection"
+              >
+                Clear
+              </button>
+            </div>
+            <div v-if="privateKeyError" class="form-hint error">{{ privateKeyError }}</div>
             <input v-model="password" type="password" placeholder="Key Passphrase (optional)" style="margin-top: 8px">
           </div>
         </template>

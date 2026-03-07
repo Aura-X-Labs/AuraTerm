@@ -439,7 +439,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
           host: connection.host,
           port: connection.port,
           user: connection.user,
-          password: connection.authType === "password" ? connection.password : undefined,
+          password: connection.password,
           privateKey: connection.authType === "key" ? connection.privateKey : undefined,
         },
       },

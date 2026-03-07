@@ -217,7 +217,7 @@ async function saveDraft() {
     port: protocol === "serial" ? 0 : editDraft.value.port,
     user: protocol === "ssh" ? editDraft.value.user.trim() : "",
     authType: protocol === "ssh" ? editDraft.value.authType : "none",
-    password: protocol === "ssh" && editDraft.value.authType === "password" ? editDraft.value.password : undefined,
+    password: protocol === "ssh" ? editDraft.value.password : undefined,
     privateKey: protocol === "ssh" && editDraft.value.authType === "key" ? editDraft.value.privateKey : undefined,
     portName: protocol === "serial" ? editDraft.value.portName?.trim() : undefined,
     baudRate: protocol === "serial" ? editDraft.value.baudRate : undefined,

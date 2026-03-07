@@ -1,4 +1,8 @@
-use russh::{client, ChannelMsg};
+use russh::{
+    client,
+    keys::{decode_secret_key, PrivateKeyWithHashAlg},
+    ChannelMsg,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -140,7 +144,7 @@ pub async fn start_ssh_pty(
     port: u16,
     user: String,
     password: Option<String>,
-    _private_key: Option<String>,
+    private_key: Option<String>,
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
@@ -175,7 +179,36 @@ pub async fn start_ssh_pty(
 
     println!("Authenticating as {}...", user);
 
-    let auth_res_start = if let Some(pwd) = password {
+    let password = password.filter(|value| !value.is_empty());
+    let private_key = private_key.filter(|value| !value.trim().is_empty());
+
+    let auth_res_start = if let Some(private_key) = private_key {
+        let decoded_key = decode_secret_key(&private_key, password.as_deref())
+            .map_err(|e| format!("Private key parse error: {}", e))?;
+        let rsa_hash = session
+            .best_supported_rsa_hash()
+            .await
+            .map_err(|e| format!("Failed to determine RSA hash algorithm: {}", e))?
+            .flatten();
+
+        let res = session
+            .authenticate_publickey(
+                user.clone(),
+                PrivateKeyWithHashAlg::new(Arc::new(decoded_key), rsa_hash),
+            )
+            .await;
+
+        match res {
+            Ok(russh::client::AuthResult::Success) => {
+                println!("Public key authentication successful!");
+                None
+            }
+            Ok(russh::client::AuthResult::Failure { .. }) => {
+                return Err("Private key authentication failed".into());
+            }
+            Err(e) => return Err(format!("Private key auth error: {}", e)),
+        }
+    } else if let Some(pwd) = password {
         // Try password first if provided
         let res = session.authenticate_password(user.clone(), pwd).await;
         match res {
