@@ -13,6 +13,6 @@ npm run tauri dev
 ## Compile Check
 
 ```
-npx tsc
+npx vue-tsc --noEmit
 cargo check
 ```

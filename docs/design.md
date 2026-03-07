@@ -11,7 +11,7 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
 ## 2. 架构设计 (Architecture Design)
 
 ### 2.1 技术栈选型
-* **前端 (UI 层)**: React / Vue / Svelte (推荐 React/TypeScript) + TailwindCSS。
+* **前端 (UI 层)**: Vue 3 + TypeScript。
 * **终端渲染引擎**: Xterm.js (结合 WebGL 插件实现高性能渲染)。
 * **后端 (Core 层)**: Rust (Tauri 核心)。
 * **进程间通信 (IPC)**: Tauri IPC (Commands & Events)。
@@ -120,7 +120,7 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
 项目分为 5 个主要阶段（Phase），采用敏捷迭代方式推进：
 
 ### Phase 0: 已完成功能（基础框架）
-* Tauri + React/TypeScript 项目初始化。 ✅
+* Tauri + Vue/TypeScript 项目初始化。 ✅
 * Xterm.js PTY 绑定（本地 Shell）。 ✅
 * 多标签页 UI 框架。 ✅
 * 基础设置持久化（JSON）。 ✅
@@ -131,7 +131,7 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
 ### Phase 1: 基础设施与基础终端 (第 1-2 个月)
 * **目标**: 搭建 Tauri 框架，实现基础的本地终端和 UI 骨架。
 * **任务**:
-  * 初始化 Tauri + React/Vue 项目。 --Done
+   * 初始化 Tauri + Vue 项目。 --Done
   * 集成 Xterm.js 并实现基础的 PTY 绑定（本地 Shell 测试）。 --Done
   * 设计并实现多标签页 (Tab) UI 框架。 --Done
   * 实现基础的设置持久化（JSON）。 --Done
