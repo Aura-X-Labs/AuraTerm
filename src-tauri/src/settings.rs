@@ -57,6 +57,9 @@ pub struct Settings {
     /// Middle mouse button pastes clipboard content into the terminal
     #[serde(default = "default_true")]
     pub middle_click_paste: bool,
+    /// Whether to show the input bar below the terminal
+    #[serde(default = "default_true")]
+    pub show_input_bar: bool,
     /// Quick-action buttons shown below the terminal
     #[serde(default)]
     pub quick_buttons: Vec<QuickButton>,
@@ -81,6 +84,7 @@ impl Default for Settings {
             ctrl_c_copy: true,
             ctrl_v_paste: true,
             middle_click_paste: true,
+            show_input_bar: true,
             quick_buttons: vec![],
             last_serial_config: None,
             recent_serial_configs: vec![],

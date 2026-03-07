@@ -194,9 +194,14 @@ function sendData(text: string) {
   });
 }
 
+function fit() {
+  fitAddon?.fit();
+}
+
 defineExpose<TerminalHandle>({
   saveLog,
   sendData,
+  fit,
 });
 
 onMounted(() => {

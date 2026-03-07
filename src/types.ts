@@ -64,4 +64,5 @@ export type SerialConnectionState = "idle" | "connecting" | "connected" | "close
 export interface TerminalHandle {
   saveLog: (tabTitle: string) => Promise<string>;
   sendData: (text: string) => void;
+  fit: () => void;
 }

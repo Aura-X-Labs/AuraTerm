@@ -6,9 +6,9 @@ export interface TerminalTheme {
 
 export interface QuickButton {
   id: string;
-  /** 显示名称，为空时展示 command 的前 20 个字符 */
+  /** Display name; shows first 20 chars of command if empty */
   label: string;
-  /** 点击后发送到终端的命令，会自动补 \n */
+  /** Command sent to terminal on click; automatically appends \n */
   command: string;
 }
 
@@ -29,17 +29,19 @@ export interface AppSettings {
   scrollback: number;
   shellPath: string | null;
   theme: TerminalTheme;
-  /** 选中即复制：选中文本后自动写入剪贴板；同时 Ctrl+C 在有选中时消费按键（不发 ^C 给 PTY） */
+  /** Copy on select: auto-copy selected text to clipboard; Ctrl+C consumes the key when selection exists (no ^C sent to PTY) */
   ctrlCCopy: boolean;
-  /** Ctrl+V：粘贴剪贴板内容到终端 */
+  /** Ctrl+V: paste clipboard content to terminal */
   ctrlVPaste: boolean;
-  /** 鼠标中键：粘贴剪贴板内容到终端 */
+  /** Middle-click: paste clipboard content to terminal */
   middleClickPaste: boolean;
-  /** 终端下方快捷按钮列表 */
+  /** Whether to show the input bar */
+  showInputBar: boolean;
+  /** Quick buttons below the terminal */
   quickButtons: QuickButton[];
-  /** 最近一次使用的串口参数 */
+  /** Last used serial port configuration */
   lastSerialConfig: SerialHistoryItem | null;
-  /** 最近使用过的串口参数历史，用于快速预设 */
+  /** Recent serial port configurations for quick presets */
   recentSerialConfigs: SerialHistoryItem[];
 }
 
@@ -64,6 +66,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ctrlCCopy: true,
   ctrlVPaste: true,
   middleClickPaste: true,
+  showInputBar: true,
   quickButtons: [],
   lastSerialConfig: null,
   recentSerialConfigs: [],

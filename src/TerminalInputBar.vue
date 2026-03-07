@@ -9,6 +9,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   send: [text: string];
   buttonsChange: [buttons: QuickButton[]];
+  resize: [];
 }>();
 
 const SNAP_COLLAPSE_PX = 28;
@@ -40,6 +41,7 @@ function handleResizeMouseDown(event: MouseEvent) {
   const handleUp = () => {
     document.removeEventListener("mousemove", handleMove);
     document.removeEventListener("mouseup", handleUp);
+    emit("resize");
   };
 
   document.addEventListener("mousemove", handleMove);
@@ -48,6 +50,7 @@ function handleResizeMouseDown(event: MouseEvent) {
 
 function handleResizeDblClick() {
   textareaH.value = textareaH.value === 0 ? DEFAULT_TEXTAREA_H : 0;
+  emit("resize");
 }
 
 function doSend(payload: string) {
@@ -118,7 +121,7 @@ function closeEditor() {
     <div
       class="terminal-input-resize-handle"
       :class="{ collapsed: textareaH === 0 }"
-      title="拖拽调整高度，双击折叠/展开"
+      title="Drag to resize, double-click to collapse/expand"
       @mousedown="handleResizeMouseDown"
       @dblclick="handleResizeDblClick"
     >

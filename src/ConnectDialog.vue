@@ -379,11 +379,11 @@ function handleSubmit(event: Event) {
                   {{ portInfo.manufacturer ? `${portInfo.manufacturer} (${portInfo.portType})` : portInfo.portType }}
                 </option>
               </datalist>
-              <div v-if="serialError" class="form-hint error">串口枚举失败：{{ serialError }}</div>
+              <div v-if="serialError" class="form-hint error">Serial port enumeration failed: {{ serialError }}</div>
               <div v-else-if="serialPorts.length > 0" class="form-hint">
-                已发现 {{ serialPorts.length }} 个设备：{{ serialPorts.map((item) => item.portName).join(', ') }}
+                Found {{ serialPorts.length }} device(s): {{ serialPorts.map((item) => item.portName).join(', ') }}
               </div>
-              <div v-else class="form-hint">未发现串口设备，可手动输入设备路径后连接。</div>
+              <div v-else class="form-hint">No serial ports found. You can manually enter the device path to connect.</div>
             </div>
 
             <div class="form-group">
@@ -472,18 +472,18 @@ function handleSubmit(event: Event) {
         <div class="form-group save-connection-group">
           <label class="save-connection-label">
             <input v-model="saveConnection" type="checkbox">
-            <span>保存此连接</span>
+            <span>Save this connection</span>
           </label>
           <div v-if="saveConnection" class="two-column-grid">
-            <input v-model="connectionName" type="text" class="save-connection-name" :placeholder="defaultName || '连接名称（可选）'">
-            <input v-model="connectionGroup" type="text" class="save-connection-name" placeholder="分组（可选）">
+            <input v-model="connectionName" type="text" class="save-connection-name" :placeholder="defaultName || 'Connection name (optional)'">
+            <input v-model="connectionGroup" type="text" class="save-connection-name" placeholder="Group (optional)">
           </div>
         </div>
 
         <div class="form-group save-connection-group">
           <label class="save-connection-label">
             <input v-model="enableLog" type="checkbox">
-            <span>保存会话日志</span>
+            <span>Save session log</span>
           </label>
           <input
             v-if="enableLog"

@@ -17,7 +17,7 @@ const emit = defineEmits<{
   connect: [connection: SavedConnection];
 }>();
 
-const UNGROUPED_LABEL = "未分组";
+const UNGROUPED_LABEL = "Ungrouped";
 
 function toDisplayGroup(value?: string) {
   return value?.trim() || UNGROUPED_LABEL;
@@ -190,21 +190,21 @@ async function saveDraft() {
 
   const protocol = editDraft.value.protocol ?? "ssh";
   if (!editDraft.value.name.trim()) {
-    editError.value = "名称不能为空。";
+    editError.value = "Name cannot be empty.";
     return;
   }
   if (protocol === "serial") {
     if (!editDraft.value.portName?.trim()) {
-      editError.value = "串口设备不能为空。";
+      editError.value = "Serial port cannot be empty.";
       return;
     }
   } else {
     if (!editDraft.value.host.trim()) {
-      editError.value = "主机地址不能为空。";
+      editError.value = "Host cannot be empty.";
       return;
     }
     if (protocol === "ssh" && !editDraft.value.user.trim()) {
-      editError.value = "SSH 用户名不能为空。";
+      editError.value = "SSH username cannot be empty.";
       return;
     }
   }
@@ -243,16 +243,16 @@ async function saveDraft() {
 <template>
   <div class="bookmark-sidebar">
     <div class="bookmark-sidebar-header">
-      <span class="bookmark-sidebar-title">🔖 快捷连接</span>
-      <button class="bookmark-refresh-btn" title="刷新列表" @click="loadConnections">↻</button>
+      <span class="bookmark-sidebar-title">🔖 Quick Connect</span>
+      <button class="bookmark-refresh-btn" title="Refresh list" @click="loadConnections">↻</button>
     </div>
 
     <div v-if="connections.length === 0" class="bookmark-empty">
-      暂无保存的连接。
+      No saved connections.
       <br>
-      新建会话时勾选
+      Check "Save this connection" when
       <br>
-      “保存此连接”即可添加。
+      creating a new session to add one.
     </div>
 
     <div v-else class="bookmark-list">
@@ -266,7 +266,7 @@ async function saveDraft() {
             v-for="connection in items"
             :key="connection.id"
             class="bookmark-item"
-            :title="`${buildSubtitle(connection)}\n双击连接`"
+            :title="`${buildSubtitle(connection)}\nDouble-click to connect`"
             @dblclick="handleDoubleClick(connection)"
             @contextmenu="handleContextMenu($event, connection)"
           >
@@ -286,17 +286,17 @@ async function saveDraft() {
       class="bookmark-context-menu"
       :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
     >
-      <button class="bookmark-context-item" @click="openEditDialog(contextMenu.connection)">✏️ 编辑</button>
-      <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection.id)">🗑 删除</button>
+      <button class="bookmark-context-item" @click="openEditDialog(contextMenu.connection)">✏️ Edit</button>
+      <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection.id)">🗑 Delete</button>
     </div>
 
     <div v-if="editingConnection && editDraft" class="bookmark-editor-overlay" @click="closeEditDialog">
       <div class="bookmark-editor-dialog" @click.stop>
         <div class="bookmark-editor-header">
           <div>
-            <div class="bookmark-editor-title">编辑书签</div>
+            <div class="bookmark-editor-title">Edit Bookmark</div>
             <div class="bookmark-editor-subtitle">
-              {{ editDraft.protocol === 'serial' ? '串口参数' : editDraft.protocol === 'telnet' ? 'Telnet 参数' : 'SSH 参数' }}
+              {{ editDraft.protocol === 'serial' ? 'Serial Settings' : editDraft.protocol === 'telnet' ? 'Telnet Settings' : 'SSH Settings' }}
             </div>
           </div>
           <button type="button" class="bookmark-editor-close" @click="closeEditDialog">×</button>
@@ -305,19 +305,19 @@ async function saveDraft() {
         <div class="bookmark-editor-body">
           <div class="bookmark-editor-grid">
             <div class="form-group">
-              <label>名称</label>
+              <label>Name</label>
               <input type="text" :value="editDraft.name" @input="updateDraft('name', inputValue($event))">
             </div>
             <div class="form-group">
-              <label>分组</label>
-              <input type="text" :value="editDraft.group ?? ''" placeholder="未分组" @input="updateDraft('group', inputValue($event))">
+              <label>Group</label>
+              <input type="text" :value="editDraft.group ?? ''" placeholder="Ungrouped" @input="updateDraft('group', inputValue($event))">
             </div>
           </div>
 
           <template v-if="editDraft.protocol === 'serial'">
             <div class="bookmark-editor-grid">
               <div class="form-group bookmark-editor-span-2">
-                <label>串口设备</label>
+                <label>Serial Port</label>
                 <input
                   type="text"
                   :value="editDraft.portName ?? ''"
@@ -383,7 +383,7 @@ async function saveDraft() {
                 <input type="text" :value="editDraft.user" @input="updateDraft('user', inputValue($event))">
               </div>
               <div v-else class="form-group">
-                <label>协议</label>
+                <label>Protocol</label>
                 <input type="text" value="Telnet" disabled>
               </div>
             </div>
@@ -391,7 +391,7 @@ async function saveDraft() {
             <template v-if="(editDraft.protocol ?? 'ssh') === 'ssh'">
               <div class="bookmark-editor-grid">
                 <div class="form-group">
-                  <label>认证方式</label>
+                  <label>Auth Method</label>
                   <select :value="editDraft.authType" @change="updateDraft('authType', toAuthType(inputValue($event)))">
                     <option value="password">Password</option>
                     <option value="key">Private Key</option>
@@ -415,8 +415,8 @@ async function saveDraft() {
         </div>
 
         <div class="bookmark-editor-footer">
-          <button type="button" class="bookmark-editor-btn secondary" @click="closeEditDialog">取消</button>
-          <button type="button" class="bookmark-editor-btn primary" @click="saveDraft">保存</button>
+          <button type="button" class="bookmark-editor-btn secondary" @click="closeEditDialog">Cancel</button>
+          <button type="button" class="bookmark-editor-btn primary" @click="saveDraft">Save</button>
         </div>
       </div>
     </div>

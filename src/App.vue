@@ -233,6 +233,17 @@ function setTerminalRef(tabId: string, instance: unknown) {
   termRefs.delete(tabId);
 }
 
+function fitActiveTerminal() {
+  const handle = termRefs.get(activeTabId.value);
+  if (handle) {
+    handle.fit();
+  }
+}
+
+watch(() => settings.value.showInputBar, () => {
+  setTimeout(fitActiveTerminal, 0);
+});
+
 function selectTab(tabId: string) {
   activeTabId.value = tabId;
 }
@@ -657,9 +668,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
         </div>
 
         <TerminalInputBar
+          v-if="settings.showInputBar"
           :quick-buttons="settings.quickButtons"
           @send="sendToActiveTerminal"
           @buttons-change="handleButtonsChange"
+          @resize="fitActiveTerminal"
         />
 
         <div v-if="activeTab && activeSerialConfig && activeSerialConnectionState" class="terminal-statusbar">

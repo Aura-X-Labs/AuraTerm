@@ -13,6 +13,8 @@ const emit = defineEmits<{
 
 const settings = ref<AppSettings>(normalizeAppSettings(props.initial));
 
+const activeTab = ref<"terminal" | "keyboard" | "theme">("terminal");
+
 type ShellPresetValue = "auto" | "git-bash" | "powershell" | "cmd" | "custom";
 
 // Shell preset options
@@ -94,10 +96,27 @@ function inputChecked(event: Event) {
         <button class="settings-close-btn" type="button" @click="emit('cancel')">×</button>
       </div>
 
-      <div class="settings-body">
-        <section class="settings-section">
-          <h3>Terminal</h3>
+      <div class="settings-tabs">
+        <button
+          :class="['settings-tab', { 'settings-tab--active': activeTab === 'terminal' }]"
+          type="button"
+          @click="activeTab = 'terminal'"
+        >Terminal</button>
+        <button
+          :class="['settings-tab', { 'settings-tab--active': activeTab === 'keyboard' }]"
+          type="button"
+          @click="activeTab = 'keyboard'"
+        >Keyboard & Mouse</button>
+        <button
+          :class="['settings-tab', { 'settings-tab--active': activeTab === 'theme' }]"
+          type="button"
+          @click="activeTab = 'theme'"
+        >Theme</button>
+      </div>
 
+      <div class="settings-body">
+        <!-- Terminal Tab -->
+        <div v-show="activeTab === 'terminal'" class="settings-section">
           <label class="settings-field">
             <span>Font Size</span>
             <input
@@ -144,15 +163,27 @@ function inputChecked(event: Event) {
               @input="update('shellPath', inputValue($event) || null)"
             >
           </label>
-        </section>
-
-        <section class="settings-section">
-          <h3>Keyboard &amp; Mouse</h3>
 
           <label class="settings-field settings-field--toggle">
             <span>
+              <strong>Show Input Bar</strong>
+              <small>Show input bar and quick buttons below the terminal</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :checked="settings.showInputBar"
+              @change="update('showInputBar', inputChecked($event))"
+            >
+          </label>
+        </div>
+
+        <!-- Keyboard & Mouse Tab -->
+        <div v-show="activeTab === 'keyboard'" class="settings-section">
+          <label class="settings-field settings-field--toggle">
+            <span>
               <strong>Copy on select</strong>
-              <small>选中文本后自动复制到剪贴板；Ctrl+C 有选中时消费按键（不发 ^C 给 PTY）</small>
+              <small>Auto-copy selected text to clipboard; Ctrl+C consumes key when selection exists (no ^C to PTY)</small>
             </span>
             <input
               type="checkbox"
@@ -165,7 +196,7 @@ function inputChecked(event: Event) {
           <label class="settings-field settings-field--toggle">
             <span>
               <strong>Ctrl+V</strong> Paste from clipboard
-              <small>Ctrl+V 将剪贴板内容粘贴到终端</small>
+              <small>Ctrl+V pastes clipboard content to terminal</small>
             </span>
             <input
               type="checkbox"
@@ -178,7 +209,7 @@ function inputChecked(event: Event) {
           <label class="settings-field settings-field--toggle">
             <span>
               <strong>Middle-click</strong> Paste
-              <small>鼠标中键点击将剪贴板内容粘贴到终端</small>
+              <small>Middle-click pastes clipboard content to terminal</small>
             </span>
             <input
               type="checkbox"
@@ -187,11 +218,10 @@ function inputChecked(event: Event) {
               @change="update('middleClickPaste', inputChecked($event))"
             >
           </label>
-        </section>
+        </div>
 
-        <section class="settings-section">
-          <h3>Theme</h3>
-
+        <!-- Theme Tab -->
+        <div v-show="activeTab === 'theme'" class="settings-section">
           <label class="settings-field">
             <span>Background</span>
             <div class="settings-color-row">
@@ -215,7 +245,7 @@ function inputChecked(event: Event) {
               <input type="text" :value="settings.theme.cursor" @input="updateTheme('cursor', inputValue($event))">
             </div>
           </label>
-        </section>
+        </div>
       </div>
 
       <div class="settings-footer">

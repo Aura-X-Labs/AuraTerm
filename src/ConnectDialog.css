@@ -226,7 +226,7 @@
   cursor: not-allowed;
 }
 
-/* ── 保存连接选项 ─────────────────────────────────────── */
+/* ── Save connection options ─────────────────────────────────────── */
 .save-connection-group {
   border-top: 1px solid #3a3a3a;
   padding-top: 12px;
