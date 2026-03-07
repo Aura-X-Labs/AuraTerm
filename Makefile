@@ -33,8 +33,6 @@ release:
 	@echo "Processing artifacts..."
 	@python scripts/release.py
 
-upload:	
-	@echo "Uploading ..."
-	scp releases/* william@alithon.com:Downloads/AuraTerm/
-	ssh william@alithon.com "cp Downloads/AuraTerm/* /home/william/releases/aurax/releases/"
-	@echo "Upload complete."
+upload:
+	@echo "Uploading latest release..."
+	@python scripts/upload.py
