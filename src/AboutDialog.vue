@@ -1,9 +1,24 @@
 <script setup lang="ts">
+import { onMounted, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import "./AboutDialog.css";
 
 const emit = defineEmits<{
   close: [];
 }>();
+
+const version = ref("0.1.0");
+const buildTime = ref("");
+
+onMounted(async () => {
+  try {
+    const info = await invoke<{ version: string; build_time: string }>("get_version_info");
+    version.value = info.version;
+    buildTime.value = info.build_time;
+  } catch (error) {
+    console.error("Failed to get version info", error);
+  }
+});
 
 function openExternal(url: string) {
   window.open(url, "_blank");
@@ -23,26 +38,17 @@ function openExternal(url: string) {
 
         <div class="about-content">
           <h3>AuraTerm</h3>
-          <p class="about-version">Version 0.1.0</p>
+          <p class="about-version">Version {{ version }}</p>
+          <p v-if="buildTime" class="about-build-time">Built: {{ buildTime }}</p>
 
-          <p class="about-description">
-            A modern terminal application built with Tauri and Vue, featuring SSH, Telnet, and Serial connections.
-          </p>
+<p class="about-description">
+  A powerful terminal emulator supporting SSH, Telnet, Serial and local shell sessions.
+</p>
 
-          <div class="about-features">
-            <h4>Features</h4>
-            <ul>
-              <li>SSH, Telnet, and Serial connections</li>
-              <li>Multi-tab support</li>
-              <li>Bookmark management</li>
-              <li>Customizable settings</li>
-              <li>Light and dark theme support</li>
-            </ul>
-          </div>
-
-          <div class="about-info">
+<div class="about-info">
             <p><strong>Built with:</strong> Tauri + Vue + TypeScript</p>
-            <p><strong>License:</strong> MIT</p>
+            <p><strong>License:</strong> <a href="#" @click.prevent="openExternal('https://auraterm.com/license')">Commercial Source License</a></p>
+            <p class="license-note">Free for personal use. Commercial use requires license.</p>
           </div>
 
           <div class="about-links">

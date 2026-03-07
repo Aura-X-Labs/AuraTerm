@@ -22,7 +22,6 @@
   display: flex;
   flex-direction: column;
   max-height: 90vh;
-  overflow: hidden;
   animation: slieInUp 0.3s ease-out;
 }
 
@@ -73,8 +72,6 @@
 }
 
 .about-body {
-  flex: 1;
-  overflow-y: auto;
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -99,9 +96,15 @@
 }
 
 .about-version {
-  margin: 0 0 16px 0;
+  margin: 0;
   color: var(--fg-secondary, #666666);
   font-size: 14px;
+}
+
+.about-build-time {
+  margin: 4px 0 16px 0;
+  color: var(--fg-secondary, #888888);
+  font-size: 12px;
 }
 
 .about-description {
@@ -147,6 +150,24 @@
 
 .about-info p {
   margin: 6px 0;
+}
+
+.about-info a {
+  color: var(--btn-primary-bg, #0066cc);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.about-info a:hover {
+  color: var(--btn-primary-hover, #0052a3);
+  text-decoration: underline;
+}
+
+.license-note {
+  font-size: 11px;
+  color: var(--fg-tertiary, #888888);
+  font-style: italic;
+  margin-top: 4px !important;
 }
 
 .about-links {

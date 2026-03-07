@@ -312,6 +312,20 @@ fn save_terminal_log(content: String, tab_name: String) -> Result<String, String
     Ok(path.to_string_lossy().into_owned())
 }
 
+#[derive(Serialize)]
+struct VersionInfo {
+    version: &'static str,
+    build_time: &'static str,
+}
+
+#[command]
+fn get_version_info() -> VersionInfo {
+    VersionInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        build_time: env!("BUILD_TIME"),
+    }
+}
+
 fn main() {
     let app_state = AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -358,6 +372,7 @@ fn main() {
         .manage(telnet::TelnetState::default())
         .manage(serial::SerialState::default())
         .invoke_handler(tauri::generate_handler![
+            get_version_info,
             start_pty,
             write_pty_input,
             resize_pty,

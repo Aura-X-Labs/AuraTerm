@@ -1,12 +1,14 @@
 [package]
 name = "auraterm"
-version = "0.1.0"
+version = "0.1.5"
 description = "AuraTerm - Modern TeraTerm alternative"
-authors = ["you"]
+authors = ["William Yang"]
 edition = "2021"
+license = "BSL-1.0"
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
+chrono = "0.4"
 
 [dependencies]
 tauri = { version = "2.0.0", features = [] }
