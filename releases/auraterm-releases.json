@@ -7,6 +7,14 @@
       "filename": "AuraTerm-0.1.5.0307-x64.exe",
       "platform": "windows-x64",
       "published_at": "2026-03-07",
+      "sha256": "a41c25ee3cc09465e252f743ff0c01d95bd6a56ce9f69a3ade1a46b67bd70987",
+      "notes": "automated release"
+    },
+    {
+      "version": "0.1.5.0307",
+      "filename": "AuraTerm-0.1.5.0307-x64.exe",
+      "platform": "windows-x64",
+      "published_at": "2026-03-07",
       "sha256": "84ead47146316eaf05641267fbee2c72784430c39dffecc1c2acb0b7c6530590",
       "notes": "automated release"
     },

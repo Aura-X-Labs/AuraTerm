@@ -4,6 +4,7 @@ Release script for AuraTerm
 Handles version generation, file operations, and JSON updates
 """
 
+import argparse
 import json
 import os
 import re
@@ -48,7 +49,7 @@ def get_latest_patch_version(version_base, mmdd, ext):
         if match:
             patches.append(int(match.group(1)))
     
-    return max(patches) + 1 if patches else 0
+    return max(patches) if patches else 0
 
 
 def get_architecture():
@@ -142,6 +143,11 @@ def update_releases_json(version, filename, platform_name, sha256):
 
 def main():
     """Main release process"""
+    parser = argparse.ArgumentParser(description='Process release artifacts')
+    parser.add_argument('--force', action='store_true', 
+                        help='Overwrite existing version without incrementing patch')
+    args = parser.parse_args()
+    
     print("Processing artifacts...")
     
     # Get version info
@@ -152,7 +158,13 @@ def main():
     artifact_path, ext, arch = find_artifact()
     
     # Calculate patch version
-    patch = get_latest_patch_version(version_base, mmdd, ext)
+    if args.force:
+        # Use existing patch version (don't increment)
+        patch = get_latest_patch_version(version_base, mmdd, ext)
+    else:
+        # Increment patch version
+        patch = get_latest_patch_version(version_base, mmdd, ext) + 1
+    
     full_version = f"{version_base}.{patch}.{mmdd}"
     
     # Prepare destination
@@ -162,7 +174,7 @@ def main():
     dest_name = f"AuraTerm-{full_version}-{arch}.{ext}"
     dest_path = releases_dir / dest_name
     
-    # Copy files
+    # Copy files (overwrite if exists)
     shutil.copy2(artifact_path, dest_path)
     
     latest_path = releases_dir / f"AuraTerm-latest-{arch}.{ext}"

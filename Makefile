@@ -1,4 +1,4 @@
-.PHONY: all build clean help release upload
+.PHONY: all build clean help release repackage upload
 
 all: help
 
@@ -22,16 +22,21 @@ clean:
 
 help:
 	@echo "Makefile targets:"
-	@echo "  all     - Build the application (default)"
-	@echo "  build   - Build the application"
-	@echo "  clean   - Remove build artifacts"
-	@echo "  release - Process artifacts and update JSON"
-	@echo "  upload  - Upload artifacts to server"
-	@echo "  help    - Show this help message"
+	@echo "  all       - Build the application (default)"
+	@echo "  build     - Build the application"
+	@echo "  clean     - Remove build artifacts"
+	@echo "  release   - Process artifacts and update JSON (increment patch)"
+	@echo "  repackage - Re-package artifacts without incrementing patch"
+	@echo "  upload    - Upload artifacts to server"
+	@echo "  help      - Show this help message"
 
 release:
-	@echo "Processing artifacts..."
+	@echo "Processing artifacts (increment patch)..."
 	@python scripts/release.py
+
+repackage:
+	@echo "Re-packaging artifacts (overwrite existing)..."
+	@python scripts/release.py --force
 
 upload:
 	@echo "Uploading latest release..."
