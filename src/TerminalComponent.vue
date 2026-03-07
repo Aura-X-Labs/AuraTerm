@@ -230,6 +230,8 @@ onMounted(() => {
   terminal.open(terminalRootRef.value);
   fitAddon.fit();
 
+  let isPasting = false; // Flag to prevent duplicate paste
+
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (event.type !== "keydown") {
       return true;
@@ -243,17 +245,20 @@ onMounted(() => {
     }
 
     if (event.ctrlKey && event.key === "v" && settingsRef.value.ctrlVPaste) {
+      // Prevent default browser paste
+      event.preventDefault();
+      
+      // Use xterm's paste method to avoid duplication
       void navigator.clipboard.readText().then((text) => {
-        if (!text || !ptyId.value) {
-          return;
+        if (text && terminal) {
+          // Use xterm's built-in paste which properly triggers onData
+          terminal.paste(text);
         }
-        void writeSessionInput(ptyId.value, text, activeSessionRef.value).catch((error) => {
-          console.error("paste failed", error);
-        });
       }).catch((error) => {
         console.error("clipboard read failed", error);
       });
-      return false;
+      
+      return false; // Prevent default handling
     }
 
     return true;
