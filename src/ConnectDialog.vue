@@ -362,28 +362,21 @@ function handleSubmit(event: Event) {
             <div class="form-group serial-settings-grid-span-2">
               <label>Serial Port:</label>
               <div class="serial-port-row">
-                <input
-                  v-model="serialPortName"
-                  type="text"
-                  placeholder="e.g. /dev/cu.usbserial-1410"
-                  autofocus
-                  list="serial-port-options"
-                  required
-                >
+                <select v-model="serialPortName" class="serial-port-select" required>
+                  <option value="" disabled>Select a serial port...</option>
+                  <option v-for="portInfo in serialPorts" :key="portInfo.portName" :value="portInfo.portName">
+                    {{ portInfo.portName }}{{ portInfo.manufacturer ? ` - ${portInfo.manufacturer}` : '' }} ({{ portInfo.portType }})
+                  </option>
+                </select>
                 <button type="button" class="serial-refresh-btn" :disabled="loadingSerialPorts" @click="loadSerialPorts">
                   {{ loadingSerialPorts ? '...' : '↻' }}
                 </button>
               </div>
-              <datalist id="serial-port-options">
-                <option v-for="portInfo in serialPorts" :key="portInfo.portName" :value="portInfo.portName">
-                  {{ portInfo.manufacturer ? `${portInfo.manufacturer} (${portInfo.portType})` : portInfo.portType }}
-                </option>
-              </datalist>
               <div v-if="serialError" class="form-hint error">Serial port enumeration failed: {{ serialError }}</div>
               <div v-else-if="serialPorts.length > 0" class="form-hint">
-                Found {{ serialPorts.length }} device(s): {{ serialPorts.map((item) => item.portName).join(', ') }}
+                Found {{ serialPorts.length }} device(s)
               </div>
-              <div v-else class="form-hint">No serial ports found. You can manually enter the device path to connect.</div>
+              <div v-else class="form-hint">No serial ports found. Click refresh to scan again.</div>
             </div>
 
             <div class="form-group">
