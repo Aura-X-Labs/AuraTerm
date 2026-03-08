@@ -146,9 +146,9 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
    * 实现连接状态反馈（连接中、成功、失败）。 --Done
 
 ### Phase 2.5: 快捷连接增强
-* SSH 公钥认证支持（`userauth_pubkey_memory`）。
-* Bookmark 侧边栏支持分组/文件夹。
-* 连接凭据加密存储（Keychain / DPAPI）。
+* SSH 公钥认证支持（`userauth_pubkey_memory`）。 --Done
+* Bookmark 侧边栏支持分组/文件夹。 --Done
+* 连接凭据加密存储（Keychain / DPAPI）。 --Done
 
 ### Phase 3: 文件传输与高级终端特性 (第 5-6 个月)
 * **目标**: 补齐 TeraTerm 的特色文件传输功能。

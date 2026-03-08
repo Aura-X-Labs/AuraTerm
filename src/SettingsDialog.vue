@@ -164,6 +164,29 @@ function inputChecked(event: Event) {
             >
           </label>
 
+          <label class="settings-field">
+            <span>Default Log Save Path</span>
+            <input
+              type="text"
+              placeholder="e.g., ~/AuraTerm/logs"
+              :value="settings.logSavePath"
+              @input="update('logSavePath', inputValue($event))"
+            >
+          </label>
+
+          <label class="settings-field">
+            <span>Default Log Filename Template</span>
+            <input
+              type="text"
+              placeholder="e.g., {timestamp}_{session}"
+              :value="settings.logFileNameTemplate"
+              @input="update('logFileNameTemplate', inputValue($event))"
+            >
+          </label>
+          <div class="settings-field-full-hint">Available placeholders: {timestamp}, {datetime}, {date}, {time}, {yyyy}, {MM}, {dd}, {HH}, {mm}, {ss}, {unix}, {session}, {protocol}, {host}, {user}, {port}, {serialPort}, {baudRate}</div>
+
+
+
           <label class="settings-field settings-field--toggle">
             <span>
               <strong>Show Input Bar</strong>

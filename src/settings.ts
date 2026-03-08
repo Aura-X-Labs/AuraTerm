@@ -28,7 +28,12 @@ export interface AppSettings {
   fontFamily: string;
   scrollback: number;
   shellPath: string | null;
+  /** Default directory for session logs */
+  logSavePath: string;
+  /** Default log filename template, e.g. "{timestamp}_{session}" */
+  logFileNameTemplate: string;
   theme: TerminalTheme;
+
   /** Copy on select: auto-copy selected text to clipboard; Ctrl+C consumes the key when selection exists (no ^C sent to PTY) */
   ctrlCCopy: boolean;
   /** Ctrl+V: paste clipboard content to terminal */
@@ -62,7 +67,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fontFamily: 'Consolas, "Courier New", monospace',
   scrollback: 10000,
   shellPath: null,
+  logSavePath: "~/AuraTerm/logs",
+  logFileNameTemplate: "{timestamp}_{session}",
   theme: DEFAULT_THEME,
+
   ctrlCCopy: true,
   ctrlVPaste: true,
   middleClickPaste: true,

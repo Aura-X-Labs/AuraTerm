@@ -8,6 +8,39 @@ export interface SshConfig {
   privateKey?: string;
 }
 
+export type RemoteTransferMode = "sftp" | "scp";
+export type RemoteTransferDirection = "upload" | "download";
+export type RemoteTransferStatus = "started" | "progress" | "completed" | "failed";
+
+export interface RemoteTransferProgress {
+  id: string;
+  direction: RemoteTransferDirection;
+  status: RemoteTransferStatus;
+  mode: RemoteTransferMode;
+  fileName: string;
+  remotePath: string;
+  localPath?: string | null;
+  transferredBytes: number;
+  totalBytes?: number | null;
+  message?: string | null;
+}
+
+export interface RemoteFileEntry {
+  name: string;
+  path: string;
+  kind: "file" | "directory" | "symlink" | "other";
+  isDir: boolean;
+  size: number;
+  modifiedAt?: number | null;
+  permissions: string;
+}
+
+export interface RemoteDirectoryListing {
+  path: string;
+  parent?: string | null;
+  entries: RemoteFileEntry[];
+}
+
 export interface TelnetConfig {
   host: string;
   port: number;

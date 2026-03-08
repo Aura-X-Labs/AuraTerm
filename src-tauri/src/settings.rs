@@ -47,6 +47,12 @@ pub struct Settings {
     pub font_family: String,
     pub scrollback: u32,
     pub shell_path: Option<String>,
+    /// Default directory for session logs
+    #[serde(default = "default_log_save_path")]
+    pub log_save_path: String,
+    /// Default filename template for session logs
+    #[serde(default = "default_log_file_name_template")]
+    pub log_file_name_template: String,
     pub theme: TerminalTheme,
     /// Ctrl+C copies selection to clipboard when text is selected
     #[serde(default = "default_true")]
@@ -72,6 +78,9 @@ pub struct Settings {
 }
 
 fn default_true() -> bool { true }
+fn default_log_save_path() -> String { "~/AuraTerm/logs".to_string() }
+fn default_log_file_name_template() -> String { "{timestamp}_{session}".to_string() }
+
 
 impl Default for Settings {
     fn default() -> Self {
@@ -80,6 +89,8 @@ impl Default for Settings {
             font_family: r#"Consolas, "Courier New", monospace"#.to_string(),
             scrollback: 1000,
             shell_path: None,
+            log_save_path: default_log_save_path(),
+            log_file_name_template: default_log_file_name_template(),
             theme: TerminalTheme::default(),
             ctrl_c_copy: true,
             ctrl_v_paste: true,

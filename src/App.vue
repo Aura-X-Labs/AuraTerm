@@ -10,6 +10,7 @@ import BookmarkSidebar from "./BookmarkSidebar.vue";
 import SettingsDialog from "./SettingsDialog.vue";
 import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
+import RemoteFileManager from "./RemoteFileManager.vue";
 import { DEFAULT_SETTINGS, normalizeAppSettings, type AppSettings, type QuickButton, type SerialHistoryItem } from "./settings";
 import type {
   ConnectResult,
@@ -18,6 +19,7 @@ import type {
   SerialConfig,
   SerialConnectionState,
   SessionConfig,
+  SshConfig,
   TerminalHandle,
 } from "./types";
 import logoUrl from "./logo.png";
@@ -51,6 +53,7 @@ const showAbout = ref(false);
 const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
 const showNewTabMenu = ref(false);
+const showRemoteFileManager = ref(false);
 const isWindowFocused = ref(true);
 const serialConnectionStates = ref<Record<string, SerialConnectionState>>({});
 const openMenuId = ref<AppMenuId | null>(null);
@@ -141,6 +144,9 @@ onBeforeUnmount(() => {
 });
 
 const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value));
+const activeSshConfig = computed<SshConfig | null>(() => (
+  activeTab.value?.session.protocol === "ssh" ? activeTab.value.session.sshConfig : null
+));
 const activeSerialConfig = computed<SerialConfig | null>(() => (
   activeTab.value?.session.protocol === "serial" ? activeTab.value.session.serialConfig : null
 ));
@@ -244,6 +250,12 @@ watch(() => settings.value.showInputBar, () => {
   setTimeout(fitActiveTerminal, 0);
 });
 
+watch(activeSshConfig, (value) => {
+  if (!value) {
+    showRemoteFileManager.value = false;
+  }
+});
+
 function selectTab(tabId: string) {
   activeTabId.value = tabId;
 }
@@ -306,6 +318,13 @@ function handleOpenSettings() {
   openMenuId.value = null;
   openFileSubmenuId.value = null;
   showSettings.value = true;
+}
+
+function toggleRemoteFileManager() {
+  if (!activeSshConfig.value) {
+    return;
+  }
+  showRemoteFileManager.value = !showRemoteFileManager.value;
 }
 
 function handleOpenNewTabMenu() {
@@ -639,6 +658,17 @@ function handleBookmarkConnect(connection: SavedConnection) {
       </div>
 
       <div class="tab-bar-actions">
+        <button
+          v-if="activeSshConfig"
+          class="tab-new-btn tab-files-btn"
+          :class="{ active: showRemoteFileManager }"
+          type="button"
+          title="Remote Files"
+          @mousedown.stop
+          @click.stop="toggleRemoteFileManager"
+        >
+          📁
+        </button>
         <button class="tab-new-btn tab-settings-btn" type="button" title="Settings" @mousedown.stop @click.stop="handleOpenSettings">&#x2699;</button>
       </div>
     </div>
@@ -659,6 +689,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
             v-else
             :key="tab.id"
             :ref="(instance) => setTerminalRef(tab.id, instance)"
+            :session-id="tab.id"
             :is-active="activeTabId === tab.id"
             :session="tab.session"
             :log-path="tab.logPath"
@@ -688,6 +719,14 @@ function handleBookmarkConnect(connection: SavedConnection) {
           </div>
         </div>
       </div>
+
+      <RemoteFileManager
+        v-if="showRemoteFileManager && activeTab && activeSshConfig"
+        :key="activeTab.id"
+        :session-id="activeTab.id"
+        :ssh-config="activeSshConfig"
+        @close="showRemoteFileManager = false"
+      />
     </div>
 
     <SettingsDialog v-if="showSettings" :initial="settings" @save="handleSaveSettings" @cancel="showSettings = false" />
@@ -726,6 +765,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
       :initial-protocol="connectDialogProtocol"
       :last-serial-config="settings.lastSerialConfig"
       :recent-serial-configs="settings.recentSerialConfigs"
+      :settings="settings"
       @connect="handleConnectResult"
       @cancel="showConnectDialog = false"
     />

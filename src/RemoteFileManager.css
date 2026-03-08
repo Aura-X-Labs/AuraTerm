@@ -1,0 +1,391 @@
+.remote-file-manager {
+  width: 420px;
+  max-width: 42vw;
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #181d24 0%, #11161c 100%);
+  border-left: 1px solid #2a323c;
+  color: #d8e2ee;
+}
+
+.remote-file-manager-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid #2a323c;
+}
+
+.remote-file-manager-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f4f8fc;
+}
+
+.remote-file-manager-subtitle {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #8fa1b5;
+  word-break: break-all;
+}
+
+.remote-file-manager-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #8fa1b5;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.remote-file-manager-close:hover {
+  background: #26313d;
+  color: #ffffff;
+}
+
+.remote-file-manager-toolbar {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-bottom: 1px solid #2a323c;
+}
+
+.remote-file-manager-mode-switch {
+  display: inline-flex;
+  align-self: flex-start;
+  background: #0f1419;
+  border: 1px solid #2f3944;
+  border-radius: 999px;
+  padding: 2px;
+}
+
+.remote-file-manager-mode-btn {
+  min-width: 64px;
+  border: none;
+  background: transparent;
+  color: #93a4b6;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.remote-file-manager-mode-btn.active {
+  background: #1d5f8c;
+  color: #ffffff;
+}
+
+.remote-file-manager-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.remote-file-manager-actions button {
+  border: 1px solid #324150;
+  background: #1d2630;
+  color: #d8e2ee;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.remote-file-manager-actions button:hover:not(:disabled) {
+  background: #253241;
+}
+
+.remote-file-manager-actions button:disabled,
+.remote-file-manager-mode-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.remote-file-manager-actions button.danger {
+  border-color: #62333b;
+  color: #ffb5bf;
+  background: #2a171c;
+}
+
+.remote-file-manager-pathbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #202832;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.remote-file-manager-path-segment {
+  border: none;
+  background: #141b22;
+  color: #8dc8f0;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.remote-file-manager-path-segment:hover {
+  background: #1d2731;
+  color: #b5e3ff;
+}
+
+.remote-file-manager-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.remote-file-manager-list-head,
+.remote-file-manager-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) 80px 126px;
+  gap: 10px;
+  align-items: center;
+}
+
+.remote-file-manager-list-head {
+  padding: 0 10px 8px;
+  color: #7e90a3;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.remote-file-manager-row {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.remote-file-manager-row:hover {
+  background: rgba(98, 172, 226, 0.08);
+  border-color: rgba(98, 172, 226, 0.14);
+}
+
+.remote-file-manager-row.selected {
+  background: rgba(61, 137, 194, 0.18);
+  border-color: rgba(122, 195, 255, 0.28);
+}
+
+.remote-file-manager-name {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.remote-file-manager-icon {
+  flex-shrink: 0;
+}
+
+.remote-file-manager-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.remote-file-manager-permissions {
+  flex-shrink: 0;
+  color: #708196;
+  font-size: 10px;
+}
+
+.remote-file-manager-meta {
+  color: #8fa1b5;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.remote-file-manager-empty {
+  padding: 28px 12px;
+  color: #6e8093;
+  text-align: center;
+  font-size: 12px;
+}
+
+.remote-file-manager-footer {
+  border-top: 1px solid #2a323c;
+  padding: 12px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.remote-file-manager-transfer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(80, 156, 212, 0.22);
+  background: linear-gradient(180deg, rgba(26, 47, 68, 0.82) 0%, rgba(17, 26, 35, 0.92) 100%);
+}
+
+.remote-file-manager-transfer.completed {
+  border-color: rgba(34, 197, 94, 0.24);
+  background: linear-gradient(180deg, rgba(16, 53, 34, 0.86) 0%, rgba(13, 26, 19, 0.94) 100%);
+}
+
+.remote-file-manager-transfer.failed {
+  border-color: rgba(239, 68, 68, 0.24);
+  background: linear-gradient(180deg, rgba(60, 23, 23, 0.9) 0%, rgba(30, 15, 15, 0.96) 100%);
+}
+
+.remote-file-manager-transfer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.remote-file-manager-transfer-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f7fbff;
+}
+
+.remote-file-manager-transfer-subtitle {
+  margin-top: 4px;
+  color: #9eb7ca;
+  font-size: 11px;
+}
+
+.remote-file-manager-transfer-percent {
+  flex-shrink: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #c7ecff;
+}
+
+.remote-file-manager-progress-track {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(12, 18, 24, 0.78);
+  border: 1px solid rgba(71, 92, 111, 0.5);
+}
+
+.remote-file-manager-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5dc7ff 0%, #7cf5d3 100%);
+  transition: width 140ms ease-out;
+}
+
+.remote-file-manager-transfer.completed .remote-file-manager-progress-fill {
+  background: linear-gradient(90deg, #22c55e 0%, #86efac 100%);
+}
+
+.remote-file-manager-transfer.failed .remote-file-manager-progress-fill {
+  background: linear-gradient(90deg, #ef4444 0%, #fca5a5 100%);
+}
+
+.remote-file-manager-transfer-bytes {
+  color: #9db2c4;
+  font-size: 11px;
+}
+
+.remote-file-manager-transfer-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.remote-file-manager-transfer-path {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.remote-file-manager-transfer-path span {
+  color: #7f95a8;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.remote-file-manager-transfer-path strong {
+  color: #edf7ff;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.remote-file-manager-transfer-note {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 8px;
+  color: #ffd4d4;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.remote-file-manager-download-dir {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: #8fa1b5;
+}
+
+.remote-file-manager-download-dir input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #33414f;
+  background: #0f1419;
+  color: #e6edf5;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.remote-file-manager-status {
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.remote-file-manager-status.success {
+  background: rgba(34, 197, 94, 0.14);
+  color: #a7f3c5;
+  border: 1px solid rgba(34, 197, 94, 0.24);
+}
+
+.remote-file-manager-status.error {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ffb7b7;
+  border: 1px solid rgba(239, 68, 68, 0.18);
+}
+
+@media (max-width: 1200px) {
+  .remote-file-manager {
+    width: 360px;
+    min-width: 320px;
+    max-width: 48vw;
+  }
+
+  .remote-file-manager-list-head,
+  .remote-file-manager-row {
+    grid-template-columns: minmax(0, 1.6fr) 72px 104px;
+  }
+}

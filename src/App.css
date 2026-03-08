@@ -425,6 +425,16 @@
   font-size: 14px;
 }
 
+.tab-files-btn {
+  width: 34px;
+  font-size: 14px;
+}
+
+.tab-files-btn.active {
+  background: #243746;
+  color: #9ad7ff;
+}
+
 /* ── Workspace (Sidebar + Terminal area horizontal layout) ─────────────── */
 .workspace {
   flex: 1;
@@ -1268,7 +1278,18 @@
   min-width: 130px;
 }
 
+.settings-field-full-hint {
+  margin-top: -12px;
+  margin-bottom: 8px;
+  color: #888;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+
 .settings-field input[type="text"],
+
+
 .settings-field input[type="number"],
 .settings-field select {
   background: #1e1e1e;

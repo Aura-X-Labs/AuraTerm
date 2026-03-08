@@ -31,6 +31,7 @@ interface SshMfaPromptEvent {
 }
 
 const props = defineProps<{
+  sessionId: string;
   isActive: boolean;
   session: SessionConfig;
   logPath?: string;
@@ -59,6 +60,46 @@ function isAuthError(errorText: string): boolean {
     || lower.includes("permission denied")
   );
 }
+
+function formatLogTimestampParts(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const yyyy = String(date.getFullYear());
+  const MM = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const HH = pad(date.getHours());
+  const mm = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  const unix = String(Math.floor(date.getTime() / 1000));
+  return {
+    yyyy,
+    MM,
+    dd,
+    HH,
+    mm,
+    ss,
+    unix,
+    date: `${yyyy}${MM}${dd}`,
+    time: `${HH}${mm}${ss}`,
+    timestamp: `${yyyy}${MM}${dd}_${HH}${mm}${ss}`,
+  };
+}
+
+function resolveLogPathPlaceholders(path: string) {
+  const parts = formatLogTimestampParts();
+  return path
+    .replace(/\{timestamp\}/g, parts.timestamp)
+    .replace(/\{datetime\}/g, parts.timestamp)
+    .replace(/\{date\}/g, parts.date)
+    .replace(/\{time\}/g, parts.time)
+    .replace(/\{yyyy\}/g, parts.yyyy)
+    .replace(/\{MM\}/g, parts.MM)
+    .replace(/\{dd\}/g, parts.dd)
+    .replace(/\{HH\}/g, parts.HH)
+    .replace(/\{mm\}/g, parts.mm)
+    .replace(/\{ss\}/g, parts.ss)
+    .replace(/\{unix\}/g, parts.unix);
+}
+
 
 function writeSessionInput(id: string, data: string, session: SessionConfig) {
   switch (session.protocol) {
@@ -386,13 +427,13 @@ onMounted(() => {
 
       logBuffer.value = "";
       if (logPathRef.value) {
-        const now = new Date();
-        const pad = (value: number) => String(value).padStart(2, "0");
-        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        actualLogPath.value = `${logPathRef.value}_${timestamp}.log`;
+        const trimmedPath = logPathRef.value.trim();
+        const resolvedPath = resolveLogPathPlaceholders(trimmedPath);
+        actualLogPath.value = resolvedPath.endsWith(".log") ? resolvedPath : `${resolvedPath}.log`;
       } else {
         actualLogPath.value = undefined;
       }
+
 
       unlistenOutput = await listen<PtyOutputEvent>("pty-output", (event) => {
         if (event.payload.id !== ptyId.value || !terminal) {
@@ -459,7 +500,7 @@ onMounted(() => {
 
       const cols = terminal.cols ?? 80;
       const rows = terminal.rows ?? 24;
-      const newId = crypto.randomUUID();
+      const newId = props.sessionId;
       ptyId.value = newId;
 
       try {

@@ -48,13 +48,13 @@ fn detect_default_shell_windows() -> String {
         r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
     ];
-    
+
     for path in &git_bash_paths {
         if std::path::Path::new(path).exists() {
             return path.to_string();
         }
     }
-    
+
     // 2. Check via ProgramFiles environment variable
     if let Ok(program_files) = std::env::var("ProgramFiles") {
         let git_bash = format!("{}\\Git\\bin\\bash.exe", program_files);
@@ -62,20 +62,45 @@ fn detect_default_shell_windows() -> String {
             return git_bash;
         }
     }
-    
+
     if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
         let git_bash = format!("{}\\Git\\bin\\bash.exe", program_files_x86);
         if std::path::Path::new(&git_bash).exists() {
             return git_bash;
         }
     }
-    
+
     // 3. Fallback to CMD
     std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
 }
 
+fn user_home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            let mut combined = std::path::PathBuf::from(drive);
+            combined.push(path);
+            Some(combined)
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn expand_tilde_path(path: &str) -> std::path::PathBuf {
+    if path == "~" {
+        return user_home_dir();
+    }
+    if let Some(stripped) = path.strip_prefix("~/") {
+        return user_home_dir().join(stripped);
+    }
+    std::path::PathBuf::from(path)
+}
+
 #[command]
 fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, id: String) -> Result<String, String> {
+
     let pty_system = native_pty_system();
     let pty_pair = pty_system
         .openpty(PtySize {
@@ -228,13 +253,8 @@ fn close_pty(state: State<'_, AppState>, id: String) -> Result<(), String> {
 
 #[command]
 fn append_to_log(path: String, content: String) -> Result<(), String> {
-    // Expand leading ~/ to the home directory
-    let expanded = if path.starts_with("~/") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home).join(&path[2..])
-    } else {
-        std::path::PathBuf::from(&path)
-    };
+    let expanded = expand_tilde_path(&path);
+
     if let Some(parent) = expanded.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -250,10 +270,7 @@ fn append_to_log(path: String, content: String) -> Result<(), String> {
 
 #[command]
 fn save_terminal_log(content: String, tab_name: String) -> Result<String, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let logs_dir = std::path::PathBuf::from(&home)
-        .join("AuraTerm")
-        .join("logs");
+    let logs_dir = user_home_dir().join("AuraTerm").join("logs");
     std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
 
     // Sanitize the tab name so it is safe for use in a filename
@@ -382,6 +399,11 @@ fn main() {
             ssh::resize_ssh_pty,
             ssh::close_ssh_pty,
             ssh::answer_ssh_mfa,
+            ssh::ssh_list_remote_dir,
+            ssh::ssh_create_remote_dir,
+            ssh::ssh_remove_remote_entry,
+            ssh::ssh_upload_file,
+            ssh::ssh_download_file,
             telnet::start_telnet_session,
             telnet::write_telnet_input,
             telnet::close_telnet_session,
