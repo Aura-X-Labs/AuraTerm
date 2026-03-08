@@ -25,3 +25,9 @@
 - upload.py: 简化文件列表验证，不再检查空列表
 - vite.config.ts: 配置 `manualChunks: undefined` 优化打包策略
 - package.json: 添加版本同步脚本和 tauri 命令前的版本同步步骤
+- RemoteFileManager toolbar: reordered buttons (Up, Download, Upload, Refresh, New Folder, Delete)
+- Toolbar now uses icons instead of text labels
+- All UI and messages switched to English
+- Menu structure expanded: File/View/Help menus now expose all major features (new session, close tab, bookmarks, remote files, settings)
+- Improved menu accessibility for Windows/macOS
+- UI polish: button layout, icon centering, disabled state

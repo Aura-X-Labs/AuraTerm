@@ -80,11 +80,11 @@ const transferSummary = computed(() => {
 
   switch (transfer.value.status) {
     case "completed":
-      return transfer.value.direction === "upload" ? "上传完成" : "下载完成";
+      return transfer.value.direction === "upload" ? "Upload Completed" : "Download Completed";
     case "failed":
-      return transfer.value.direction === "upload" ? "上传失败" : "下载失败";
+      return transfer.value.direction === "upload" ? "Upload Failed" : "Download Failed";
     default:
-      return transfer.value.direction === "upload" ? "正在上传" : "正在下载";
+      return transfer.value.direction === "upload" ? "Uploading" : "Downloading";
   }
 });
 
@@ -92,7 +92,7 @@ const transferSourceLabel = computed(() => {
   if (!transfer.value) {
     return "";
   }
-  return transfer.value.direction === "upload" ? "本地文件" : "远程文件";
+  return transfer.value.direction === "upload" ? "Local File" : "Remote File";
 });
 
 const transferSourcePath = computed(() => {
@@ -109,7 +109,7 @@ const transferDestinationLabel = computed(() => {
   if (!transfer.value) {
     return "";
   }
-  return transfer.value.direction === "upload" ? "远程目标" : "本地目标";
+  return transfer.value.direction === "upload" ? "Remote Destination" : "Local Destination";
 });
 
 const transferDestinationPath = computed(() => {
@@ -171,7 +171,7 @@ function formatDate(timestamp?: number | null) {
 function describeError(error: unknown) {
   const message = String(error);
   if (message.toLowerCase().includes("not ready")) {
-    return "SSH 会话还在建立中，请稍后刷新。";
+    return "SSH session is still being established, please refresh later.";
   }
   return message;
 }
@@ -285,7 +285,7 @@ async function handleUploadChange(event: Event) {
         mode: transferMode.value,
       });
     }
-    setStatus(`已上传 ${files.length} 个文件到 ${currentPath.value || "."}`);
+    setStatus(`Uploaded ${files.length} file(s) to ${currentPath.value || "."}`);
     await loadDirectory(currentPath.value);
   } catch (error) {
     markTransferFailed(error);
@@ -325,7 +325,7 @@ async function downloadSelected() {
       expectedSize: selectedEntry.value.size,
       mode: transferMode.value,
     });
-    setStatus(`已下载到 ${localPath}`);
+    setStatus(`Downloaded to ${localPath}`);
   } catch (error) {
     markTransferFailed(error);
     setError(error);
@@ -339,8 +339,8 @@ async function deleteSelected() {
     return;
   }
 
-  const label = selectedEntry.value.isDir ? "文件夹" : "文件";
-  if (!window.confirm(`确认删除${label} “${selectedEntry.value.name}” 吗？`)) {
+  const label = selectedEntry.value.isDir ? "folder" : "file";
+  if (!window.confirm(`Are you sure you want to delete the ${label} "${selectedEntry.value.name}"?`)) {
     return;
   }
 
@@ -351,7 +351,7 @@ async function deleteSelected() {
       path: selectedEntry.value.path,
       isDir: selectedEntry.value.isDir,
     });
-    setStatus(`已删除 ${selectedEntry.value.name}`);
+    setStatus(`Deleted ${selectedEntry.value.name}`);
     selectedPath.value = null;
     await loadDirectory(currentPath.value);
   } catch (error) {
@@ -362,7 +362,7 @@ async function deleteSelected() {
 }
 
 async function createFolder() {
-  const name = window.prompt("新建文件夹名称", "new-folder");
+  const name = window.prompt("New Folder Name", "new-folder");
   if (!name) {
     return;
   }
@@ -374,7 +374,7 @@ async function createFolder() {
       parentPath: currentPath.value || ".",
       name,
     });
-    setStatus(`已创建文件夹 ${name}`);
+    setStatus(`Created folder ${name}`);
     await loadDirectory(currentPath.value);
   } catch (error) {
     setError(error);
@@ -449,12 +449,24 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="remote-file-manager-actions">
-        <button type="button" :disabled="loading || busy || !parentPath" @click="void loadDirectory(parentPath)">Up</button>
-        <button type="button" :disabled="loading || busy" @click="void loadDirectory(currentPath)">Refresh</button>
-        <button type="button" :disabled="loading || busy" @click="void createFolder()">New Folder</button>
-        <button type="button" :disabled="loading || busy" @click="triggerUpload">Upload</button>
-        <button type="button" :disabled="loading || busy || !selectedEntry || selectedEntry.isDir" @click="void downloadSelected()">Download</button>
-        <button type="button" class="danger" :disabled="loading || busy || !selectedEntry" @click="void deleteSelected()">Delete</button>
+        <button type="button" title="Go Up" :disabled="loading || busy || !parentPath" @click="void loadDirectory(parentPath)">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+        </button>
+        <button type="button" title="Download" :disabled="loading || busy || !selectedEntry || selectedEntry.isDir" @click="void downloadSelected()">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+        </button>
+        <button type="button" title="Upload" :disabled="loading || busy" @click="triggerUpload">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+        </button>
+        <button type="button" title="Refresh" :disabled="loading || busy" @click="void loadDirectory(currentPath)">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
+        </button>
+        <button type="button" title="New Folder" :disabled="loading || busy" @click="void createFolder()">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><line x1="12" x2="12" y1="10" y2="16"/><line x1="9" x2="15" y1="13" y2="13"/></svg>
+        </button>
+        <button type="button" class="danger" title="Delete" :disabled="loading || busy || !selectedEntry" @click="void deleteSelected()">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+        </button>
       </div>
 
       <input ref="uploadInputRef" type="file" multiple hidden @change="handleUploadChange">

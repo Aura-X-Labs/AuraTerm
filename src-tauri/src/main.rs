@@ -355,17 +355,46 @@ fn main() {
             {
                 use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
 
+                let new_local_item = MenuItem::with_id(_app, "menu-new-local", "Local Shell", true, None::<&str>)?;
+                let new_ssh_item = MenuItem::with_id(_app, "menu-new-ssh", "SSH", true, None::<&str>)?;
+                let new_telnet_item = MenuItem::with_id(_app, "menu-new-telnet", "Telnet", true, None::<&str>)?;
+                let new_serial_item = MenuItem::with_id(_app, "menu-new-serial", "Serial", true, None::<&str>)?;
+                let close_tab_item = MenuItem::with_id(_app, "menu-close-tab", "Close Tab", true, None::<&str>)?;
+                let settings_item = MenuItem::with_id(_app, "menu-open-settings", "Settings", true, None::<&str>)?;
+                let toggle_bookmarks_item = MenuItem::with_id(_app, "menu-toggle-bookmarks", "Toggle Bookmarks", true, None::<&str>)?;
+                let toggle_remote_files_item = MenuItem::with_id(_app, "menu-toggle-remote-files", "Toggle Remote Files", true, None::<&str>)?;
                 let exit_item = MenuItem::with_id(_app, "exit", "Exit", true, None::<&str>)?;
                 let about_item = MenuItem::with_id(_app, "about", "About AuraTerm", true, None::<&str>)?;
 
+                let new_session_menu = SubmenuBuilder::new(_app, "New Session")
+                    .item(&new_local_item)
+                    .item(&new_ssh_item)
+                    .item(&new_telnet_item)
+                    .item(&new_serial_item)
+                    .build()?;
+
+                let preferences_menu = SubmenuBuilder::new(_app, "Preferences")
+                    .item(&settings_item)
+                    .build()?;
+
                 let file_menu = SubmenuBuilder::new(_app, "File")
+                    .item(&new_session_menu)
+                    .item(&close_tab_item)
+                    .separator()
+                    .item(&preferences_menu)
+                    .separator()
                     .item(&exit_item)
+                    .build()?;
+                let view_menu = SubmenuBuilder::new(_app, "View")
+                    .item(&toggle_bookmarks_item)
+                    .item(&toggle_remote_files_item)
                     .build()?;
                 let help_menu = SubmenuBuilder::new(_app, "Help")
                     .item(&about_item)
                     .build()?;
                 let menu = MenuBuilder::new(_app)
                     .item(&file_menu)
+                    .item(&view_menu)
                     .item(&help_menu)
                     .build()?;
 
@@ -377,6 +406,30 @@ fn main() {
             match event.id().as_ref() {
                 "about" => {
                     let _ = app.emit("show-about", ());
+                }
+                "menu-open-settings" => {
+                    let _ = app.emit("menu-open-settings", ());
+                }
+                "menu-new-local" => {
+                    let _ = app.emit("menu-new-local", ());
+                }
+                "menu-new-ssh" => {
+                    let _ = app.emit("menu-new-ssh", ());
+                }
+                "menu-new-telnet" => {
+                    let _ = app.emit("menu-new-telnet", ());
+                }
+                "menu-new-serial" => {
+                    let _ = app.emit("menu-new-serial", ());
+                }
+                "menu-close-tab" => {
+                    let _ = app.emit("menu-close-tab", ());
+                }
+                "menu-toggle-bookmarks" => {
+                    let _ = app.emit("menu-toggle-bookmarks", ());
+                }
+                "menu-toggle-remote-files" => {
+                    let _ = app.emit("menu-toggle-remote-files", ());
                 }
                 "exit" => {
                     app.exit(0);

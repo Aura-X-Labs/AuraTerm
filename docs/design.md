@@ -153,7 +153,7 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
 ### Phase 3: 文件传输与高级终端特性 (第 5-6 个月)
 * **目标**: 补齐 TeraTerm 的特色文件传输功能。
 * **任务**:
-  * 实现 SFTP/SCP 的可视化文件管理器。
+  * 实现 SFTP/SCP 的可视化文件管理器。 --Done
   * 在 Rust 中实现 ZMODEM/YMODEM 协议状态机。
   * 实现终端数据流拦截，自动触发 ZMODEM 接收弹窗。
   * 完善 Xterm.js 的 VT100/VT200 兼容性测试。

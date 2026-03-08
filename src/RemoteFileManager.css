@@ -91,9 +91,13 @@
   background: #1d2630;
   color: #d8e2ee;
   border-radius: 8px;
-  padding: 6px 10px;
+  padding: 8px;
   font-size: 12px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
 }
 
 .remote-file-manager-actions button:hover:not(:disabled) {

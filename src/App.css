@@ -162,6 +162,17 @@
   color: #ffffff;
 }
 
+.titlebar-menu-item:disabled {
+  color: #6f6f6f;
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.titlebar-menu-item:disabled:hover {
+  color: #6f6f6f;
+  background: transparent;
+}
+
 .titlebar-menu-item-arrow {
   margin-left: 18px;
   color: #8e8e8e;

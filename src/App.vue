@@ -32,8 +32,8 @@ interface Tab {
   logPath?: string;
 }
 
-type AppMenuId = "file" | "help";
-type FileSubmenuId = "preferences";
+type AppMenuId = "file" | "view" | "help";
+type FileSubmenuId = "new-session" | "preferences";
 
 let nextTabId = 1;
 
@@ -62,6 +62,11 @@ const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const termRefs = new Map<string, TerminalHandle>();
 const cleanupFns: Array<() => void> = [];
+
+function closeOpenMenus() {
+  openMenuId.value = null;
+  openFileSubmenuId.value = null;
+}
 
 watch(settings, (value) => {
   settingsRef.value = value;
@@ -133,6 +138,35 @@ onMounted(async () => {
     }));
   } catch (error) {
     console.error("Failed to setup about listener:", error);
+  }
+
+  try {
+    cleanupFns.push(await listen("menu-open-settings", () => {
+      handleOpenSettings();
+    }));
+    cleanupFns.push(await listen("menu-new-local", () => {
+      handleNewLocalSessionFromMenu();
+    }));
+    cleanupFns.push(await listen("menu-new-ssh", () => {
+      handleOpenConnectionFromMenu("ssh");
+    }));
+    cleanupFns.push(await listen("menu-new-telnet", () => {
+      handleOpenConnectionFromMenu("telnet");
+    }));
+    cleanupFns.push(await listen("menu-new-serial", () => {
+      handleOpenConnectionFromMenu("serial");
+    }));
+    cleanupFns.push(await listen("menu-close-tab", () => {
+      handleCloseActiveTab();
+    }));
+    cleanupFns.push(await listen("menu-toggle-bookmarks", () => {
+      handleToggleBookmarks();
+    }));
+    cleanupFns.push(await listen("menu-toggle-remote-files", () => {
+      handleToggleRemoteFileManager();
+    }));
+  } catch (error) {
+    console.error("Failed to setup menu listeners:", error);
   }
 });
 
@@ -302,21 +336,19 @@ async function handleClose() {
 }
 
 async function handleExitApp() {
-  openMenuId.value = null;
+  closeOpenMenus();
   await getCurrentWindow().close().catch((error) => {
     console.error("exit failed", error);
   });
 }
 
 function handleOpenAbout() {
-  openMenuId.value = null;
-  openFileSubmenuId.value = null;
+  closeOpenMenus();
   showAbout.value = true;
 }
 
 function handleOpenSettings() {
-  openMenuId.value = null;
-  openFileSubmenuId.value = null;
+  closeOpenMenus();
   showSettings.value = true;
 }
 
@@ -328,9 +360,36 @@ function toggleRemoteFileManager() {
 }
 
 function handleOpenNewTabMenu() {
-  openMenuId.value = null;
-  openFileSubmenuId.value = null;
+  closeOpenMenus();
   showNewTabMenu.value = true;
+}
+
+function handleNewLocalSessionFromMenu() {
+  closeOpenMenus();
+  handleNewLocalSession();
+}
+
+function handleOpenConnectionFromMenu(protocol: ConnectionProtocol) {
+  closeOpenMenus();
+  openConnect(protocol);
+}
+
+function handleToggleBookmarks() {
+  closeOpenMenus();
+  sidebarOpen.value = !sidebarOpen.value;
+}
+
+function handleToggleRemoteFileManager() {
+  closeOpenMenus();
+  toggleRemoteFileManager();
+}
+
+function handleCloseActiveTab() {
+  closeOpenMenus();
+  if (!activeTab.value) {
+    return;
+  }
+  handleCloseTab(activeTab.value.id);
 }
 
 function toggleMenu(menuId: AppMenuId) {
@@ -558,6 +617,34 @@ function handleBookmarkConnect(connection: SavedConnection) {
             <div v-if="openMenuId === 'file'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
               <div
                 class="titlebar-menu-submenu-group"
+                @mouseenter="openFileSubmenuId = 'new-session'"
+              >
+                <button class="titlebar-menu-item titlebar-menu-item--submenu" type="button" @click="toggleFileSubmenu('new-session')">
+                  <span>New Session</span>
+                  <span class="titlebar-menu-item-arrow">›</span>
+                </button>
+                <div v-if="openFileSubmenuId === 'new-session'" class="titlebar-menu-submenu" @mousedown="stopDragPropagation">
+                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleNewLocalSessionFromMenu">
+                    <span>Local Shell</span>
+                  </button>
+                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenConnectionFromMenu('ssh')">
+                    <span>SSH</span>
+                  </button>
+                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenConnectionFromMenu('telnet')">
+                    <span>Telnet</span>
+                  </button>
+                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenConnectionFromMenu('serial')">
+                    <span>Serial</span>
+                  </button>
+                </div>
+              </div>
+              <button class="titlebar-menu-item" type="button" :disabled="!activeTab" @click="handleCloseActiveTab">
+                <span>Close Tab</span>
+                <span class="titlebar-menu-item-hint">Ctrl+W</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <div
+                class="titlebar-menu-submenu-group"
                 @mouseenter="openFileSubmenuId = 'preferences'"
               >
                 <button class="titlebar-menu-item titlebar-menu-item--submenu" type="button" @click="toggleFileSubmenu('preferences')">
@@ -574,6 +661,26 @@ function handleBookmarkConnect(connection: SavedConnection) {
               <button class="titlebar-menu-item" type="button" @click="handleExitApp">
                 <span>Exit</span>
                 <span class="titlebar-menu-item-hint">Alt+F4</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="titlebar-menu-group" @mouseenter="openMenuId ? (openMenuId = 'view') : null">
+            <button
+              class="titlebar-menu-btn"
+              :class="{ open: openMenuId === 'view' }"
+              type="button"
+              @mousedown="stopDragPropagation"
+              @click="toggleMenu('view')"
+            >
+              View
+            </button>
+            <div v-if="openMenuId === 'view'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
+              <button class="titlebar-menu-item" type="button" @click="handleToggleBookmarks">
+                <span>{{ sidebarOpen ? 'Hide Bookmarks' : 'Show Bookmarks' }}</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleRemoteFileManager">
+                <span>{{ showRemoteFileManager ? 'Hide Remote Files' : 'Show Remote Files' }}</span>
               </button>
             </div>
           </div>
