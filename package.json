@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "sync:version": "node scripts/sync-version.mjs",
+    "tauri": "npm run sync:version && tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

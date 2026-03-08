@@ -1,96 +1,110 @@
 #!/usr/bin/env python3
 """
-Release script for AuraTerm
-Handles version generation, file operations, and JSON updates
+Release metadata script for AuraTerm.
+Updates releases JSON from already-built target artifacts.
 """
 
-import argparse
 import json
-import os
 import re
-import shutil
 import sys
 import hashlib
-import platform
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 
-def get_version_from_config():
-    """Extract version from tauri.conf.json"""
-    config_path = Path("src-tauri/tauri.conf.json")
-    if not config_path.exists():
-        print("Error: tauri.conf.json not found")
+def get_version_from_package_json():
+    """Extract version from package.json (single source of truth)."""
+    package_path = Path("package.json")
+    if not package_path.exists():
+        print("Error: package.json not found")
         sys.exit(1)
-    
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-        version = config.get('version', '0.1.0')
-        # Extract major.minor only
-        parts = version.split('.')
-        return f"{parts[0]}.{parts[1]}"
+
+    with open(package_path, 'r', encoding='utf-8') as f:
+        package = json.load(f)
+        version = package.get('version')
+
+    if not version:
+        print("Error: package.json version is missing")
+        sys.exit(1)
+
+    parts = version.split('.')
+    if len(parts) < 2:
+        print(f"Error: invalid package.json version '{version}'")
+        sys.exit(1)
+
+    # Keep full semantic version (e.g. 0.1.5)
+    return version
 
 
-def get_latest_patch_version(version_base, mmdd, ext):
-    """Get the latest patch version for today's date"""
-    releases_dir = Path("releases")
-    if not releases_dir.exists():
-        return 0
-    
-    pattern = f"AuraTerm-{version_base}.[0-9]*.{mmdd}-*.{ext}"
-    existing_files = list(releases_dir.glob(pattern))
-    
-    if not existing_files:
-        return 0
-    
-    patches = []
-    for f in existing_files:
-        match = re.search(rf'{version_base}\.(\d+)\.{mmdd}', f.name)
+def normalize_arch(arch: str) -> str:
+    """Normalize architecture values to user-facing labels."""
+    mapping = {
+        "x86_64": "x64",
+        "amd64": "x64",
+        "aarch64": "arm64",
+    }
+    return mapping.get(arch.lower(), arch.lower())
+
+
+def latest_artifact(pattern: str) -> Optional[Path]:
+    """Return the newest artifact that matches a glob pattern."""
+    files = sorted(Path().glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+
+def find_target_artifacts():
+    """Find newest build artifacts in target bundle folders."""
+    patterns = [
+        "src-tauri/target/release/bundle/nsis/AuraTerm_*_*-setup.exe",
+        "src-tauri/target/release/bundle/dmg/AuraTerm_*_*.dmg",
+        "src-tauri/target/release/bundle/appimage/AuraTerm_*_*.AppImage",
+    ]
+
+    artifacts = []
+    for pattern in patterns:
+        artifact = latest_artifact(pattern)
+        if artifact:
+            artifacts.append(artifact)
+
+    if not artifacts:
+        print("Error: No target artifacts found. Run build first.")
+        sys.exit(1)
+
+    return artifacts
+
+
+def infer_platform_and_arch(artifact: Path):
+    """Infer platform and architecture from artifact filename/path."""
+    name = artifact.name
+    suffix = artifact.suffix.lower()
+
+    arch = "x64"
+    if suffix == ".exe":
+        match = re.search(r"_([^-_]+)-setup\.exe$", name)
         if match:
-            patches.append(int(match.group(1)))
-    
-    return max(patches) if patches else 0
-
-
-def get_architecture():
-    """Get system architecture"""
-    system = platform.system()
-    machine = platform.machine().lower()
-    
-    if system == 'Windows':
-        return 'x64'
-    elif machine == 'arm64':
-        return 'arm64'
-    elif machine in ['amd64', 'x86_64']:
-        return 'x64'
+            arch = normalize_arch(match.group(1))
+        platform_name = f"windows-{arch}"
+    elif suffix == ".dmg":
+        match = re.search(r"_([^_]+)\.dmg$", name)
+        if match:
+            arch = normalize_arch(match.group(1))
+        platform_name = f"macos-{arch}"
     else:
-        return machine
+        match = re.search(r"_([^_]+)\.AppImage$", name)
+        if match:
+            arch = normalize_arch(match.group(1))
+        platform_name = f"linux-{arch}"
+
+    return platform_name, arch
 
 
-def find_artifact():
-    """Find the built artifact"""
-    system = platform.system()
-    arch = get_architecture()
-    arch_tauri = 'aarch64' if arch == 'arm64' else arch
-    
-    if system == 'Windows':
-        pattern = f"src-tauri/target/release/bundle/nsis/AuraTerm_*_{arch_tauri}-setup.exe"
-        ext = 'exe'
-    elif system == 'Darwin':
-        pattern = f"src-tauri/target/release/bundle/dmg/AuraTerm_*_{arch_tauri}.dmg"
-        ext = 'dmg'
-    else:
-        pattern = f"src-tauri/target/release/bundle/appimage/AuraTerm_*_{arch_tauri}.AppImage"
-        ext = 'appimage'
-    
-    import glob
-    files = glob.glob(pattern)
-    
-    if not files:
-        print(f"Error: Artifact not found at {pattern}")
-        sys.exit(1)
-    
-    return files[0], ext, arch
+def extract_version_from_filename(filename: str) -> Optional[str]:
+    """Extract semantic version from standard AuraTerm artifact names."""
+    match = re.search(r"AuraTerm_(\d+\.\d+\.\d+)", filename)
+    if match:
+        return match.group(1)
+    return None
 
 
 def calculate_sha256(filepath):
@@ -102,37 +116,44 @@ def calculate_sha256(filepath):
     return sha256_hash.hexdigest()
 
 
-def update_releases_json(version, filename, platform_name, sha256):
-    """Update or create releases JSON file"""
+def update_releases_json(release_infos, latest_version):
+    """Update or create releases JSON file using provided release entries."""
     releases_dir = Path("releases")
     releases_dir.mkdir(exist_ok=True)
     
     json_path = releases_dir / "auraterm-releases.json"
     publish_date = datetime.now().strftime('%Y-%m-%d')
     
-    release_info = {
-        "version": version,
-        "filename": filename,
-        "platform": platform_name,
-        "published_at": publish_date,
-        "sha256": sha256,
-        "notes": "automated release"
-    }
-    
+    for info in release_infos:
+        info["published_at"] = publish_date
+        info.setdefault("notes", "automated release")
+
     if json_path.exists():
         try:
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except:
             data = {"product": "AuraTerm", "latest": "", "releases": []}
-        
-        data["latest"] = version
-        data["releases"] = [release_info] + data["releases"]
+
+        existing = data.get("releases", [])
+        for release_info in release_infos:
+            # Upsert by filename + platform to avoid duplicate records.
+            replaced = False
+            for idx, item in enumerate(existing):
+                if item.get("filename") == release_info["filename"] and item.get("platform") == release_info["platform"]:
+                    existing[idx] = release_info
+                    replaced = True
+                    break
+            if not replaced:
+                existing.insert(0, release_info)
+
+        data["latest"] = latest_version
+        data["releases"] = existing
     else:
         data = {
             "product": "AuraTerm",
-            "latest": version,
-            "releases": [release_info]
+            "latest": latest_version,
+            "releases": release_infos
         }
     
     with open(json_path, 'w', encoding='utf-8') as f:
@@ -142,61 +163,31 @@ def update_releases_json(version, filename, platform_name, sha256):
 
 
 def main():
-    """Main release process"""
-    parser = argparse.ArgumentParser(description='Process release artifacts')
-    parser.add_argument('--force', action='store_true', 
-                        help='Overwrite existing version without incrementing patch')
-    args = parser.parse_args()
-    
-    print("Processing artifacts...")
-    
-    # Get version info
-    version_base = get_version_from_config()
-    mmdd = datetime.now().strftime('%m%d')
-    
-    # Find artifact
-    artifact_path, ext, arch = find_artifact()
-    
-    # Calculate patch version
-    if args.force:
-        # Use existing patch version (don't increment)
-        patch = get_latest_patch_version(version_base, mmdd, ext)
-    else:
-        # Increment patch version
-        patch = get_latest_patch_version(version_base, mmdd, ext) + 1
-    
-    full_version = f"{version_base}.{patch}.{mmdd}"
-    
-    # Prepare destination
-    releases_dir = Path("releases")
-    releases_dir.mkdir(exist_ok=True)
-    
-    dest_name = f"AuraTerm-{full_version}-{arch}.{ext}"
-    dest_path = releases_dir / dest_name
-    
-    # Copy files (overwrite if exists)
-    shutil.copy2(artifact_path, dest_path)
-    
-    latest_path = releases_dir / f"AuraTerm-latest-{arch}.{ext}"
-    shutil.copy2(artifact_path, latest_path)
-    
-    # Calculate hash
-    sha256 = calculate_sha256(artifact_path)
-    
-    # Determine platform
-    system = platform.system()
-    if system == 'Windows':
-        platform_name = 'windows-x64'
-    elif system == 'Darwin':
-        platform_name = f'macos-{arch}'
-    else:
-        platform_name = f'linux-{arch}'
-    
-    # Update JSON
-    json_path = update_releases_json(full_version, dest_name, platform_name, sha256)
-    
-    print(f"Local release prepared: releases/{dest_name}")
+    """Update releases JSON metadata from target artifacts."""
+    print("Updating release metadata...")
+
+    package_version = get_version_from_package_json()
+    artifacts = find_target_artifacts()
+
+    release_infos = []
+    for artifact in artifacts:
+        version = extract_version_from_filename(artifact.name) or package_version
+        platform_name, _ = infer_platform_and_arch(artifact)
+        sha256 = calculate_sha256(artifact)
+
+        release_infos.append({
+            "version": version,
+            "filename": artifact.name,
+            "platform": platform_name,
+            "sha256": sha256,
+            "notes": "automated release"
+        })
+
+    json_path = update_releases_json(release_infos, package_version)
+
     print(f"JSON updated: {json_path}")
+    for info in release_infos:
+        print(f"  - {info['filename']} ({info['platform']})")
 
 
 if __name__ == "__main__":

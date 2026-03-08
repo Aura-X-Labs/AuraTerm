@@ -230,8 +230,6 @@ onMounted(() => {
   terminal.open(terminalRootRef.value);
   fitAddon.fit();
 
-  let isPasting = false; // Flag to prevent duplicate paste
-
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (event.type !== "keydown") {
       return true;

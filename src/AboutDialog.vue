@@ -7,7 +7,7 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const version = ref("0.1.0");
+const version = ref("unknown");
 const buildTime = ref("");
 
 onMounted(async () => {
