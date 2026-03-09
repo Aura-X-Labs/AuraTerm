@@ -32,6 +32,7 @@ struct PtySession {
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
     window_bounds_save_state: Arc<Mutex<WindowBoundsSaveState>>,
+    startup_dir: Arc<Mutex<Option<String>>>,
 }
 
 struct WindowBoundsSaveState {
@@ -309,7 +310,7 @@ fn setup_window_bounds_persistence(app: &AppHandle) -> Result<(), String> {
 }
 
 #[command]
-fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, id: String) -> Result<String, String> {
+fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, id: String, cwd: Option<String>) -> Result<String, String> {
 
     let pty_system = native_pty_system();
     let pty_pair = pty_system
@@ -337,6 +338,13 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
         command.env("TERM", "xterm-256color");
         command
     };
+
+    // Set working directory if specified
+    if let Some(dir) = cwd {
+        if std::path::Path::new(&dir).is_dir() {
+            command.cwd(&dir);
+        }
+    }
 
     let child = pty_pair
         .slave
@@ -547,13 +555,24 @@ fn get_version_info() -> VersionInfo {
     }
 }
 
+#[command]
+fn get_startup_dir(state: State<'_, AppState>) -> Option<String> {
+    state.startup_dir.lock().ok().and_then(|guard| guard.clone())
+}
+
 fn main() {
+    // Parse command line arguments for startup directory
+    let startup_dir = std::env::args()
+        .nth(1)
+        .filter(|arg| !arg.starts_with('-') && std::path::Path::new(arg).is_dir());
+
     let app_state = AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         window_bounds_save_state: Arc::new(Mutex::new(WindowBoundsSaveState {
             last_saved: None,
             last_save_at: None,
         })),
+        startup_dir: Arc::new(Mutex::new(startup_dir)),
     };
 
     tauri::Builder::default()
@@ -658,6 +677,7 @@ fn main() {
         .manage(serial::SerialState::default())
         .invoke_handler(tauri::generate_handler![
             get_version_info,
+            get_startup_dir,
             start_pty,
             write_pty_input,
             resize_pty,

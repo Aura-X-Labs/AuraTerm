@@ -587,7 +587,9 @@ onMounted(() => {
             break;
           case "local":
             terminal.writeln("Starting local shell PTY...");
-            await invoke("start_pty", { id: newId, cols, rows });
+            // Use session cwd, or fall back to startup directory from command line
+            const cwd = session.cwd ?? window.getStartupDir?.() ?? undefined;
+            await invoke("start_pty", { id: newId, cols, rows, cwd });
             break;
         }
       } catch (error) {

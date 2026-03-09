@@ -96,9 +96,9 @@ fn default_log_file_name_template() -> String { "{timestamp}_{session}".to_strin
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            font_size: 14,
+            font_size: 15,
             font_family: r#"Consolas, "Courier New", monospace"#.to_string(),
-            scrollback: 1000,
+            scrollback: 10000,
             shell_path: None,
             window_bounds: None,
             log_save_path: default_log_save_path(),

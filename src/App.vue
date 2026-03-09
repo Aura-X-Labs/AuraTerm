@@ -410,7 +410,8 @@ function stopDragPropagation(event: MouseEvent) {
 
 function handleNewLocalSession() {
   const newId = `tab-${nextTabId++}`;
-  tabs.value = [...tabs.value, { id: newId, title: "Local Shell", session: { protocol: "local" } }];
+  const cwd = window.getStartupDir?.() ?? undefined;
+  tabs.value = [...tabs.value, { id: newId, title: "Local Shell", session: { protocol: "local", cwd } }];
   activeTabId.value = newId;
 }
 

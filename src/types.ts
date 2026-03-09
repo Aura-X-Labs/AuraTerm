@@ -97,7 +97,7 @@ export interface SavedConnection {
 }
 
 export type SessionConfig =
-  | { protocol: "local" }
+  | { protocol: "local"; cwd?: string }
   | { protocol: "ssh"; sshConfig: SshConfig }
   | { protocol: "telnet"; telnetConfig: TelnetConfig }
   | { protocol: "serial"; serialConfig: SerialConfig };

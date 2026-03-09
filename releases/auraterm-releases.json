@@ -4,19 +4,19 @@
   "releases": [
     {
       "version": "0.1.6",
-      "filename": "AuraTerm_0.1.6_aarch64.dmg",
-      "platform": "macos-arm64",
-      "sha256": "cbf80fbc9ae733d6af9fc4244a8fb646470c8abfd8a894a0331eb02558aeb27b",
-      "notes": "automated release",
-      "published_at": "2026-03-09"
-    },
-    {
-      "version": "0.1.6",
       "filename": "AuraTerm_0.1.6_x64-setup.exe",
       "platform": "windows-x64",
-      "published_at": "2026-03-08",
-      "sha256": "94a8add8ba909ed142e66d2480bd10544833a2fbc475764faea9635a6d3255b0",
-      "notes": "Initial public release"
+      "sha256": "80f5e6911f18ab8de5843701a2cd365aaba23dbe1e03eb37376fabc01136dc0b",
+      "notes": "automated release",
+      "published_at": "2026-03-08"
+    },
+    {
+      "version": "0.1.5",
+      "filename": "AuraTerm_0.1.5_x64-setup.exe",
+      "platform": "windows-x64",
+      "sha256": "4eeb3b267e19e61a0bebf583fedf98289c3aac16b4158619f8b8e4db2de55501",
+      "notes": "automated release",
+      "published_at": "2026-03-08"
     }
   ]
 }
