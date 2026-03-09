@@ -1,4 +1,35 @@
-## 0.1.5
+## 0.1.7
+
+### 新增
+- Windows 资源管理器上下文菜单集成，支持"在 AuraTerm 中打开"功能
+  - 通过 NSIS 安装程序注册 Windows 资源管理器上下文菜单
+  - 支持在文件夹和文件夹背景上右键打开
+  - 实现命令行参数解析以接受启动目录
+  - 后端支持 PTY 会话的可选工作目录
+  - 新增 `get_startup_dir` Tauri 命令供前端获取启动目录
+  - 从上下文菜单启动时自动切换到指定目录
+- SSH 自动重连功能（通过 screen/tmux）
+  - 使用 screen/tmux 实现 SSH 自动重连
+  - 提示是否附加到现有会话
+  - 使用 'at-' 作为会话前缀
+  - 添加后端处理和前端 UI
+
+### 变更
+- 窗口位置和大小持久化
+  - 将窗口位置/大小保存到设置中，启动时恢复
+  - 限制恢复的边界到可见显示器工作区
+  - 节流和去重保存
+  - 新增 WindowBounds 类型和相关设置迁移
+
+### 改进
+- PTY 配置优化
+  - 为本地 PTY 子进程显式设置 TERM=xterm-256color
+  - 从密码数据库（登录 shell）解析默认 shell，而不仅仅依赖 $SHELL
+  - 仍支持通过 settings.shell_path 配置的 shell
+  - 以登录 shell 启动（argv0 加 -basename 前缀）以确保正确的登录初始化
+  - 添加 libc 依赖以读取 passwd 条目
+
+## 0.1.6
 
 ### 新增
 - 添加版本同步脚本 (scripts/sync-version.mjs)
@@ -11,7 +42,7 @@
 ### 变更
 - 重构构建和发布流程，优化 Makefile
 - 移除 repackage 目标，调整 release/upload 逻辑
-- 版本更新至 0.1.5
+- 版本更新至 0.1.6
 - 全局样式从 index.html 移至 main.ts
 - AboutDialog 改为运行时获取版本信息
 - 优化终端组件键盘事件处理
@@ -31,3 +62,4 @@
 - Menu structure expanded: File/View/Help menus now expose all major features (new session, close tab, bookmarks, remote files, settings)
 - Improved menu accessibility for Windows/macOS
 - UI polish: button layout, icon centering, disabled state
+

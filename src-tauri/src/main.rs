@@ -5,7 +5,6 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::{
     collections::HashMap,
-    ffi::CStr,
     io::{Read, Write},
     sync::{Arc, Mutex},
     thread,
