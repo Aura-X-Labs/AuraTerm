@@ -5,6 +5,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::{
     collections::HashMap,
+    ffi::CStr,
     io::{Read, Write},
     sync::{Arc, Mutex},
     thread,
@@ -74,6 +75,47 @@ fn detect_default_shell_windows() -> String {
     std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
 }
 
+#[cfg(unix)]
+fn detect_login_shell_unix() -> String {
+    unsafe {
+        let passwd = libc::getpwuid(libc::getuid());
+        if !passwd.is_null() {
+            let shell = CStr::from_ptr((*passwd).pw_shell);
+            if let Ok(shell) = shell.to_str() {
+                if !shell.trim().is_empty() {
+                    return shell.to_string();
+                }
+            }
+        }
+    }
+
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+fn resolve_local_shell_path(app: &AppHandle) -> String {
+    let settings = settings::get_settings(app.clone()).unwrap_or_default();
+
+    if let Some(custom_shell) = settings.shell_path {
+        if !custom_shell.trim().is_empty() {
+            return custom_shell;
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        detect_default_shell_windows()
+    } else {
+        #[cfg(unix)]
+        {
+            detect_login_shell_unix()
+        }
+
+        #[cfg(not(unix))]
+        {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        }
+    }
+}
+
 fn user_home_dir() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -111,29 +153,23 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
         })
         .map_err(|error| error.to_string())?;
 
-    // Get shell path from settings or detect default
-    let settings = settings::get_settings(app.clone()).unwrap_or_default();
-    let shell_path = if let Some(custom_shell) = settings.shell_path {
-        if !custom_shell.trim().is_empty() {
-            custom_shell
-        } else {
-            // Empty string, use default
-            if cfg!(target_os = "windows") {
-                detect_default_shell_windows()
-            } else {
-                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-            }
-        }
-    } else {
-        // Not configured, use default
-        if cfg!(target_os = "windows") {
-            detect_default_shell_windows()
-        } else {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-        }
+    let shell_path = resolve_local_shell_path(&app);
+
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = CommandBuilder::new_default_prog();
+        command.env("SHELL", &shell_path);
+        command.env("TERM", "xterm-256color");
+        command
     };
 
-    let command = CommandBuilder::new(shell_path);
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = CommandBuilder::new(shell_path);
+        command.env("TERM", "xterm-256color");
+        command
+    };
+
     let child = pty_pair
         .slave
         .spawn_command(command)

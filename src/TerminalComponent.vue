@@ -4,6 +4,7 @@ import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { type as getOsType } from "@tauri-apps/plugin-os";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import type { SerialConnectionState, SessionConfig, SshConfig, TerminalHandle } from "./types";
 import "xterm/css/xterm.css";
@@ -143,6 +144,7 @@ const effectiveSettings = computed(() => props.settings ?? DEFAULT_SETTINGS);
 const settingsRef = ref<AppSettings>(effectiveSettings.value);
 const terminalRootRef = ref<HTMLDivElement | null>(null);
 const ptyId = ref<string | null>(null);
+const osType = ref("unknown");
 const logBuffer = ref("");
 const logPathRef = ref<string | undefined>(props.logPath);
 const actualLogPath = ref<string | undefined>(undefined);
@@ -250,6 +252,12 @@ onMounted(() => {
     return;
   }
 
+  try {
+    osType.value = getOsType();
+  } catch (error) {
+    console.error("Failed to detect OS:", error);
+  }
+
   terminal = new Terminal({
     cursorBlink: true,
     cursorStyle: "block",
@@ -351,7 +359,11 @@ onMounted(() => {
     if (!ptyId.value) {
       return;
     }
-    void writeSessionInput(ptyId.value, data, activeSessionRef.value).catch((error) => {
+    const shouldNormalizeBackspace = activeSessionRef.value.protocol === "local"
+      && ["macos", "linux"].includes(osType.value)
+      && data === "\x08";
+    const normalizedData = shouldNormalizeBackspace ? "\x7f" : data;
+    void writeSessionInput(ptyId.value, normalizedData, activeSessionRef.value).catch((error) => {
       console.error("input failed", error);
     });
   });
