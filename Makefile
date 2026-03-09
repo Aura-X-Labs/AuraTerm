@@ -17,7 +17,7 @@ build: clean
 	npm run tauri -- build --bundles $(BUNDLE)
 
 clean:
-	@python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]"
+	@python3 -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]"
 
 help:
 	@echo "Makefile targets:"
@@ -30,8 +30,8 @@ help:
 
 release:
 	@echo "Updating release metadata JSON..."
-	@python scripts/release.py
+	@python3 scripts/release.py
 
 upload: release
 	@echo "Uploading target artifacts..."
-	@python scripts/upload.py
+	@python3 scripts/upload.py

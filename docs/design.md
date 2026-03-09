@@ -143,7 +143,6 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
   * 实现 Telnet 协议解析。 --Done
    * 集成 \serialport-rs\，实现串口设备的枚举和连接。 --Done
   * 前端实现新建连接对话框（支持 SSH/Telnet/Serial 切换）。 --Done
-   * 实现连接状态反馈（连接中、成功、失败）。 --Done
 
 ### Phase 2.5: 快捷连接增强
 * SSH 公钥认证支持（`userauth_pubkey_memory`）。 --Done
@@ -173,3 +172,8 @@ TeraTerm 是一款历史悠久且功能强大的终端模拟器（支持 SSH、T
   * 性能调优（降低 CPU 和内存占用，优化大段文本输出的渲染）。
   * 国际化 (i18n) 支持。
   * 发布 1.0 Beta 版本并收集社区反馈。
+
+
+### Todo
+* UI 优化：书签
+  * 分组的折叠/展开功能
