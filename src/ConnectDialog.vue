@@ -88,7 +88,7 @@ const serialError = ref("");
 const enableLog = ref(true);
 const logFilePath = ref("");
 const autoReconnect = ref(false);
-const reconnectType = ref<"screen" | "tmux">("screen");
+const reconnectType = ref<"simple" | "screen" | "tmux">("simple");
 
 const isSsh = computed(() => protocol.value === "ssh");
 const isTelnet = computed(() => protocol.value === "telnet");
@@ -548,21 +548,28 @@ function handleSubmit(event: Event) {
           <div class="form-group save-connection-group">
             <label class="save-connection-label">
               <input v-model="autoReconnect" type="checkbox">
-              <span>Auto reconnect (via screen/tmux)</span>
+              <span>Auto reconnect</span>
             </label>
-            <div v-if="autoReconnect" class="two-column-grid">
-              <div class="form-group" style="margin-bottom: 0">
-                <label>Session tool:</label>
+            <div v-if="autoReconnect">
+              <div class="form-group" style="margin-bottom: 4px">
+                <label>Reconnect mode:</label>
                 <select v-model="reconnectType">
-                  <option value="tmux">tmux</option>
-                  <option value="screen">screen</option>
+                  <option value="simple">Simple (reconnect only, no session persistence)</option>
+                  <option value="tmux">Session persistence via tmux (requires tmux on server)</option>
+                  <option value="screen">Session persistence via screen (requires screen on server)</option>
                 </select>
               </div>
-              <div class="form-group" style="margin-bottom: 0; grid-column: 1 / -1;">
-                <div class="form-hint">
-                  AuraTerm only manages remote auto-reconnect sessions whose names start with <strong>at-</strong>.
-                  Existing sessions without this prefix will not be attached to or removed.
-                </div>
+              <div class="form-hint" style="margin-top: 2px;">
+                <template v-if="reconnectType === 'simple'">
+                  Reconnects automatically after a disconnect. No server-side tools required. Running tasks will be interrupted on disconnect.
+                </template>
+                <template v-else-if="reconnectType === 'tmux'">
+                  Uses <strong>tmux</strong> to keep your session alive. Mouse scroll is enabled automatically. Requires <code>tmux</code> installed on the remote host.
+                </template>
+                <template v-else>
+                  Uses <strong>screen</strong> to keep your session alive. Requires <code>screen</code> installed on the remote host.
+                  AuraTerm only manages sessions whose names start with <strong>at-</strong>.
+                </template>
               </div>
             </div>
           </div>

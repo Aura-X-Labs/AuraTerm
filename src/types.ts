@@ -1,6 +1,6 @@
 export type ConnectionProtocol = "ssh" | "telnet" | "serial";
 
-export type ReconnectType = "screen" | "tmux";
+export type ReconnectType = "simple" | "screen" | "tmux";
 
 export interface SshConfig {
   host: string;

@@ -285,7 +285,7 @@ onMounted(() => {
       foreground: effectiveSettings.value.theme.foreground,
       cursor: effectiveSettings.value.theme.cursor,
     },
-    convertEol: true,
+    convertEol: false,
     allowProposedApi: true,
     macOptionIsMeta: true,
   });

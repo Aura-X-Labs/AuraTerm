@@ -151,6 +151,8 @@ struct ReconnectConfig {
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReconnectType {
+    /// Reconnect only: no server-side session manager. Running tasks will be lost on disconnect.
+    Simple,
     Screen,
     Tmux,
 }
@@ -1061,29 +1063,38 @@ pub async fn close_ssh_pty(
     state: State<'_, SshState>,
     id: String,
 ) -> Result<(), String> {
-    // If there is an active SSH handle, try to destroy the remote screen/tmux session first.
+    // For session-persistence modes (tmux/screen), try to destroy the remote session first.
     let config = state.reconnect_configs.lock().await.get(&id).cloned();
     if let Some(cfg) = config {
-        if let Ok(handle) = get_ssh_handle(state.inner(), &id).await {
-            let kill_cmd = match cfg.reconnect_type {
-                ReconnectType::Tmux => format!("tmux kill-session -t {} 2>/dev/null; exit 0", shell_escape(&cfg.session_name)),
-                ReconnectType::Screen => format!("screen -S {} -X quit 2>/dev/null; exit 0", shell_escape(&cfg.session_name)),
-            };
-            // Best-effort: open a channel, run the kill command, ignore errors.
-            let _ = async {
-                let guard = handle.lock().await;
-                let channel = guard.channel_open_session().await?;
-                channel.exec(true, kill_cmd).await?;
-                // Drain until EOF so the server has time to process the command.
-                let mut ch = channel;
-                loop {
-                    match ch.wait().await {
-                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-                        _ => {}
+        let kill_cmd = match cfg.reconnect_type {
+            ReconnectType::Simple => None,
+            ReconnectType::Tmux => Some(format!(
+                "tmux kill-session -t {} 2>/dev/null; exit 0",
+                shell_escape(&cfg.session_name)
+            )),
+            ReconnectType::Screen => Some(format!(
+                "screen -S {} -X quit 2>/dev/null; exit 0",
+                shell_escape(&cfg.session_name)
+            )),
+        };
+        if let Some(cmd) = kill_cmd {
+            if let Ok(handle) = get_ssh_handle(state.inner(), &id).await {
+                // Best-effort: open a channel, run the kill command, ignore errors.
+                let _ = async {
+                    let guard = handle.lock().await;
+                    let channel = guard.channel_open_session().await?;
+                    channel.exec(true, cmd).await?;
+                    // Drain until EOF so the server has time to process the command.
+                    let mut ch = channel;
+                    loop {
+                        match ch.wait().await {
+                            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                            _ => {}
+                        }
                     }
-                }
-                Ok::<_, russh::Error>(())
-            }.await;
+                    Ok::<_, russh::Error>(())
+                }.await;
+            }
         }
     }
     stop_and_cleanup_ssh_session(state.inner(), &id).await;
@@ -1234,6 +1245,7 @@ async fn list_detached_auraterm_sessions(
     reconnect_type: ReconnectType,
 ) -> Result<Vec<String>, String> {
     let output = match reconnect_type {
+        ReconnectType::Simple => return Ok(vec![]),
         ReconnectType::Tmux => run_remote_command_capture(
             handle,
             "tmux list-sessions -F '#{session_name} #{?session_attached,1,0}' 2>/dev/null || true".to_string(),
@@ -1247,6 +1259,7 @@ async fn list_detached_auraterm_sessions(
     };
 
     let mut sessions = match reconnect_type {
+        ReconnectType::Simple => vec![],
         ReconnectType::Tmux => output
             .lines()
             .filter_map(|line| {
@@ -1293,6 +1306,7 @@ async fn prompt_for_existing_reconnect_session(
         .insert(id.to_string(), tx);
 
     let tool = match reconnect_type {
+        ReconnectType::Simple => "simple",
         ReconnectType::Tmux => "tmux",
         ReconnectType::Screen => "screen",
     };
@@ -1323,7 +1337,7 @@ async fn prompt_for_existing_reconnect_session(
 }
 
 /// Open a PTY channel and attach/create a screen or tmux session.
-/// Falls back to a plain shell if the multiplexer is not available.
+/// For Simple mode or when the multiplexer is unavailable, falls back to a plain shell.
 /// Returns (channel, used_multiplexer: bool).
 async fn open_pty_channel(
     handle: &SharedSshHandle,
@@ -1345,31 +1359,43 @@ async fn open_pty_channel(
         .map_err(|error| format!("PTY request failed: {error}"))?;
 
     if let Some(rt) = reconnect_type {
-        // Check if the tool is available.
-        let tool_name = match rt { ReconnectType::Tmux => "tmux", ReconnectType::Screen => "screen" };
-        let tool_available = remote_command_exists(handle, tool_name).await;
+        match rt {
+            // Simple mode: skip multiplexer entirely, go straight to shell.
+            ReconnectType::Simple => {}
+            ReconnectType::Tmux | ReconnectType::Screen => {
+                let tool_name = match rt {
+                    ReconnectType::Tmux => "tmux",
+                    ReconnectType::Screen => "screen",
+                    ReconnectType::Simple => unreachable!(),
+                };
+                let tool_available = remote_command_exists(handle, tool_name).await;
 
-        if tool_available {
-            let attach_cmd = match rt {
-                ReconnectType::Tmux => format!(
-                    "tmux new-session -A -s {} 2>/dev/null || tmux attach-session -t {} 2>/dev/null || tmux new-session -s {}",
-                    shell_escape(session_name), shell_escape(session_name), shell_escape(session_name)
-                ),
-                ReconnectType::Screen => format!(
-                    "screen -dr {} 2>/dev/null || screen -S {}",
-                    shell_escape(session_name), shell_escape(session_name)
-                ),
-            };
-            channel
-                .exec(false, attach_cmd)
-                .await
-                .map_err(|error| format!("Failed to start {}: {error}", tool_name))?;
-            return Ok((channel, true));
+                if tool_available {
+                    let attach_cmd = match rt {
+                        ReconnectType::Tmux => format!(
+                            // Attach or create; then immediately enable mouse scrolling.
+                            "tmux new-session -A -s {sess} 2>/dev/null || tmux attach-session -t {sess} 2>/dev/null || tmux new-session -s {sess}; tmux set -g mouse on 2>/dev/null; true",
+                            sess = shell_escape(session_name)
+                        ),
+                        ReconnectType::Screen => format!(
+                            "screen -dr {} 2>/dev/null || screen -S {}",
+                            shell_escape(session_name),
+                            shell_escape(session_name)
+                        ),
+                        ReconnectType::Simple => unreachable!(),
+                    };
+                    channel
+                        .exec(false, attach_cmd)
+                        .await
+                        .map_err(|error| format!("Failed to start {}: {error}", tool_name))?;
+                    return Ok((channel, true));
+                }
+                // Tool not available — fall through to plain shell with a notice (written after returning).
+            }
         }
-        // Tool not available — fall through to plain shell with a notice (written after returning).
     }
 
-    // Plain shell fallback.
+    // Plain shell fallback (Simple mode or multiplexer unavailable).
     channel
         .request_shell(true)
         .await
@@ -1398,7 +1424,7 @@ pub async fn start_ssh_pty(
     stop_and_cleanup_ssh_session(state.inner(), &id).await;
 
     let use_reconnect = auto_reconnect.unwrap_or(false);
-    let rt = reconnect_type.unwrap_or(ReconnectType::Tmux);
+    let rt = reconnect_type.unwrap_or(ReconnectType::Simple);
 
     // Always create a fresh auth-response channel registered under this id.
     let (auth_response_tx, auth_response_rx) = mpsc::channel::<String>(4);
@@ -1441,6 +1467,11 @@ pub async fn start_ssh_pty(
     } else {
         // Single-shot connection (no reconnect).
         let addr = format!("{}:{}", host, port);
+        // For Simple mode, no multiplexer is needed even in single-shot mode.
+        let mux_type = match rt {
+            ReconnectType::Simple => None,
+            other => Some(other),
+        };
         let result = do_single_ssh_connect(
             &app,
             state.inner(),
@@ -1451,7 +1482,7 @@ pub async fn start_ssh_pty(
             private_key.as_deref(),
             cols,
             rows,
-            None, // no multiplexer
+            mux_type,
             None,
             false,
             auth_response_rx,
@@ -1519,6 +1550,11 @@ async fn run_reconnect_loop(
         let (auth_tx, rx) = mpsc::channel::<String>(4);
         state.auth_responses.lock().await.insert(id.clone(), auth_tx);
 
+        // For Simple mode, pass None as reconnect_type so no multiplexer is used.
+        let mux_type = match cfg.reconnect_type {
+            ReconnectType::Simple => None,
+            other => Some(other),
+        };
         let result = do_single_ssh_connect(
             &app,
             &state,
@@ -1529,7 +1565,7 @@ async fn run_reconnect_loop(
             cfg.private_key.as_deref(),
             cfg.cols,
             cfg.rows,
-            Some(cfg.reconnect_type),
+            mux_type,
             Some(cfg.session_name.clone()),
             !cfg.checked_existing_sessions,
             rx,
@@ -1620,6 +1656,7 @@ async fn do_single_ssh_connect(
 
     if let Some(rt) = reconnect_type {
         let tool_name = match rt {
+            ReconnectType::Simple => "",
             ReconnectType::Tmux => "tmux",
             ReconnectType::Screen => "screen",
         };
@@ -1669,21 +1706,26 @@ async fn do_single_ssh_connect(
         TerminalDataPayload { id: id.to_string(), data: String::new() },
     );
 
-    if !used_multiplexer && reconnect_type.is_some() {
-        let tool = match reconnect_type.unwrap() {
-            ReconnectType::Tmux => "tmux",
-            ReconnectType::Screen => "screen",
-        };
-        let _ = app.emit(
-            "pty-output",
-            TerminalDataPayload {
-                id: id.to_string(),
-                data: format!(
-                    "\r\n\x1b[33m[Auto-reconnect: {} not found on remote host, using plain shell]\x1b[0m\r\n",
-                    tool
-                ),
-            },
-        );
+    if !used_multiplexer {
+        if let Some(rt) = reconnect_type {
+            let tool = match rt {
+                ReconnectType::Tmux => Some("tmux"),
+                ReconnectType::Screen => Some("screen"),
+                ReconnectType::Simple => None,
+            };
+            if let Some(tool_name) = tool {
+                let _ = app.emit(
+                    "pty-output",
+                    TerminalDataPayload {
+                        id: id.to_string(),
+                        data: format!(
+                            "\r\n\x1b[33m[Auto-reconnect: {} not found on remote host, using plain shell]\x1b[0m\r\n",
+                            tool_name
+                        ),
+                    },
+                );
+            }
+        }
     }
 
     let connection_id = id.to_string();
