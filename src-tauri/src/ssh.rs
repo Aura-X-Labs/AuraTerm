@@ -19,6 +19,7 @@ const SSH_TRANSFER_PROGRESS_EVENT: &str = "ssh-transfer-progress";
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
 const TRANSFER_PROGRESS_EMIT_STEP: u64 = 256 * 1024;
 const AURATERM_RECONNECT_SESSION_PREFIX: &str = "at-";
+const INTERACTIVE_WRITE_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1029,14 +1030,26 @@ pub async fn answer_ssh_reconnect_choice(
 
 #[tauri::command]
 pub async fn write_ssh_pty_input(
+    app: AppHandle,
     state: State<'_, SshState>,
     id: String,
     data: String,
 ) -> Result<(), String> {
     let mut connections = state.connections.lock().await;
     if let Some(tx) = connections.get_mut(&id) {
-        let _ = tx.send(data).await;
-        Ok(())
+        if tx.send(data).await.is_err() {
+            let message = "SSH connection lost; input was not sent".to_string();
+            let _ = app.emit(
+                "pty-output",
+                TerminalDataPayload {
+                    id,
+                    data: format!("\r\n\x1b[31m[{message}]\x1b[0m\r\n"),
+                },
+            );
+            Err(message)
+        } else {
+            Ok(())
+        }
     } else {
         Err("Connection not found".to_string())
     }
@@ -1748,6 +1761,8 @@ async fn run_channel_io_loop(
     mut input_rx: mpsc::Receiver<String>,
     mut resize_rx: mpsc::Receiver<(u32, u32)>,
 ) {
+    let mut exit_message = None;
+
     loop {
         tokio::select! {
             Some(msg) = channel.wait() => {
@@ -1768,7 +1783,40 @@ async fn run_channel_io_loop(
                 }
             }
             Some(input) = input_rx.recv() => {
-                let _ = channel.data(input.into_bytes().as_slice()).await;
+                let input_bytes = input.into_bytes();
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(INTERACTIVE_WRITE_TIMEOUT_SECS),
+                    channel.data(input_bytes.as_slice()),
+                ).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        let message = format!("SSH write failed: {error}");
+                        let _ = app.emit(
+                            "pty-output",
+                            TerminalDataPayload {
+                                id: id.clone(),
+                                data: format!("\r\n\x1b[31m[{message}]\x1b[0m\r\n"),
+                            },
+                        );
+                        exit_message = Some(message);
+                        break;
+                    }
+                    Err(_) => {
+                        let message = format!(
+                            "SSH write timed out after {} seconds; connection lost",
+                            INTERACTIVE_WRITE_TIMEOUT_SECS
+                        );
+                        let _ = app.emit(
+                            "pty-output",
+                            TerminalDataPayload {
+                                id: id.clone(),
+                                data: format!("\r\n\x1b[31m[{message}]\x1b[0m\r\n"),
+                            },
+                        );
+                        exit_message = Some(message);
+                        break;
+                    }
+                }
             }
             Some((c, r)) = resize_rx.recv() => {
                 let _ = channel.window_change(c, r, 0, 0).await;
@@ -1793,7 +1841,7 @@ async fn run_channel_io_loop(
             "pty-exit",
             PtyExitPayload {
                 id: id.clone(),
-                message: "SSH connection closed".to_string(),
+                message: exit_message.unwrap_or_else(|| "SSH connection closed".to_string()),
             },
         );
     }

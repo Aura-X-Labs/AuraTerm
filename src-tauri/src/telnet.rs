@@ -7,6 +7,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::AbortHandle;
 
+const INTERACTIVE_WRITE_TIMEOUT_SECS: u64 = 10;
+
 struct TelnetSession {
     writer: mpsc::UnboundedSender<String>,
     reader_abort: AbortHandle,
@@ -76,15 +78,34 @@ pub async fn start_telnet_session(
     let write_id = id.clone();
     let writer_task = tokio::spawn(async move {
         while let Some(data) = rx.recv().await {
-            if let Err(error) = writer.write_all(data.as_bytes()).await {
-                let _ = write_app.emit(
-                    "pty-exit",
-                    PtyExitEvent {
-                        id: write_id.clone(),
-                        message: format!("Telnet write error: {}", error),
-                    },
-                );
-                break;
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(INTERACTIVE_WRITE_TIMEOUT_SECS),
+                writer.write_all(data.as_bytes()),
+            ).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let _ = write_app.emit(
+                        "pty-exit",
+                        PtyExitEvent {
+                            id: write_id.clone(),
+                            message: format!("Telnet write error: {}", error),
+                        },
+                    );
+                    break;
+                }
+                Err(_) => {
+                    let _ = write_app.emit(
+                        "pty-exit",
+                        PtyExitEvent {
+                            id: write_id.clone(),
+                            message: format!(
+                                "Telnet write timed out after {} seconds",
+                                INTERACTIVE_WRITE_TIMEOUT_SECS
+                            ),
+                        },
+                    );
+                    break;
+                }
             }
         }
         let _ = writer.shutdown().await;
