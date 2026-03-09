@@ -47,6 +47,10 @@ function inputValue(event: Event) {
   return (event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
 }
 
+function checkboxChecked(event: Event) {
+  return (event.target as HTMLInputElement).checked;
+}
+
 function toNumber(value: string, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -83,6 +87,10 @@ function toAuthType(value: string): "password" | "key" | "none" {
     return value;
   }
   return "password";
+}
+
+function toReconnectType(value: string): "screen" | "tmux" {
+  return value === "screen" ? "screen" : "tmux";
 }
 
 const connections = ref<SavedConnection[]>([]);
@@ -407,6 +415,29 @@ async function saveDraft() {
               <div v-else class="form-group">
                 <label>Private Key (PEM)</label>
                 <textarea rows="5" :value="editDraft.privateKey ?? ''" @input="updateDraft('privateKey', inputValue($event))" />
+              </div>
+
+              <div class="bookmark-editor-grid">
+                <div class="form-group bookmark-editor-span-2">
+                  <label class="save-connection-label" style="display:flex;align-items:center;gap:6px">
+                    <input
+                      type="checkbox"
+                      :checked="editDraft.autoReconnect ?? false"
+                      @change="updateDraft('autoReconnect', checkboxChecked($event))"
+                    >
+                    <span>Auto reconnect (via screen/tmux)</span>
+                  </label>
+                </div>
+                <div v-if="editDraft.autoReconnect" class="form-group">
+                  <label>Session tool</label>
+                  <select
+                    :value="editDraft.reconnectType ?? 'tmux'"
+                    @change="updateDraft('reconnectType', toReconnectType(inputValue($event)))"
+                  >
+                    <option value="tmux">tmux</option>
+                    <option value="screen">screen</option>
+                  </select>
+                </div>
               </div>
             </template>
           </template>

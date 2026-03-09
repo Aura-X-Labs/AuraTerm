@@ -45,6 +45,20 @@ pub struct SavedConnection {
     pub flow_control: Option<String>,
     pub created_at: u64,
     pub last_used: Option<u64>,
+    /// SSH auto-reconnect via screen/tmux (default: false)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_reconnect: bool,
+    /// Multiplexer tool to use: "tmux" or "screen" (default: "tmux")
+    #[serde(default = "default_reconnect_type", skip_serializing_if = "is_default_reconnect_type")]
+    pub reconnect_type: String,
+}
+
+fn default_reconnect_type() -> String {
+    "tmux".to_string()
+}
+
+fn is_default_reconnect_type(value: &str) -> bool {
+    value == "tmux"
 }
 
 fn connections_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {

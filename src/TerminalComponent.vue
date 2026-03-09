@@ -31,6 +31,18 @@ interface SshMfaPromptEvent {
   prompts: SshMfaPrompt[];
 }
 
+interface SshReconnectSessionPromptEvent {
+  id: string;
+  tool: string;
+  sessions: string[];
+}
+
+interface ReconnectSessionPromptState {
+  id: string;
+  tool: string;
+  sessions: string[];
+}
+
 const props = defineProps<{
   sessionId: string;
   isActive: boolean;
@@ -155,6 +167,8 @@ const retryPassword = ref("");
 const mfaEvent = ref<SshMfaPromptEvent | null>(null);
 const mfaResponses = ref<string[]>([]);
 const showMfaOverlay = ref(false);
+const reconnectPrompt = ref<ReconnectSessionPromptState | null>(null);
+const selectedReconnectSession = ref("");
 const activeSshConfig = computed(() => (
   activeSession.value.protocol === "ssh" ? activeSession.value.sshConfig : undefined
 ));
@@ -179,6 +193,8 @@ watch(() => props.session, (session) => {
   mfaEvent.value = null;
   mfaResponses.value = [];
   showMfaOverlay.value = false;
+  reconnectPrompt.value = null;
+  selectedReconnectSession.value = "";
   if (session.protocol === "serial") {
     notifySerialConnectionStateChange("connecting");
   }
@@ -414,6 +430,7 @@ onMounted(() => {
     let unlistenExit: UnlistenFn | null = null;
     let unlistenMfa: UnlistenFn | null = null;
     let unlistenSshConnected: UnlistenFn | null = null;
+    let unlistenReconnectPrompt: UnlistenFn | null = null;
     let unlistenSerialConnected: UnlistenFn | null = null;
 
     const cleanup = () => {
@@ -422,6 +439,7 @@ onMounted(() => {
       unlistenExit?.();
       unlistenMfa?.();
       unlistenSshConnected?.();
+      unlistenReconnectPrompt?.();
       unlistenSerialConnected?.();
       if (ptyId.value) {
         const id = ptyId.value;
@@ -501,11 +519,21 @@ onMounted(() => {
         showMfaOverlay.value = true;
       });
 
+      unlistenReconnectPrompt = await listen<SshReconnectSessionPromptEvent>("ssh-reconnect-session-prompt", (event) => {
+        if (event.payload.id !== ptyId.value) {
+          return;
+        }
+
+        reconnectPrompt.value = event.payload;
+        selectedReconnectSession.value = event.payload.sessions[0] ?? "";
+      });
+
       if (disposed || !terminal) {
         unlistenOutput?.();
         unlistenExit?.();
         unlistenMfa?.();
         unlistenSshConnected?.();
+        unlistenReconnectPrompt?.();
         unlistenSerialConnected?.();
         return;
       }
@@ -519,6 +547,9 @@ onMounted(() => {
         switch (session.protocol) {
           case "ssh":
             terminal.writeln(`Connecting to ${session.sshConfig.user}@${session.sshConfig.host}:${session.sshConfig.port}...`);
+            if (session.sshConfig.autoReconnect) {
+              terminal.writeln(`\x1b[33m[Auto-reconnect enabled via ${session.sshConfig.reconnectType ?? "tmux"}]\x1b[0m`);
+            }
             await invoke("start_ssh_pty", {
               id: newId,
               host: session.sshConfig.host,
@@ -528,6 +559,8 @@ onMounted(() => {
               privateKey: session.sshConfig.privateKey ?? null,
               cols,
               rows,
+              autoReconnect: session.sshConfig.autoReconnect ?? false,
+              reconnectType: session.sshConfig.reconnectType ?? "tmux",
             });
             break;
           case "telnet":
@@ -620,6 +653,31 @@ function handleCancelMfa() {
     responses: mfaEvent.value?.prompts.map(() => "") ?? [],
   });
 }
+
+function submitReconnectChoice(sessionName: string | null) {
+  const prompt = reconnectPrompt.value;
+  reconnectPrompt.value = null;
+  selectedReconnectSession.value = "";
+
+  if (!prompt) {
+    return;
+  }
+
+  void invoke("answer_ssh_reconnect_choice", {
+    id: prompt.id,
+    sessionName,
+  }).catch((error) => {
+    console.error("Failed to answer reconnect session prompt", error);
+  });
+}
+
+function handleAttachSelectedReconnectSession() {
+  submitReconnectChoice(selectedReconnectSession.value || null);
+}
+
+function handleSkipReconnectSession() {
+  submitReconnectChoice(null);
+}
 </script>
 
 <template>
@@ -680,6 +738,36 @@ function handleCancelMfa() {
           <div class="password-retry-actions">
             <button type="button" class="password-retry-btn cancel" @click="handleCancelMfa">Cancel</button>
             <button type="submit" class="password-retry-btn retry">Verify</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div v-if="reconnectPrompt" class="password-retry-overlay">
+      <div class="password-retry-dialog">
+        <div class="password-retry-icon">🔁</div>
+        <h3 class="password-retry-title">Attach Existing {{ reconnectPrompt.tool }}</h3>
+        <p class="password-retry-desc">
+          AuraTerm found detached remote sessions created by AuraTerm.
+          Only sessions with the <strong>at-</strong> prefix are listed below.
+        </p>
+        <form class="password-retry-form" @submit.prevent="handleAttachSelectedReconnectSession">
+          <label style="display: block; margin-bottom: 6px; font-size: 12px; opacity: 0.85">
+            Select a session to attach:
+          </label>
+          <select
+            v-model="selectedReconnectSession"
+            class="password-retry-input"
+            style="appearance: auto"
+            @keydown.stop
+          >
+            <option v-for="sessionName in reconnectPrompt.sessions" :key="sessionName" :value="sessionName">
+              {{ sessionName.startsWith('at-') ? 'at-' : '' }}{{ sessionName.startsWith('at-') ? sessionName.substring(3) : sessionName }}
+            </option>
+          </select>
+          <div class="password-retry-actions">
+            <button type="button" class="password-retry-btn cancel" @click="handleSkipReconnectSession">Create New</button>
+            <button type="submit" class="password-retry-btn retry" :disabled="!selectedReconnectSession">Attach</button>
           </div>
         </form>
       </div>

@@ -667,6 +667,7 @@ fn main() {
             ssh::resize_ssh_pty,
             ssh::close_ssh_pty,
             ssh::answer_ssh_mfa,
+            ssh::answer_ssh_reconnect_choice,
             ssh::ssh_list_remote_dir,
             ssh::ssh_create_remote_dir,
             ssh::ssh_remove_remote_entry,

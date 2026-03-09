@@ -18,6 +18,7 @@ type SharedSshHandle = Arc<Mutex<client::Handle<ClientHandler>>>;
 const SSH_TRANSFER_PROGRESS_EVENT: &str = "ssh-transfer-progress";
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
 const TRANSFER_PROGRESS_EMIT_STEP: u64 = 256 * 1024;
+const AURATERM_RECONNECT_SESSION_PREFIX: &str = "at-";
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -101,6 +102,14 @@ pub struct PtyExitPayload {
     pub message: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconnectSessionPromptPayload {
+    pub id: String,
+    pub tool: String,
+    pub sessions: Vec<String>,
+}
+
 struct ClientHandler {}
 
 impl client::Handler for ClientHandler {
@@ -117,6 +126,33 @@ pub struct SshState {
     pub auth_responses: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
     pub resize_channels: Arc<Mutex<HashMap<String, mpsc::Sender<(u32, u32)>>>>,
     handles: Arc<Mutex<HashMap<String, SharedSshHandle>>>,
+    reconnect_prompt_responses: Arc<Mutex<HashMap<String, mpsc::Sender<Option<String>>>>>,
+    /// Tracks whether auto-reconnect is active for each session.
+    /// When set to false, the reconnect loop will exit.
+    reconnect_flags: Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Stores reconnect config per session: (host, port, user, password, private_key, reconnect_type)
+    reconnect_configs: Arc<Mutex<HashMap<String, ReconnectConfig>>>,
+}
+
+#[derive(Clone)]
+struct ReconnectConfig {
+    host: String,
+    port: u16,
+    user: String,
+    password: Option<String>,
+    private_key: Option<String>,
+    reconnect_type: ReconnectType,
+    session_name: String,
+    checked_existing_sessions: bool,
+    cols: u32,
+    rows: u32,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReconnectType {
+    Screen,
+    Tmux,
 }
 
 impl Default for SshState {
@@ -132,6 +168,9 @@ impl SshState {
             auth_responses: Arc::new(Mutex::new(HashMap::new())),
             resize_channels: Arc::new(Mutex::new(HashMap::new())),
             handles: Arc::new(Mutex::new(HashMap::new())),
+            reconnect_prompt_responses: Arc::new(Mutex::new(HashMap::new())),
+            reconnect_flags: Arc::new(Mutex::new(HashMap::new())),
+            reconnect_configs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -160,6 +199,10 @@ fn join_remote_path(base: &str, name: &str) -> String {
 
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn auraterm_reconnect_session_name(id: &str) -> String {
+    format!("{AURATERM_RECONNECT_SESSION_PREFIX}{id}")
 }
 
 fn expand_local_path(path: Option<&str>) -> PathBuf {
@@ -305,11 +348,28 @@ fn maybe_emit_transfer_progress(
     );
 }
 
-async fn cleanup_ssh_session(state: &SshState, id: &str) {
+async fn cleanup_ssh_runtime_state(state: &SshState, id: &str) {
     state.connections.lock().await.remove(id);
     state.resize_channels.lock().await.remove(id);
     state.auth_responses.lock().await.remove(id);
     state.handles.lock().await.remove(id);
+    state.reconnect_prompt_responses.lock().await.remove(id);
+}
+
+async fn cleanup_ssh_session(state: &SshState, id: &str) {
+    cleanup_ssh_runtime_state(state, id).await;
+    state.reconnect_configs.lock().await.remove(id);
+    // Do NOT remove reconnect_flags here — that's handled only in close_ssh_pty
+    // to allow the reconnect loop to restart the connection.
+}
+
+/// Stop reconnect loop for a session and clean up all state.
+async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) {
+    // Signal the reconnect loop to stop.
+    if let Some(notify) = state.reconnect_flags.lock().await.remove(id) {
+        notify.notify_waiters();
+    }
+    cleanup_ssh_session(state, id).await;
 }
 
 async fn get_ssh_handle(state: &SshState, id: &str) -> Result<SharedSshHandle, String> {
@@ -320,6 +380,22 @@ async fn get_ssh_handle(state: &SshState, id: &str) -> Result<SharedSshHandle, S
         .get(id)
         .cloned()
         .ok_or_else(|| "SSH session is not ready yet".to_string())
+}
+
+async fn set_reconnect_session_metadata(
+    state: &SshState,
+    id: &str,
+    session_name: Option<String>,
+    checked_existing_sessions: Option<bool>,
+) {
+    if let Some(config) = state.reconnect_configs.lock().await.get_mut(id) {
+        if let Some(name) = session_name {
+            config.session_name = name;
+        }
+        if let Some(checked) = checked_existing_sessions {
+            config.checked_existing_sessions = checked;
+        }
+    }
 }
 
 async fn open_ssh_channel(
@@ -931,6 +1007,25 @@ pub async fn answer_ssh_mfa(
 }
 
 #[tauri::command]
+pub async fn answer_ssh_reconnect_choice(
+    state: State<'_, SshState>,
+    id: String,
+    session_name: Option<String>,
+) -> Result<(), String> {
+    let tx = state
+        .reconnect_prompt_responses
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "Reconnect prompt channel not found".to_string())?;
+
+    tx.send(session_name.filter(|value| !value.trim().is_empty()))
+        .await
+        .map_err(|_| "Failed to send reconnect choice".to_string())
+}
+
+#[tauri::command]
 pub async fn write_ssh_pty_input(
     state: State<'_, SshState>,
     id: String,
@@ -966,8 +1061,320 @@ pub async fn close_ssh_pty(
     state: State<'_, SshState>,
     id: String,
 ) -> Result<(), String> {
-    cleanup_ssh_session(state.inner(), &id).await;
+    // If there is an active SSH handle, try to destroy the remote screen/tmux session first.
+    let config = state.reconnect_configs.lock().await.get(&id).cloned();
+    if let Some(cfg) = config {
+        if let Ok(handle) = get_ssh_handle(state.inner(), &id).await {
+            let kill_cmd = match cfg.reconnect_type {
+                ReconnectType::Tmux => format!("tmux kill-session -t {} 2>/dev/null; exit 0", shell_escape(&cfg.session_name)),
+                ReconnectType::Screen => format!("screen -S {} -X quit 2>/dev/null; exit 0", shell_escape(&cfg.session_name)),
+            };
+            // Best-effort: open a channel, run the kill command, ignore errors.
+            let _ = async {
+                let guard = handle.lock().await;
+                let channel = guard.channel_open_session().await?;
+                channel.exec(true, kill_cmd).await?;
+                // Drain until EOF so the server has time to process the command.
+                let mut ch = channel;
+                loop {
+                    match ch.wait().await {
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                        _ => {}
+                    }
+                }
+                Ok::<_, russh::Error>(())
+            }.await;
+        }
+    }
+    stop_and_cleanup_ssh_session(state.inner(), &id).await;
     Ok(())
+}
+
+/// Authenticate an SSH session and return a connected handle.
+async fn authenticate_ssh(
+    addr: &str,
+    user: &str,
+    password: Option<&str>,
+    private_key: Option<&str>,
+    app: &AppHandle,
+    id: &str,
+    auth_response_rx: &mut mpsc::Receiver<String>,
+) -> Result<SharedSshHandle, String> {
+    let handler = ClientHandler {};
+    let config = Arc::new(client::Config { ..Default::default() });
+
+    let mut session = client::connect(config, addr, handler)
+        .await
+        .map_err(|error| format!("Connection error: {error}"))?;
+
+    println!("Authenticating as {}...", user);
+
+    let password = password.filter(|v| !v.is_empty());
+    let private_key = private_key.filter(|v| !v.trim().is_empty());
+
+    let auth_res_start = if let Some(pk) = private_key {
+        let decoded_key = decode_secret_key(pk, password)
+            .map_err(|error| format!("Private key parse error: {error}"))?;
+        let rsa_hash = session
+            .best_supported_rsa_hash()
+            .await
+            .map_err(|error| format!("Failed to determine RSA hash algorithm: {error}"))?
+            .flatten();
+
+        match session
+            .authenticate_publickey(user.to_string(), PrivateKeyWithHashAlg::new(Arc::new(decoded_key), rsa_hash))
+            .await
+        {
+            Ok(russh::client::AuthResult::Success) => {
+                println!("Public key authentication successful!");
+                None
+            }
+            Ok(russh::client::AuthResult::Failure { .. }) => {
+                return Err("Private key authentication failed".to_string());
+            }
+            Err(error) => return Err(format!("Private key auth error: {error}")),
+        }
+    } else if let Some(pwd) = password {
+        match session.authenticate_password(user.to_string(), pwd.to_string()).await {
+            Ok(russh::client::AuthResult::Success) => {
+                println!("Password authentication successful!");
+                None
+            }
+            Ok(russh::client::AuthResult::Failure { .. }) => {
+                println!("Password auth failed, falling back to keyboard-interactive");
+                Some(session.authenticate_keyboard_interactive_start(user.to_string(), None).await)
+            }
+            Err(error) => return Err(format!("Password auth error: {error}")),
+        }
+    } else {
+        Some(session.authenticate_keyboard_interactive_start(user.to_string(), None).await)
+    };
+
+    if let Some(auth_res_future) = auth_res_start {
+        let mut auth_res = auth_res_future
+            .map_err(|error| format!("Keyboard interactive init failed: {error}"))?;
+
+        loop {
+            match auth_res {
+                russh::client::KeyboardInteractiveAuthResponse::Success => {
+                    println!("Authentication successful!");
+                    break;
+                }
+                russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
+                    return Err("Authentication failed".to_string());
+                }
+                russh::client::KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
+                    let payload = KeyboardInteractivePromptPayload {
+                        id: id.to_string(),
+                        name: name.clone(),
+                        instruction: instructions.clone(),
+                        prompts: prompts.iter().map(|p| SshMfaPrompt { text: p.prompt.clone(), echo: p.echo }).collect(),
+                    };
+                    let _ = app.emit("ssh-mfa-prompt", payload);
+
+                    let mut answers = Vec::new();
+                    for _ in &prompts {
+                        match auth_response_rx.recv().await {
+                            Some(response) => answers.push(response),
+                            None => return Err("Failed to collect MFA response".to_string()),
+                        }
+                    }
+
+                    auth_res = session
+                        .authenticate_keyboard_interactive_respond(answers)
+                        .await
+                        .map_err(|error| format!("Failed auth step: {error}"))?;
+                }
+            }
+        }
+    }
+
+    Ok(Arc::new(Mutex::new(session)))
+}
+
+/// Check whether a command exists on the remote host.
+async fn run_remote_command_capture(handle: &SharedSshHandle, command: String) -> Result<String, String> {
+    let Ok(channel) = ({
+        let guard = handle.lock().await;
+        guard.channel_open_session().await
+    }) else {
+        return Err("Failed to open remote command channel".to_string());
+    };
+
+    channel
+        .exec(true, command)
+        .await
+        .map_err(|error| format!("Remote command failed: {error}"))?;
+
+    let mut output = String::new();
+    let mut ch = channel;
+    loop {
+        match ch.wait().await {
+            Some(ChannelMsg::Data { ref data }) | Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                output.push_str(&String::from_utf8_lossy(data));
+            }
+            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+            _ => {}
+        }
+    }
+
+    Ok(output)
+}
+
+async fn remote_command_exists(handle: &SharedSshHandle, cmd: &str) -> bool {
+    let check_cmd = format!("command -v {} >/dev/null 2>&1 && echo __EXISTS__", cmd);
+    match run_remote_command_capture(handle, check_cmd).await {
+        Ok(output) => output.contains("__EXISTS__"),
+        Err(_) => false,
+    }
+}
+
+async fn list_detached_auraterm_sessions(
+    handle: &SharedSshHandle,
+    reconnect_type: ReconnectType,
+) -> Result<Vec<String>, String> {
+    let output = match reconnect_type {
+        ReconnectType::Tmux => run_remote_command_capture(
+            handle,
+            "tmux list-sessions -F '#{session_name} #{?session_attached,1,0}' 2>/dev/null || true".to_string(),
+        )
+        .await?,
+        ReconnectType::Screen => run_remote_command_capture(
+            handle,
+            "screen -ls 2>/dev/null || true".to_string(),
+        )
+        .await?,
+    };
+
+    let mut sessions = match reconnect_type {
+        ReconnectType::Tmux => output
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let name = parts.next()?;
+                let attached = parts.next()?;
+                (attached == "0" && name.starts_with(AURATERM_RECONNECT_SESSION_PREFIX))
+                    .then(|| name.to_string())
+            })
+            .collect::<Vec<_>>(),
+        ReconnectType::Screen => output
+            .lines()
+            .filter(|line| line.contains("Detached"))
+            .filter_map(|line| {
+                let token = line.split_whitespace().next()?;
+                let (_, name) = token.split_once('.')?;
+                name.starts_with(AURATERM_RECONNECT_SESSION_PREFIX)
+                    .then(|| name.to_string())
+            })
+            .collect::<Vec<_>>(),
+    };
+
+    sessions.sort();
+    sessions.dedup();
+    Ok(sessions)
+}
+
+async fn prompt_for_existing_reconnect_session(
+    app: &AppHandle,
+    state: &SshState,
+    id: &str,
+    reconnect_type: ReconnectType,
+    sessions: Vec<String>,
+) -> Result<Option<String>, String> {
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+
+    let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
+    state
+        .reconnect_prompt_responses
+        .lock()
+        .await
+        .insert(id.to_string(), tx);
+
+    let tool = match reconnect_type {
+        ReconnectType::Tmux => "tmux",
+        ReconnectType::Screen => "screen",
+    };
+
+    if app
+        .emit(
+            "ssh-reconnect-session-prompt",
+            ReconnectSessionPromptPayload {
+                id: id.to_string(),
+                tool: tool.to_string(),
+                sessions,
+            },
+        )
+        .is_err()
+    {
+        state.reconnect_prompt_responses.lock().await.remove(id);
+        return Ok(None);
+    }
+
+    let response = tokio::time::timeout(tokio::time::Duration::from_secs(120), rx.recv())
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+
+    state.reconnect_prompt_responses.lock().await.remove(id);
+    Ok(response)
+}
+
+/// Open a PTY channel and attach/create a screen or tmux session.
+/// Falls back to a plain shell if the multiplexer is not available.
+/// Returns (channel, used_multiplexer: bool).
+async fn open_pty_channel(
+    handle: &SharedSshHandle,
+    session_name: &str,
+    cols: u32,
+    rows: u32,
+    reconnect_type: Option<ReconnectType>,
+) -> Result<(russh::Channel<client::Msg>, bool), String> {
+    let guard = handle.lock().await;
+    let channel = guard
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("Channel error: {error}"))?;
+    drop(guard);
+
+    channel
+        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
+        .await
+        .map_err(|error| format!("PTY request failed: {error}"))?;
+
+    if let Some(rt) = reconnect_type {
+        // Check if the tool is available.
+        let tool_name = match rt { ReconnectType::Tmux => "tmux", ReconnectType::Screen => "screen" };
+        let tool_available = remote_command_exists(handle, tool_name).await;
+
+        if tool_available {
+            let attach_cmd = match rt {
+                ReconnectType::Tmux => format!(
+                    "tmux new-session -A -s {} 2>/dev/null || tmux attach-session -t {} 2>/dev/null || tmux new-session -s {}",
+                    shell_escape(session_name), shell_escape(session_name), shell_escape(session_name)
+                ),
+                ReconnectType::Screen => format!(
+                    "screen -dr {} 2>/dev/null || screen -S {}",
+                    shell_escape(session_name), shell_escape(session_name)
+                ),
+            };
+            channel
+                .exec(false, attach_cmd)
+                .await
+                .map_err(|error| format!("Failed to start {}: {error}", tool_name))?;
+            return Ok((channel, true));
+        }
+        // Tool not available — fall through to plain shell with a notice (written after returning).
+    }
+
+    // Plain shell fallback.
+    channel
+        .request_shell(true)
+        .await
+        .map_err(|error| format!("Shell request failed: {error}"))?;
+    Ok((channel, false))
 }
 
 #[tauri::command]
@@ -982,231 +1389,370 @@ pub async fn start_ssh_pty(
     private_key: Option<String>,
     cols: u32,
     rows: u32,
+    auto_reconnect: Option<bool>,
+    reconnect_type: Option<ReconnectType>,
 ) -> Result<(), String> {
-    println!(
-        "Starting SSH connection to {}@{}:{} with JumpServer bypass for MFA",
-        user, host, port
-    );
+    println!("Starting SSH connection to {}@{}:{}", user, host, port);
 
-    cleanup_ssh_session(state.inner(), &id).await;
+    // Stop any previous session for this id.
+    stop_and_cleanup_ssh_session(state.inner(), &id).await;
 
-    let (auth_response_tx, mut auth_response_rx) = mpsc::channel(1);
+    let use_reconnect = auto_reconnect.unwrap_or(false);
+    let rt = reconnect_type.unwrap_or(ReconnectType::Tmux);
 
-    state
-        .auth_responses
-        .lock()
-        .await
-        .insert(id.clone(), auth_response_tx);
+    // Always create a fresh auth-response channel registered under this id.
+    let (auth_response_tx, auth_response_rx) = mpsc::channel::<String>(4);
+    state.auth_responses.lock().await.insert(id.clone(), auth_response_tx);
 
-    let handler = ClientHandler {};
+    if use_reconnect {
+        // Store reconnect configuration.
+        state.reconnect_configs.lock().await.insert(id.clone(), ReconnectConfig {
+            host: host.clone(),
+            port,
+            user: user.clone(),
+            password: password.clone(),
+            private_key: private_key.clone(),
+            reconnect_type: rt,
+            session_name: auraterm_reconnect_session_name(&id),
+            checked_existing_sessions: false,
+            cols,
+            rows,
+        });
 
-    let config = std::sync::Arc::new(client::Config {
-        ..Default::default()
-    });
+        // Create a cancellation notifier and register it.
+        let cancel_notify = Arc::new(tokio::sync::Notify::new());
+        state.reconnect_flags.lock().await.insert(id.clone(), cancel_notify.clone());
 
-    let addr = format!("{}:{}", host, port);
-    println!("Connecting to {}...", addr);
-    let result: Result<(), String> = async {
-        let mut session = client::connect(config, addr, handler)
-            .await
-            .map_err(|error| format!("Connection error: {error}"))?;
-
-        println!("Authenticating as {}...", user);
-
-        let password = password.filter(|value| !value.is_empty());
-        let private_key = private_key.filter(|value| !value.trim().is_empty());
-
-        let auth_res_start = if let Some(private_key) = private_key {
-            let decoded_key = decode_secret_key(&private_key, password.as_deref())
-                .map_err(|error| format!("Private key parse error: {error}"))?;
-            let rsa_hash = session
-                .best_supported_rsa_hash()
-                .await
-                .map_err(|error| format!("Failed to determine RSA hash algorithm: {error}"))?
-                .flatten();
-
-            let result = session
-                .authenticate_publickey(
-                    user.clone(),
-                    PrivateKeyWithHashAlg::new(Arc::new(decoded_key), rsa_hash),
-                )
-                .await;
-
-            match result {
-                Ok(russh::client::AuthResult::Success) => {
-                    println!("Public key authentication successful!");
-                    None
-                }
-                Ok(russh::client::AuthResult::Failure { .. }) => {
-                    return Err("Private key authentication failed".to_string());
-                }
-                Err(error) => return Err(format!("Private key auth error: {error}")),
-            }
-        } else if let Some(pwd) = password {
-            let result = session.authenticate_password(user.clone(), pwd).await;
-            match result {
-                Ok(russh::client::AuthResult::Success) => {
-                    println!("Password authentication successful!");
-                    None
-                }
-                Ok(russh::client::AuthResult::Failure { .. }) => {
-                    println!("Password auth failed, falling back to keyboard-interactive");
-                    Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await)
-                }
-                Err(error) => return Err(format!("Password auth error: {error}")),
-            }
-        } else {
-            Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await)
-        };
-
-        if let Some(auth_res_future) = auth_res_start {
-            let mut auth_res = auth_res_future
-                .map_err(|error| format!("Keyboard interactive init failed: {error}"))?;
-
-            loop {
-                match auth_res {
-                    russh::client::KeyboardInteractiveAuthResponse::Success => {
-                        println!("Authentication successful!");
-                        break;
-                    }
-                    russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
-                        return Err("Authentication failed".to_string());
-                    }
-                    russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
-                        name,
-                        instructions,
-                        prompts,
-                    } => {
-                        let payload = KeyboardInteractivePromptPayload {
-                            id: id.clone(),
-                            name: name.clone(),
-                            instruction: instructions.clone(),
-                            prompts: prompts
-                                .iter()
-                                .map(|prompt| SshMfaPrompt {
-                                    text: prompt.prompt.clone(),
-                                    echo: prompt.echo,
-                                })
-                                .collect(),
-                        };
-
-                        let _ = app.emit("ssh-mfa-prompt", payload);
-
-                        let mut answers = Vec::new();
-                        for _ in prompts.iter() {
-                            if let Some(response) = auth_response_rx.recv().await {
-                                answers.push(response);
-                            } else {
-                                return Err("Failed to collect MFA response".to_string());
-                            }
-                        }
-
-                        auth_res = session
-                            .authenticate_keyboard_interactive_respond(answers)
-                            .await
-                            .map_err(|error| format!("Failed auth step: {error}"))?;
-                    }
-                }
-            }
-        }
-
-        let session_handle: SharedSshHandle = Arc::new(Mutex::new(session));
-
-        println!("Requesting PTY and shell...");
-        let mut channel = {
-            let handle = session_handle.lock().await;
-            handle
-                .channel_open_session()
-                .await
-                .map_err(|error| format!("Channel error: {error}"))?
-        };
-
-        channel
-            .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
-            .await
-            .map_err(|error| format!("PTY request failed: {error}"))?;
-
-        channel
-            .request_shell(true)
-            .await
-            .map_err(|error| format!("Shell request failed: {error}"))?;
-
-        let (input_tx, mut input_rx) = mpsc::channel::<String>(32);
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
-
-        state.connections.lock().await.insert(id.clone(), input_tx);
-        state.resize_channels.lock().await.insert(id.clone(), resize_tx);
-        state.handles.lock().await.insert(id.clone(), session_handle);
-
-        let connection_id = id.clone();
-        let app_handle = app.clone();
         let state_clone = state.inner().clone();
+        let app_clone = app.clone();
+        let id_clone = id.clone();
 
-        let _ = app.emit(
-            "ssh-connected",
-            TerminalDataPayload {
-                id: id.clone(),
-                data: String::new(),
-            },
-        );
-
+        drop(auth_response_rx); // will be recreated fresh each reconnect attempt
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    Some(msg) = channel.wait() => {
-                        match msg {
-                            ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. } => {
-                                let _ = app_handle.emit(
-                                    "pty-output",
-                                    TerminalDataPayload {
-                                        id: connection_id.clone(),
-                                        data: String::from_utf8_lossy(data).to_string(),
-                                    },
-                                );
-                            }
-                            ChannelMsg::Eof => {
-                                let _ = app_handle.emit(
-                                    "pty-exit",
-                                    PtyExitPayload {
-                                        id: connection_id.clone(),
-                                        message: "SSH channel closed".to_string(),
-                                    },
-                                );
-                                break;
-                            }
-                            ChannelMsg::Close => {
-                                let _ = app_handle.emit(
-                                    "pty-exit",
-                                    PtyExitPayload {
-                                        id: connection_id.clone(),
-                                        message: "SSH connection closed".to_string(),
-                                    },
-                                );
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    Some(input) = input_rx.recv() => {
-                        let _ = channel.data(input.into_bytes().as_slice()).await;
-                    }
-                    Some((c, r)) = resize_rx.recv() => {
-                        let _ = channel.window_change(c, r, 0, 0).await;
-                    }
-                    else => break,
-                }
-            }
-
-            cleanup_ssh_session(&state_clone, &connection_id).await;
+            run_reconnect_loop(
+                app_clone,
+                state_clone,
+                id_clone,
+                cancel_notify,
+            ).await;
         });
 
         Ok(())
-    }
-    .await;
+    } else {
+        // Single-shot connection (no reconnect).
+        let addr = format!("{}:{}", host, port);
+        let result = do_single_ssh_connect(
+            &app,
+            state.inner(),
+            &id,
+            &addr,
+            &user,
+            password.as_deref(),
+            private_key.as_deref(),
+            cols,
+            rows,
+            None, // no multiplexer
+            None,
+            false,
+            auth_response_rx,
+        ).await;
 
-    if result.is_err() {
-        cleanup_ssh_session(state.inner(), &id).await;
+        match result {
+            Ok(_rx) => Ok(()),
+            Err(err) => {
+                cleanup_ssh_session(state.inner(), &id).await;
+                Err(err)
+            }
+        }
+    }
+}
+
+/// The reconnect loop: keeps trying to connect every 5 seconds until cancelled.
+async fn run_reconnect_loop(
+    app: AppHandle,
+    state: SshState,
+    id: String,
+    cancel_notify: Arc<tokio::sync::Notify>,
+) {
+    let mut first_attempt = true;
+
+    loop {
+        // Check for cancellation before each attempt.
+        if is_cancelled(&cancel_notify) {
+            break;
+        }
+
+        if !first_attempt {
+            // Emit a notice to the terminal.
+            let _ = app.emit(
+                "pty-output",
+                TerminalDataPayload {
+                    id: id.clone(),
+                    data: "\r\n\x1b[33m[Disconnected — reconnecting in 5 s...]\x1b[0m\r\n".to_string(),
+                },
+            );
+
+            // Wait 5 seconds, but abort early if cancelled.
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
+                _ = cancel_notify.notified() => { break; }
+            }
+
+            if is_cancelled(&cancel_notify) {
+                break;
+            }
+        }
+        first_attempt = false;
+
+        // Retrieve the latest reconnect config (cols/rows may have been updated by resize).
+        let cfg = {
+            let guard = state.reconnect_configs.lock().await;
+            match guard.get(&id).cloned() {
+                Some(c) => c,
+                None => break,
+            }
+        };
+
+        let addr = format!("{}:{}", cfg.host, cfg.port);
+
+        // Ensure a fresh auth-response channel is available.
+        let (auth_tx, rx) = mpsc::channel::<String>(4);
+        state.auth_responses.lock().await.insert(id.clone(), auth_tx);
+
+        let result = do_single_ssh_connect(
+            &app,
+            &state,
+            &id,
+            &addr,
+            &cfg.user,
+            cfg.password.as_deref(),
+            cfg.private_key.as_deref(),
+            cfg.cols,
+            cfg.rows,
+            Some(cfg.reconnect_type),
+            Some(cfg.session_name.clone()),
+            !cfg.checked_existing_sessions,
+            rx,
+        ).await;
+
+        match result {
+            Ok(_new_rx) => {
+                // Connection is running; wait until it drops (cleanup_ssh_session removes handles).
+                // Poll until the handle is gone or we're cancelled.
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {
+                            let gone = state.handles.lock().await.get(&id).is_none();
+                            if gone { break; }
+                        }
+                        _ = cancel_notify.notified() => { return; }
+                    }
+                }
+            }
+            Err(err) => {
+                cleanup_ssh_runtime_state(&state, &id).await;
+                let _ = app.emit(
+                    "pty-output",
+                    TerminalDataPayload {
+                        id: id.clone(),
+                        data: format!("\r\n\x1b[31m[Reconnect failed: {}]\x1b[0m\r\n", err),
+                    },
+                );
+            }
+        }
     }
 
-    result
+    // Loop exited — do final cleanup.
+    cleanup_ssh_session(&state, &id).await;
+    let _ = app.emit(
+        "pty-exit",
+        PtyExitPayload {
+            id: id.clone(),
+            message: "SSH session ended".to_string(),
+        },
+    );
+}
+
+fn is_cancelled(notify: &Arc<tokio::sync::Notify>) -> bool {
+    // Peek whether any waiters have been notified already by trying a non-blocking check.
+    // Tokio Notify does not expose a "is_notified" API, so we use a workaround:
+    // register a waker, immediately poll it.
+    use std::future::Future;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |p| RawWaker::new(p, &VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+    let raw = RawWaker::new(std::ptr::null(), &VTABLE);
+    let waker = unsafe { Waker::from_raw(raw) };
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = std::pin::pin!(notify.notified());
+    matches!(fut.as_mut().poll(&mut cx), Poll::Ready(()))
+}
+
+/// Connect once to SSH, open a PTY, and spawn the IO loop.
+/// Returns Ok(auth_response_rx) on success (ownership moved into caller for reuse),
+/// or Err on failure.
+async fn do_single_ssh_connect(
+    app: &AppHandle,
+    state: &SshState,
+    id: &str,
+    addr: &str,
+    user: &str,
+    password: Option<&str>,
+    private_key: Option<&str>,
+    cols: u32,
+    rows: u32,
+    reconnect_type: Option<ReconnectType>,
+    reconnect_session_name: Option<String>,
+    should_prompt_existing_sessions: bool,
+    mut auth_response_rx: mpsc::Receiver<String>,
+) -> Result<mpsc::Receiver<String>, String> {
+    println!("Connecting to {}...", addr);
+
+    let session_handle = authenticate_ssh(addr, user, password, private_key, app, id, &mut auth_response_rx).await?;
+
+    println!("Requesting PTY and shell...");
+    let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(id));
+
+    if let Some(rt) = reconnect_type {
+        let tool_name = match rt {
+            ReconnectType::Tmux => "tmux",
+            ReconnectType::Screen => "screen",
+        };
+
+        if should_prompt_existing_sessions {
+            if remote_command_exists(&session_handle, tool_name).await {
+                let sessions = list_detached_auraterm_sessions(&session_handle, rt).await?;
+                if let Some(existing_session) =
+                    prompt_for_existing_reconnect_session(app, state, id, rt, sessions).await?
+                {
+                    selected_session_name = existing_session;
+                }
+            }
+
+            set_reconnect_session_metadata(
+                state,
+                id,
+                Some(selected_session_name.clone()),
+                Some(true),
+            )
+            .await;
+        }
+    }
+
+    let (channel, used_multiplexer) = open_pty_channel(
+        &session_handle,
+        &selected_session_name,
+        cols,
+        rows,
+        reconnect_type,
+    )
+    .await?;
+
+    if reconnect_type.is_some() {
+        set_reconnect_session_metadata(state, id, Some(selected_session_name.clone()), None).await;
+    }
+
+    let (input_tx, input_rx) = mpsc::channel::<String>(32);
+    let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(32);
+
+    state.connections.lock().await.insert(id.to_string(), input_tx);
+    state.resize_channels.lock().await.insert(id.to_string(), resize_tx);
+    state.handles.lock().await.insert(id.to_string(), session_handle);
+
+    let _ = app.emit(
+        "ssh-connected",
+        TerminalDataPayload { id: id.to_string(), data: String::new() },
+    );
+
+    if !used_multiplexer && reconnect_type.is_some() {
+        let tool = match reconnect_type.unwrap() {
+            ReconnectType::Tmux => "tmux",
+            ReconnectType::Screen => "screen",
+        };
+        let _ = app.emit(
+            "pty-output",
+            TerminalDataPayload {
+                id: id.to_string(),
+                data: format!(
+                    "\r\n\x1b[33m[Auto-reconnect: {} not found on remote host, using plain shell]\x1b[0m\r\n",
+                    tool
+                ),
+            },
+        );
+    }
+
+    let connection_id = id.to_string();
+    let app_handle = app.clone();
+    let state_clone = state.clone();
+
+    tokio::spawn(async move {
+        run_channel_io_loop(app_handle, state_clone, connection_id, channel, input_rx, resize_rx).await;
+    });
+
+    Ok(auth_response_rx)
+}
+
+/// Drive the SSH channel: forward data to the frontend, forward input/resize to the channel.
+async fn run_channel_io_loop(
+    app: AppHandle,
+    state: SshState,
+    id: String,
+    mut channel: russh::Channel<client::Msg>,
+    mut input_rx: mpsc::Receiver<String>,
+    mut resize_rx: mpsc::Receiver<(u32, u32)>,
+) {
+    loop {
+        tokio::select! {
+            Some(msg) = channel.wait() => {
+                match msg {
+                    ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. } => {
+                        let _ = app.emit(
+                            "pty-output",
+                            TerminalDataPayload {
+                                id: id.clone(),
+                                data: String::from_utf8_lossy(data).to_string(),
+                            },
+                        );
+                    }
+                    ChannelMsg::Eof | ChannelMsg::Close => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Some(input) = input_rx.recv() => {
+                let _ = channel.data(input.into_bytes().as_slice()).await;
+            }
+            Some((c, r)) = resize_rx.recv() => {
+                let _ = channel.window_change(c, r, 0, 0).await;
+                // Keep cols/rows up-to-date for reconnect.
+                if let Some(cfg) = state.reconnect_configs.lock().await.get_mut(&id) {
+                    cfg.cols = c;
+                    cfg.rows = r;
+                }
+            }
+            else => break,
+        }
+    }
+
+    // Connection dropped — remove handles so the reconnect loop detects it.
+    state.connections.lock().await.remove(&id);
+    state.resize_channels.lock().await.remove(&id);
+    state.handles.lock().await.remove(&id);
+    // Do NOT emit pty-exit here when auto-reconnect is enabled; the reconnect loop handles messaging.
+    let has_reconnect = state.reconnect_flags.lock().await.contains_key(&id);
+    if !has_reconnect {
+        let _ = app.emit(
+            "pty-exit",
+            PtyExitPayload {
+                id: id.clone(),
+                message: "SSH connection closed".to_string(),
+            },
+        );
+    }
 }

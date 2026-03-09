@@ -1527,6 +1527,15 @@
   box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.25);
 }
 
+.reconnect-option-prefix {
+  opacity: 0.45;
+  font-weight: normal;
+}
+
+.reconnect-option-name {
+  font-weight: 500;
+}
+
 .password-retry-actions {
   display: flex;
   gap: 8px;

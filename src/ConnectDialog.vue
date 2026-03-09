@@ -87,6 +87,8 @@ const loadingSerialPorts = ref(false);
 const serialError = ref("");
 const enableLog = ref(true);
 const logFilePath = ref("");
+const autoReconnect = ref(false);
+const reconnectType = ref<"screen" | "tmux">("screen");
 
 const isSsh = computed(() => protocol.value === "ssh");
 const isTelnet = computed(() => protocol.value === "telnet");
@@ -326,6 +328,8 @@ function handleSubmit(event: Event) {
       user: user.value,
       password: sshSecret,
       privateKey: authType.value === "key" ? privateKey.value : undefined,
+      autoReconnect: autoReconnect.value,
+      reconnectType: reconnectType.value,
     } : undefined,
     telnetConfig: isTelnet.value ? { host: host.value, port: parseInt(telnetPort.value, 10) || 23 } : undefined,
     serialConfig,
@@ -539,6 +543,30 @@ function handleSubmit(event: Event) {
             :placeholder="defaultLogPath"
           >
         </div>
+
+        <template v-if="isSsh">
+          <div class="form-group save-connection-group">
+            <label class="save-connection-label">
+              <input v-model="autoReconnect" type="checkbox">
+              <span>Auto reconnect (via screen/tmux)</span>
+            </label>
+            <div v-if="autoReconnect" class="two-column-grid">
+              <div class="form-group" style="margin-bottom: 0">
+                <label>Session tool:</label>
+                <select v-model="reconnectType">
+                  <option value="tmux">tmux</option>
+                  <option value="screen">screen</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin-bottom: 0; grid-column: 1 / -1;">
+                <div class="form-hint">
+                  AuraTerm only manages remote auto-reconnect sessions whose names start with <strong>at-</strong>.
+                  Existing sessions without this prefix will not be attached to or removed.
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
 
         <div class="dialog-actions">
           <button type="button" class="btn-cancel" @click="emit('cancel')">Cancel</button>

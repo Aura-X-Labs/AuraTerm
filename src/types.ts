@@ -1,11 +1,17 @@
 export type ConnectionProtocol = "ssh" | "telnet" | "serial";
 
+export type ReconnectType = "screen" | "tmux";
+
 export interface SshConfig {
   host: string;
   port: number;
   user: string;
   password?: string;
   privateKey?: string;
+  /** Enable auto-reconnect via screen/tmux session on the remote host */
+  autoReconnect?: boolean;
+  /** Which multiplexer to use for session persistence */
+  reconnectType?: ReconnectType;
 }
 
 export type RemoteTransferMode = "sftp" | "scp";
@@ -84,6 +90,10 @@ export interface SavedConnection {
   flowControl?: "none" | "hardware" | "software";
   createdAt: number;
   lastUsed?: number;
+  /** SSH auto-reconnect via screen/tmux */
+  autoReconnect?: boolean;
+  /** Which multiplexer to use for auto-reconnect */
+  reconnectType?: ReconnectType;
 }
 
 export type SessionConfig =

@@ -503,6 +503,8 @@ async function handleConnectResult(result: ConnectResult) {
     parity: protocol === "serial" ? serialConfig!.parity : undefined,
     flowControl: protocol === "serial" ? serialConfig!.flowControl : undefined,
     createdAt: Date.now(),
+    autoReconnect: protocol === "ssh" ? (sshConfig!.autoReconnect ?? false) : undefined,
+    reconnectType: protocol === "ssh" ? (sshConfig!.reconnectType ?? "tmux") : undefined,
   };
 
   try {
@@ -558,6 +560,8 @@ function handleBookmarkConnect(connection: SavedConnection) {
           user: connection.user,
           password: connection.password,
           privateKey: connection.authType === "key" ? connection.privateKey : undefined,
+          autoReconnect: connection.autoReconnect ?? false,
+          reconnectType: connection.reconnectType ?? "tmux",
         },
       },
     };
