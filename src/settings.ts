@@ -23,11 +23,20 @@ export interface SerialHistoryItem {
   flowControl: "none" | "hardware" | "software";
 }
 
+export interface WindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface AppSettings {
   fontSize: number;
   fontFamily: string;
   scrollback: number;
   shellPath: string | null;
+  /** Last saved main window bounds */
+  windowBounds: WindowBounds | null;
   /** Default directory for session logs */
   logSavePath: string;
   /** Default log filename template, e.g. "{timestamp}_{session}" */
@@ -67,6 +76,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fontFamily: 'Consolas, "Courier New", monospace',
   scrollback: 10000,
   shellPath: null,
+  windowBounds: null,
   logSavePath: "~/AuraTerm/logs",
   logFileNameTemplate: "{timestamp}_{session}",
   theme: DEFAULT_THEME,

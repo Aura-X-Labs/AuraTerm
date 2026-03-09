@@ -40,6 +40,15 @@ pub struct SerialHistoryItem {
     pub flow_control: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -47,6 +56,8 @@ pub struct Settings {
     pub font_family: String,
     pub scrollback: u32,
     pub shell_path: Option<String>,
+    #[serde(default)]
+    pub window_bounds: Option<WindowBounds>,
     /// Default directory for session logs
     #[serde(default = "default_log_save_path")]
     pub log_save_path: String,
@@ -89,6 +100,7 @@ impl Default for Settings {
             font_family: r#"Consolas, "Courier New", monospace"#.to_string(),
             scrollback: 1000,
             shell_path: None,
+            window_bounds: None,
             log_save_path: default_log_save_path(),
             log_file_name_template: default_log_file_name_template(),
             theme: TerminalTheme::default(),
