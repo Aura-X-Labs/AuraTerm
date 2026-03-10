@@ -2,6 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+#[cfg(unix)]
+use std::ffi::CStr;
+
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -324,7 +327,7 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
     let shell_path = resolve_local_shell_path(&app);
 
     #[cfg(unix)]
-    let command = {
+    let mut command = {
         let mut command = CommandBuilder::new_default_prog();
         command.env("SHELL", &shell_path);
         command.env("TERM", "xterm-256color");
