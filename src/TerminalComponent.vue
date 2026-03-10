@@ -6,7 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
-import type { SerialConnectionState, SessionConfig, SshConfig, TerminalHandle } from "./types";
+import { isReconnectEnabled, normalizeReconnectType } from "./types";
+import type { ReconnectType, SerialConnectionState, SessionConfig, SshConfig, TerminalHandle } from "./types";
 import "xterm/css/xterm.css";
 
 interface PtyOutputEvent {
@@ -169,6 +170,7 @@ const mfaResponses = ref<string[]>([]);
 const showMfaOverlay = ref(false);
 const reconnectPrompt = ref<ReconnectSessionPromptState | null>(null);
 const selectedReconnectSession = ref("");
+const manualReconnectPending = ref(false);
 const activeSshConfig = computed(() => (
   activeSession.value.protocol === "ssh" ? activeSession.value.sshConfig : undefined
 ));
@@ -195,6 +197,7 @@ watch(() => props.session, (session) => {
   showMfaOverlay.value = false;
   reconnectPrompt.value = null;
   selectedReconnectSession.value = "";
+  manualReconnectPending.value = false;
   if (session.protocol === "serial") {
     notifySerialConnectionStateChange("connecting");
   }
@@ -255,6 +258,57 @@ function sendData(text: string) {
 
 function fit() {
   fitAddon?.fit();
+}
+
+function getSshReconnectType(sshConfig: SshConfig): ReconnectType {
+  return normalizeReconnectType(sshConfig);
+}
+
+async function startSshSession(sessionId: string, sshConfig: SshConfig) {
+  if (!terminal) {
+    return;
+  }
+
+  const reconnectType = getSshReconnectType(sshConfig);
+  const cols = terminal.cols ?? 80;
+  const rows = terminal.rows ?? 24;
+
+  ptyId.value = sessionId;
+  await invoke("start_ssh_pty", {
+    id: sessionId,
+    host: sshConfig.host,
+    port: sshConfig.port,
+    user: sshConfig.user,
+    password: sshConfig.password ?? null,
+    privateKey: sshConfig.privateKey ?? null,
+    cols,
+    rows,
+    autoReconnect: isReconnectEnabled(reconnectType),
+    reconnectType,
+  });
+}
+
+async function reconnectSshSession() {
+  if (activeSessionRef.value.protocol !== "ssh" || !terminal) {
+    return;
+  }
+
+  manualReconnectPending.value = false;
+  terminal.writeln("\r\n[Reconnecting...]");
+
+  try {
+    await startSshSession(props.sessionId, activeSessionRef.value.sshConfig);
+  } catch (error) {
+    const errorText = String(error);
+    ptyId.value = null;
+    terminal.writeln(`\r\n[Reconnect failed] ${errorText}`);
+    if (isAuthError(errorText)) {
+      showRetryOverlay.value = true;
+    } else {
+      manualReconnectPending.value = true;
+      terminal.writeln("\r\n[Press r or R to reconnect]");
+    }
+  }
 }
 
 defineExpose<TerminalHandle>({
@@ -372,6 +426,13 @@ onMounted(() => {
   terminalElement.addEventListener("auxclick", handleMiddleClick);
 
   const inputDisposable = terminal.onData((data) => {
+    if (manualReconnectPending.value) {
+      if (data === "r" || data === "R") {
+        void reconnectSshSession();
+      }
+      return;
+    }
+
     if (!ptyId.value) {
       return;
     }
@@ -494,6 +555,15 @@ onMounted(() => {
         if (activeSessionRef.value.protocol === "ssh" && isAuthError(message)) {
           ptyId.value = null;
           showRetryOverlay.value = true;
+          return;
+        }
+        if (activeSessionRef.value.protocol === "ssh") {
+          const reconnectType = getSshReconnectType(activeSessionRef.value.sshConfig);
+          if (reconnectType === "manual") {
+            ptyId.value = null;
+            manualReconnectPending.value = true;
+            terminal.writeln("\r\n[Press r or R to reconnect]");
+          }
         }
       });
 
@@ -538,30 +608,18 @@ onMounted(() => {
         return;
       }
 
-      const cols = terminal.cols ?? 80;
-      const rows = terminal.rows ?? 24;
       const newId = props.sessionId;
+  const cols = terminal.cols ?? 80;
+  const rows = terminal.rows ?? 24;
       ptyId.value = newId;
 
       try {
         switch (session.protocol) {
           case "ssh":
+            const reconnectType = getSshReconnectType(session.sshConfig);
             terminal.writeln(`Connecting to ${session.sshConfig.user}@${session.sshConfig.host}:${session.sshConfig.port}...`);
-            if (session.sshConfig.autoReconnect) {
-              terminal.writeln(`\x1b[33m[Auto-reconnect enabled via ${session.sshConfig.reconnectType ?? "tmux"}]\x1b[0m`);
-            }
-            await invoke("start_ssh_pty", {
-              id: newId,
-              host: session.sshConfig.host,
-              port: session.sshConfig.port,
-              user: session.sshConfig.user,
-              password: session.sshConfig.password ?? null,
-              privateKey: session.sshConfig.privateKey ?? null,
-              cols,
-              rows,
-              autoReconnect: session.sshConfig.autoReconnect ?? false,
-              reconnectType: session.sshConfig.reconnectType ?? "tmux",
-            });
+            terminal.writeln(`\x1b[33m[Reconnect mode: ${reconnectType}]\x1b[0m`);
+            await startSshSession(newId, session.sshConfig);
             break;
           case "telnet":
             terminal.writeln(`Connecting to telnet://${session.telnetConfig.host}:${session.telnetConfig.port}...`);
@@ -774,5 +832,79 @@ function handleSkipReconnectSession() {
         </form>
       </div>
     </div>
+
+    <!-- Manual Reconnect Status Bar -->
+    <div v-if="manualReconnectPending" class="reconnect-status-bar">
+      <div class="reconnect-status-content">
+        <span class="reconnect-status-icon">🔌</span>
+        <span class="reconnect-status-text">连接已断开。按 <kbd>R</kbd> 重新连接。</span>
+      </div>
+      <button class="reconnect-status-btn" @click="reconnectSshSession">立即重连</button>
+    </div>
   </div>
 </template>
+
+<style scoped>
+.reconnect-status-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 36px;
+  background: #3e3e42;
+  border-top: 1px solid #555;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  z-index: 100;
+  color: #fff;
+  font-size: 13px;
+  animation: slide-up 0.2s ease-out;
+}
+
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.reconnect-status-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reconnect-status-icon {
+  font-size: 16px;
+}
+
+.reconnect-status-text kbd {
+  background: #252526;
+  border: 1px solid #666;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: 11px;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+  margin: 0 2px;
+}
+
+.reconnect-status-btn {
+  background: #0078d4;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.reconnect-status-btn:hover {
+  background: #0086ee;
+}
+
+.reconnect-status-btn:active {
+  background: #006cc1;
+}
+</style>

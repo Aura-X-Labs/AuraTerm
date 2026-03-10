@@ -1,6 +1,24 @@
 export type ConnectionProtocol = "ssh" | "telnet" | "serial";
 
-export type ReconnectType = "simple" | "screen" | "tmux";
+export type ReconnectType = "manual" | "simple" | "screen" | "tmux";
+
+type ReconnectConfigLike = {
+  autoReconnect?: boolean;
+  reconnectType?: ReconnectType | string;
+};
+
+export function normalizeReconnectType(config?: ReconnectConfigLike | null): ReconnectType {
+  const reconnectType = config?.reconnectType;
+  if (reconnectType === "manual" || reconnectType === "simple" || reconnectType === "screen" || reconnectType === "tmux") {
+    return reconnectType;
+  }
+
+  return config?.autoReconnect ? "tmux" : "manual";
+}
+
+export function isReconnectEnabled(reconnectType: ReconnectType): boolean {
+  return reconnectType !== "manual";
+}
 
 export interface SshConfig {
   host: string;
@@ -8,9 +26,9 @@ export interface SshConfig {
   user: string;
   password?: string;
   privateKey?: string;
-  /** Enable auto-reconnect via screen/tmux session on the remote host */
+  /** Legacy compatibility field; reconnect behavior is driven by reconnectType */
   autoReconnect?: boolean;
-  /** Which multiplexer to use for session persistence */
+  /** Reconnect behavior for SSH sessions */
   reconnectType?: ReconnectType;
 }
 
@@ -90,9 +108,9 @@ export interface SavedConnection {
   flowControl?: "none" | "hardware" | "software";
   createdAt: number;
   lastUsed?: number;
-  /** SSH auto-reconnect via screen/tmux */
+  /** Legacy compatibility field; reconnect behavior is driven by reconnectType */
   autoReconnect?: boolean;
-  /** Which multiplexer to use for auto-reconnect */
+  /** Reconnect behavior for SSH sessions */
   reconnectType?: ReconnectType;
 }
 

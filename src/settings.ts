@@ -71,6 +71,9 @@ const DEFAULT_THEME: TerminalTheme = {
   cursor: "#ffffff",
 };
 
+export const MIN_TERMINAL_FONT_SIZE = 8;
+export const MAX_TERMINAL_FONT_SIZE = 72;
+
 export const DEFAULT_SETTINGS: AppSettings = {
   fontSize: 15,
   fontFamily: 'Consolas, "Courier New", monospace',
@@ -113,6 +116,10 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
   return {
     ...DEFAULT_SETTINGS,
     ...value,
+    fontSize: Math.min(
+      MAX_TERMINAL_FONT_SIZE,
+      Math.max(MIN_TERMINAL_FONT_SIZE, value?.fontSize ?? DEFAULT_SETTINGS.fontSize),
+    ),
     theme: nextTheme,
     quickButtons: value?.quickButtons ?? DEFAULT_SETTINGS.quickButtons,
     lastSerialConfig: value?.lastSerialConfig ?? DEFAULT_SETTINGS.lastSerialConfig,

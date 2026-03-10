@@ -152,6 +152,8 @@ struct ReconnectConfig {
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReconnectType {
+    /// Manual reconnect: after disconnect the user can trigger a new connection from the UI.
+    Manual,
     /// Reconnect only: no server-side session manager. Running tasks will be lost on disconnect.
     Simple,
     Screen,
@@ -1080,6 +1082,7 @@ pub async fn close_ssh_pty(
     let config = state.reconnect_configs.lock().await.get(&id).cloned();
     if let Some(cfg) = config {
         let kill_cmd = match cfg.reconnect_type {
+            ReconnectType::Manual => None,
             ReconnectType::Simple => None,
             ReconnectType::Tmux => Some(format!(
                 "tmux kill-session -t {} 2>/dev/null; exit 0",
@@ -1258,6 +1261,7 @@ async fn list_detached_auraterm_sessions(
     reconnect_type: ReconnectType,
 ) -> Result<Vec<String>, String> {
     let output = match reconnect_type {
+        ReconnectType::Manual => return Ok(vec![]),
         ReconnectType::Simple => return Ok(vec![]),
         ReconnectType::Tmux => run_remote_command_capture(
             handle,
@@ -1272,6 +1276,7 @@ async fn list_detached_auraterm_sessions(
     };
 
     let mut sessions = match reconnect_type {
+        ReconnectType::Manual => vec![],
         ReconnectType::Simple => vec![],
         ReconnectType::Tmux => output
             .lines()
@@ -1319,6 +1324,7 @@ async fn prompt_for_existing_reconnect_session(
         .insert(id.to_string(), tx);
 
     let tool = match reconnect_type {
+        ReconnectType::Manual => "manual",
         ReconnectType::Simple => "simple",
         ReconnectType::Tmux => "tmux",
         ReconnectType::Screen => "screen",
@@ -1350,7 +1356,7 @@ async fn prompt_for_existing_reconnect_session(
 }
 
 /// Open a PTY channel and attach/create a screen or tmux session.
-/// For Simple mode or when the multiplexer is unavailable, falls back to a plain shell.
+/// For Manual/Simple mode or when the multiplexer is unavailable, falls back to a plain shell.
 /// Returns (channel, used_multiplexer: bool).
 async fn open_pty_channel(
     handle: &SharedSshHandle,
@@ -1373,12 +1379,14 @@ async fn open_pty_channel(
 
     if let Some(rt) = reconnect_type {
         match rt {
-            // Simple mode: skip multiplexer entirely, go straight to shell.
+            // Manual/Simple modes skip the multiplexer and go straight to the shell.
+            ReconnectType::Manual => {}
             ReconnectType::Simple => {}
             ReconnectType::Tmux | ReconnectType::Screen => {
                 let tool_name = match rt {
                     ReconnectType::Tmux => "tmux",
                     ReconnectType::Screen => "screen",
+                    ReconnectType::Manual => unreachable!(),
                     ReconnectType::Simple => unreachable!(),
                 };
                 let tool_available = remote_command_exists(handle, tool_name).await;
@@ -1395,6 +1403,7 @@ async fn open_pty_channel(
                             shell_escape(session_name),
                             shell_escape(session_name)
                         ),
+                        ReconnectType::Manual => unreachable!(),
                         ReconnectType::Simple => unreachable!(),
                     };
                     channel
@@ -1436,8 +1445,14 @@ pub async fn start_ssh_pty(
     // Stop any previous session for this id.
     stop_and_cleanup_ssh_session(state.inner(), &id).await;
 
-    let use_reconnect = auto_reconnect.unwrap_or(false);
-    let rt = reconnect_type.unwrap_or(ReconnectType::Simple);
+    let rt = reconnect_type.unwrap_or_else(|| {
+        if auto_reconnect.unwrap_or(false) {
+            ReconnectType::Simple
+        } else {
+            ReconnectType::Manual
+        }
+    });
+    let use_reconnect = !matches!(rt, ReconnectType::Manual);
 
     // Always create a fresh auth-response channel registered under this id.
     let (auth_response_tx, auth_response_rx) = mpsc::channel::<String>(4);
@@ -1480,8 +1495,9 @@ pub async fn start_ssh_pty(
     } else {
         // Single-shot connection (no reconnect).
         let addr = format!("{}:{}", host, port);
-        // For Simple mode, no multiplexer is needed even in single-shot mode.
+        // For Manual/Simple mode, no multiplexer is needed even in single-shot mode.
         let mux_type = match rt {
+            ReconnectType::Manual => None,
             ReconnectType::Simple => None,
             other => Some(other),
         };
@@ -1532,7 +1548,7 @@ async fn run_reconnect_loop(
                 "pty-output",
                 TerminalDataPayload {
                     id: id.clone(),
-                    data: "\r\n\x1b[33m[Disconnected — reconnecting in 5 s...]\x1b[0m\r\n".to_string(),
+                    data: "\r\n\x1b[33m[Disconnected; reconnecting in 5 s...]\x1b[0m\r\n".to_string(),
                 },
             );
 
@@ -1563,8 +1579,9 @@ async fn run_reconnect_loop(
         let (auth_tx, rx) = mpsc::channel::<String>(4);
         state.auth_responses.lock().await.insert(id.clone(), auth_tx);
 
-        // For Simple mode, pass None as reconnect_type so no multiplexer is used.
+        // For Manual/Simple mode, pass None as reconnect_type so no multiplexer is used.
         let mux_type = match cfg.reconnect_type {
+            ReconnectType::Manual => None,
             ReconnectType::Simple => None,
             other => Some(other),
         };
@@ -1669,6 +1686,7 @@ async fn do_single_ssh_connect(
 
     if let Some(rt) = reconnect_type {
         let tool_name = match rt {
+            ReconnectType::Manual => "",
             ReconnectType::Simple => "",
             ReconnectType::Tmux => "tmux",
             ReconnectType::Screen => "screen",
@@ -1724,6 +1742,7 @@ async fn do_single_ssh_connect(
             let tool = match rt {
                 ReconnectType::Tmux => Some("tmux"),
                 ReconnectType::Screen => Some("screen"),
+                ReconnectType::Manual => None,
                 ReconnectType::Simple => None,
             };
             if let Some(tool_name) = tool {
@@ -1732,7 +1751,7 @@ async fn do_single_ssh_connect(
                     TerminalDataPayload {
                         id: id.to_string(),
                         data: format!(
-                            "\r\n\x1b[33m[Auto-reconnect: {} not found on remote host, using plain shell]\x1b[0m\r\n",
+                            "\r\n\x1b[33m[Reconnect mode: {} not found on remote host, using plain shell]\x1b[0m\r\n",
                             tool_name
                         ),
                     },

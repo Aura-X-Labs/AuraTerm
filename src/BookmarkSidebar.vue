@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import type { SavedConnection } from "./types";
+import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection } from "./types";
 
 interface ContextMenu {
   x: number;
@@ -47,10 +47,6 @@ function inputValue(event: Event) {
   return (event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
 }
 
-function checkboxChecked(event: Event) {
-  return (event.target as HTMLInputElement).checked;
-}
-
 function toNumber(value: string, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -89,8 +85,11 @@ function toAuthType(value: string): "password" | "key" | "none" {
   return "password";
 }
 
-function toReconnectType(value: string): "screen" | "tmux" {
-  return value === "screen" ? "screen" : "tmux";
+function toReconnectType(value: string): ReconnectType {
+  if (value === "simple" || value === "screen" || value === "tmux") {
+    return value;
+  }
+  return "manual";
 }
 
 const connections = ref<SavedConnection[]>([]);
@@ -173,7 +172,12 @@ async function handleDelete(id: string) {
 
 function openEditDialog(connection: SavedConnection) {
   editingConnection.value = connection;
-  editDraft.value = { ...connection };
+  const reconnectType = normalizeReconnectType(connection);
+  editDraft.value = {
+    ...connection,
+    autoReconnect: isReconnectEnabled(reconnectType),
+    reconnectType,
+  };
   editError.value = "";
   contextMenu.value = null;
 }
@@ -197,6 +201,7 @@ async function saveDraft() {
   }
 
   const protocol = editDraft.value.protocol ?? "ssh";
+  const reconnectType = protocol === "ssh" ? normalizeReconnectType(editDraft.value) : undefined;
   if (!editDraft.value.name.trim()) {
     editError.value = "Name cannot be empty.";
     return;
@@ -227,6 +232,8 @@ async function saveDraft() {
     authType: protocol === "ssh" ? editDraft.value.authType : "none",
     password: protocol === "ssh" ? editDraft.value.password : undefined,
     privateKey: protocol === "ssh" && editDraft.value.authType === "key" ? editDraft.value.privateKey : undefined,
+    autoReconnect: protocol === "ssh" && reconnectType ? isReconnectEnabled(reconnectType) : undefined,
+    reconnectType,
     portName: protocol === "serial" ? editDraft.value.portName?.trim() : undefined,
     baudRate: protocol === "serial" ? editDraft.value.baudRate : undefined,
     dataBits: protocol === "serial" ? editDraft.value.dataBits : undefined,
@@ -419,21 +426,13 @@ async function saveDraft() {
 
               <div class="bookmark-editor-grid">
                 <div class="form-group bookmark-editor-span-2">
-                  <label class="save-connection-label" style="display:flex;align-items:center;gap:6px">
-                    <input
-                      type="checkbox"
-                      :checked="editDraft.autoReconnect ?? false"
-                      @change="updateDraft('autoReconnect', checkboxChecked($event))"
-                    >
-                    <span>Auto reconnect (via screen/tmux)</span>
-                  </label>
-                </div>
-                <div v-if="editDraft.autoReconnect" class="form-group">
-                  <label>Session tool</label>
+                  <label>Reconnect Mode</label>
                   <select
-                    :value="editDraft.reconnectType ?? 'tmux'"
+                    :value="normalizeReconnectType(editDraft)"
                     @change="updateDraft('reconnectType', toReconnectType(inputValue($event)))"
                   >
+                    <option value="manual">Manual</option>
+                    <option value="simple">Simple</option>
                     <option value="tmux">tmux</option>
                     <option value="screen">screen</option>
                   </select>

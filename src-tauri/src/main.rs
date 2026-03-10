@@ -581,7 +581,7 @@ fn main() {
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+                use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 
                 let new_local_item = MenuItem::with_id(_app, "menu-new-local", "Local Shell", true, None::<&str>)?;
                 let new_ssh_item = MenuItem::with_id(_app, "menu-new-ssh", "SSH", true, None::<&str>)?;
@@ -591,8 +591,30 @@ fn main() {
                 let settings_item = MenuItem::with_id(_app, "menu-open-settings", "Settings", true, None::<&str>)?;
                 let toggle_bookmarks_item = MenuItem::with_id(_app, "menu-toggle-bookmarks", "Toggle Bookmarks", true, None::<&str>)?;
                 let toggle_remote_files_item = MenuItem::with_id(_app, "menu-toggle-remote-files", "Toggle Remote Files", true, None::<&str>)?;
+                let increase_font_size_item = MenuItem::with_id(
+                    _app,
+                    "menu-increase-font-size",
+                    "Increase Terminal Font Size",
+                    true,
+                    Some("Cmd+="),
+                )?;
+                let decrease_font_size_item = MenuItem::with_id(
+                    _app,
+                    "menu-decrease-font-size",
+                    "Decrease Terminal Font Size",
+                    true,
+                    Some("Cmd+-"),
+                )?;
+                let reset_font_size_item = MenuItem::with_id(
+                    _app,
+                    "menu-reset-font-size",
+                    "Reset Terminal Font Size",
+                    true,
+                    Some("Cmd+0"),
+                )?;
                 let exit_item = MenuItem::with_id(_app, "exit", "Exit", true, None::<&str>)?;
                 let about_item = MenuItem::with_id(_app, "about", "About AuraTerm", true, None::<&str>)?;
+                let fullscreen_item = PredefinedMenuItem::fullscreen(_app, None)?;
 
                 let new_session_menu = SubmenuBuilder::new(_app, "New Session")
                     .item(&new_local_item)
@@ -616,6 +638,12 @@ fn main() {
                 let view_menu = SubmenuBuilder::new(_app, "View")
                     .item(&toggle_bookmarks_item)
                     .item(&toggle_remote_files_item)
+                    .separator()
+                    .item(&increase_font_size_item)
+                    .item(&decrease_font_size_item)
+                    .item(&reset_font_size_item)
+                    .separator()
+                    .item(&fullscreen_item)
                     .build()?;
                 let help_menu = SubmenuBuilder::new(_app, "Help")
                     .item(&about_item)
@@ -666,6 +694,15 @@ fn main() {
                 }
                 "menu-toggle-remote-files" => {
                     let _ = app.emit("menu-toggle-remote-files", ());
+                }
+                "menu-increase-font-size" => {
+                    let _ = app.emit("menu-increase-font-size", ());
+                }
+                "menu-decrease-font-size" => {
+                    let _ = app.emit("menu-decrease-font-size", ());
+                }
+                "menu-reset-font-size" => {
+                    let _ = app.emit("menu-reset-font-size", ());
                 }
                 "exit" => {
                     app.exit(0);

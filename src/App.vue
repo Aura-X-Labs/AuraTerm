@@ -11,7 +11,16 @@ import SettingsDialog from "./SettingsDialog.vue";
 import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
 import RemoteFileManager from "./RemoteFileManager.vue";
-import { DEFAULT_SETTINGS, normalizeAppSettings, type AppSettings, type QuickButton, type SerialHistoryItem } from "./settings";
+import {
+  DEFAULT_SETTINGS,
+  MAX_TERMINAL_FONT_SIZE,
+  MIN_TERMINAL_FONT_SIZE,
+  normalizeAppSettings,
+  type AppSettings,
+  type QuickButton,
+  type SerialHistoryItem,
+} from "./settings";
+import { isReconnectEnabled, normalizeReconnectType } from "./types";
 import type {
   ConnectResult,
   ConnectionProtocol,
@@ -58,8 +67,14 @@ const isWindowFocused = ref(true);
 const serialConnectionStates = ref<Record<string, SerialConnectionState>>({});
 const openMenuId = ref<AppMenuId | null>(null);
 const openFileSubmenuId = ref<FileSubmenuId | null>(null);
+const draggedTabId = ref<string | null>(null);
+const dragPreviewTabId = ref<string | null>(null);
+const suppressTabClick = ref(false);
+let pendingTabDrag: { tabId: string; startX: number; startY: number } | null = null;
+let tabDragMoved = false;
 const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
 const menuBarRef = ref<HTMLDivElement | null>(null);
+const isFullscreen = ref(false);
 const termRefs = new Map<string, TerminalHandle>();
 const cleanupFns: Array<() => void> = [];
 
@@ -107,6 +122,47 @@ watch(openMenuId, (menuId, _previous, onCleanup) => {
   });
 });
 
+async function syncFullscreenState() {
+  isFullscreen.value = await getCurrentWindow().isFullscreen().catch((error) => {
+    console.error("isFullscreen failed", error);
+    return false;
+  });
+}
+
+function handleGlobalKeyDown(event: KeyboardEvent) {
+  const hasPrimaryModifier = event.ctrlKey || event.metaKey;
+  if (hasPrimaryModifier && !event.altKey) {
+    const key = event.key;
+    const isIncreaseShortcut = key === "+" || key === "=" || event.code === "NumpadAdd";
+    const isDecreaseShortcut = key === "-" || key === "_" || event.code === "NumpadSubtract";
+    const isResetShortcut = key === "0" || event.code === "Numpad0";
+
+    if (isIncreaseShortcut) {
+      event.preventDefault();
+      handleIncreaseTerminalFontSize();
+      return;
+    }
+
+    if (isDecreaseShortcut) {
+      event.preventDefault();
+      handleDecreaseTerminalFontSize();
+      return;
+    }
+
+    if (isResetShortcut) {
+      event.preventDefault();
+      handleResetTerminalFontSize();
+      return;
+    }
+  }
+
+  const isFullscreenShortcut = event.key === "F11";
+  if (isFullscreenShortcut) {
+    event.preventDefault();
+    void handleToggleFullScreen();
+  }
+}
+
 onMounted(async () => {
   try {
     cleanupFns.push(await listen("tauri://focus", () => {
@@ -114,6 +170,9 @@ onMounted(async () => {
     }));
     cleanupFns.push(await listen("tauri://blur", () => {
       isWindowFocused.value = false;
+    }));
+    cleanupFns.push(await listen("tauri://resize", () => {
+      void syncFullscreenState();
     }));
   } catch (error) {
     console.error("Failed to setup window focus listeners:", error);
@@ -124,6 +183,8 @@ onMounted(async () => {
   } catch (error) {
     console.error("Failed to detect OS:", error);
   }
+
+  await syncFullscreenState();
 
   try {
     const loaded = await invoke<AppSettings>("get_settings");
@@ -165,12 +226,27 @@ onMounted(async () => {
     cleanupFns.push(await listen("menu-toggle-remote-files", () => {
       handleToggleRemoteFileManager();
     }));
+    cleanupFns.push(await listen("menu-increase-font-size", () => {
+      handleIncreaseTerminalFontSize();
+    }));
+    cleanupFns.push(await listen("menu-decrease-font-size", () => {
+      handleDecreaseTerminalFontSize();
+    }));
+    cleanupFns.push(await listen("menu-reset-font-size", () => {
+      handleResetTerminalFontSize();
+    }));
   } catch (error) {
     console.error("Failed to setup menu listeners:", error);
   }
+
+  window.addEventListener("keydown", handleGlobalKeyDown);
+  cleanupFns.push(() => {
+    window.removeEventListener("keydown", handleGlobalKeyDown);
+  });
 });
 
 onBeforeUnmount(() => {
+  cleanupTabPointerTracking();
   while (cleanupFns.length > 0) {
     const cleanup = cleanupFns.pop();
     cleanup?.();
@@ -190,10 +266,12 @@ const activeSerialConnectionState = computed<SerialConnectionState | null>(() =>
   }
   return serialConnectionStates.value[activeTab.value.id] ?? "connecting";
 });
+const primaryShortcutLabel = computed(() => (osType.value === "macos" ? "Cmd" : "Ctrl"));
 const appClassName = computed(() => [
   "app-container",
   osType.value,
   isWindowFocused.value ? "focused" : "blurred",
+  draggedTabId.value ? "tab-dragging" : "",
 ]);
 
 async function handleSaveSettings(newSettings: AppSettings) {
@@ -294,6 +372,150 @@ function selectTab(tabId: string) {
   activeTabId.value = tabId;
 }
 
+function handleTabClick(tabId: string) {
+  if (suppressTabClick.value) {
+    suppressTabClick.value = false;
+    return;
+  }
+  selectTab(tabId);
+}
+
+function moveTabToIndex(tabId: string, targetIndex: number) {
+  const currentIndex = tabs.value.findIndex((tab) => tab.id === tabId);
+  if (currentIndex < 0) {
+    return;
+  }
+
+  const normalizedTargetIndex = Math.max(0, Math.min(targetIndex, tabs.value.length));
+  let insertIndex = normalizedTargetIndex;
+  if (currentIndex < normalizedTargetIndex) {
+    insertIndex -= 1;
+  }
+
+  if (insertIndex === currentIndex) {
+    return;
+  }
+
+  const nextTabs = [...tabs.value];
+  const [movedTab] = nextTabs.splice(currentIndex, 1);
+  nextTabs.splice(insertIndex, 0, movedTab);
+  tabs.value = nextTabs;
+}
+
+function cleanupTabPointerTracking() {
+  // No-op: pointer tracking is now via setPointerCapture on tab elements,
+  // so there are no window-level listeners to remove.
+}
+
+function beginTabDrag(tabId: string) {
+  draggedTabId.value = tabId;
+  dragPreviewTabId.value = tabId;
+  activeTabId.value = tabId;
+  tabDragMoved = true;
+  suppressTabClick.value = true;
+}
+
+function finishTabDrag() {
+  const moved = tabDragMoved;
+  cleanupTabPointerTracking();
+  pendingTabDrag = null;
+  tabDragMoved = false;
+  draggedTabId.value = null;
+  dragPreviewTabId.value = null;
+  suppressTabClick.value = moved;
+
+  if (moved) {
+    window.setTimeout(() => {
+      suppressTabClick.value = false;
+    }, 0);
+  }
+}
+
+function handleTabPointerDown(event: PointerEvent, tabId: string) {
+  if (event.button !== 0) {
+    return;
+  }
+
+  const target = event.target as HTMLElement | null;
+  if (target?.closest(".tab-close-btn")) {
+    return;
+  }
+
+  event.preventDefault();
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+
+  pendingTabDrag = {
+    tabId,
+    startX: event.clientX,
+    startY: event.clientY,
+  };
+  tabDragMoved = false;
+}
+
+function handleTabPointerMove(event: PointerEvent, tabId: string) {
+  if (!pendingTabDrag || pendingTabDrag.tabId !== tabId) {
+    return;
+  }
+
+  if (!draggedTabId.value) {
+    const deltaX = event.clientX - pendingTabDrag.startX;
+    const deltaY = event.clientY - pendingTabDrag.startY;
+    if (Math.hypot(deltaX, deltaY) < 6) {
+      return;
+    }
+
+    beginTabDrag(pendingTabDrag.tabId);
+  }
+
+  // Use bounding rects of all tabs to find the drop target while pointer is captured
+  const allTabEls = document.querySelectorAll<HTMLElement>(".tab-item[data-tab-id]");
+  let targetTabEl: HTMLElement | null = null;
+  for (const el of allTabEls) {
+    const r = el.getBoundingClientRect();
+    if (event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom) {
+      targetTabEl = el;
+      break;
+    }
+  }
+
+  if (!targetTabEl || !draggedTabId.value) {
+    return;
+  }
+
+  const hoveredTabId = targetTabEl.dataset.tabId;
+  if (!hoveredTabId) {
+    return;
+  }
+
+  const targetIndex = tabs.value.findIndex((tab) => tab.id === hoveredTabId);
+  if (targetIndex < 0) {
+    return;
+  }
+
+  const bounds = targetTabEl.getBoundingClientRect();
+  const insertAfter = event.clientX > bounds.left + bounds.width / 2;
+  moveTabToIndex(draggedTabId.value, targetIndex + (insertAfter ? 1 : 0));
+  dragPreviewTabId.value = hoveredTabId;
+}
+
+function handleTabPointerUp(_event: PointerEvent, tabId: string) {
+  if (!pendingTabDrag || pendingTabDrag.tabId !== tabId) {
+    return;
+  }
+  finishTabDrag();
+}
+
+function handleTabPointerCancel(tabId: string) {
+  if (!pendingTabDrag || pendingTabDrag.tabId !== tabId) {
+    return;
+  }
+  pendingTabDrag = null;
+  tabDragMoved = false;
+  draggedTabId.value = null;
+  dragPreviewTabId.value = null;
+  suppressTabClick.value = false;
+}
+
 function handleTitlebarMouseDown(event: MouseEvent) {
   if (event.button !== 0) {
     return;
@@ -350,6 +572,55 @@ function handleOpenAbout() {
 function handleOpenSettings() {
   closeOpenMenus();
   showSettings.value = true;
+}
+
+function adjustTerminalFontSize(delta: number) {
+  closeOpenMenus();
+  const nextFontSize = Math.min(
+    MAX_TERMINAL_FONT_SIZE,
+    Math.max(MIN_TERMINAL_FONT_SIZE, settingsRef.value.fontSize + delta),
+  );
+
+  if (nextFontSize === settingsRef.value.fontSize) {
+    return;
+  }
+
+  persistSettingsSilently({
+    ...settingsRef.value,
+    fontSize: nextFontSize,
+  });
+}
+
+function handleIncreaseTerminalFontSize() {
+  adjustTerminalFontSize(1);
+}
+
+function handleDecreaseTerminalFontSize() {
+  adjustTerminalFontSize(-1);
+}
+
+function handleResetTerminalFontSize() {
+  closeOpenMenus();
+  if (settingsRef.value.fontSize === DEFAULT_SETTINGS.fontSize) {
+    return;
+  }
+  persistSettingsSilently({
+    ...settingsRef.value,
+    fontSize: DEFAULT_SETTINGS.fontSize,
+  });
+}
+
+async function handleToggleFullScreen() {
+  closeOpenMenus();
+  const appWindow = getCurrentWindow();
+  const nextFullscreen = !(await appWindow.isFullscreen().catch((error) => {
+    console.error("isFullscreen failed", error);
+    return false;
+  }));
+  await appWindow.setFullscreen(nextFullscreen).catch((error) => {
+    console.error("setFullscreen failed", error);
+  });
+  isFullscreen.value = nextFullscreen;
 }
 
 function toggleRemoteFileManager() {
@@ -486,6 +757,8 @@ async function handleConnectResult(result: ConnectResult) {
     return;
   }
 
+  const reconnectType = protocol === "ssh" ? normalizeReconnectType(sshConfig) : undefined;
+
   const connection: SavedConnection = {
     id: crypto.randomUUID(),
     name: saveAs,
@@ -504,8 +777,8 @@ async function handleConnectResult(result: ConnectResult) {
     parity: protocol === "serial" ? serialConfig!.parity : undefined,
     flowControl: protocol === "serial" ? serialConfig!.flowControl : undefined,
     createdAt: Date.now(),
-    autoReconnect: protocol === "ssh" ? (sshConfig!.autoReconnect ?? false) : undefined,
-    reconnectType: protocol === "ssh" ? (sshConfig!.reconnectType ?? "tmux") : undefined,
+    autoReconnect: protocol === "ssh" && reconnectType ? isReconnectEnabled(reconnectType) : undefined,
+    reconnectType,
   };
 
   try {
@@ -550,6 +823,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
       },
     };
   } else {
+    const reconnectType = normalizeReconnectType(connection);
     tab = {
       id: newId,
       title: `${connection.user}@${connection.host}`,
@@ -561,8 +835,8 @@ function handleBookmarkConnect(connection: SavedConnection) {
           user: connection.user,
           password: connection.password,
           privateKey: connection.authType === "key" ? connection.privateKey : undefined,
-          autoReconnect: connection.autoReconnect ?? false,
-          reconnectType: connection.reconnectType ?? "tmux",
+          autoReconnect: isReconnectEnabled(reconnectType),
+          reconnectType,
         },
       },
     };
@@ -645,7 +919,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
               </div>
               <button class="titlebar-menu-item" type="button" :disabled="!activeTab" @click="handleCloseActiveTab">
                 <span>Close Tab</span>
-                <span class="titlebar-menu-item-hint">Ctrl+W</span>
+                <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+W</span>
               </button>
               <div class="titlebar-menu-separator" />
               <div
@@ -686,6 +960,24 @@ function handleBookmarkConnect(connection: SavedConnection) {
               </button>
               <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleRemoteFileManager">
                 <span>{{ showRemoteFileManager ? 'Hide Remote Files' : 'Show Remote Files' }}</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <button class="titlebar-menu-item" type="button" @click="handleIncreaseTerminalFontSize">
+                <span>Increase Terminal Font Size</span>
+                <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}++</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" @click="handleDecreaseTerminalFontSize">
+                <span>Decrease Terminal Font Size</span>
+                <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+-</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" @click="handleResetTerminalFontSize">
+                <span>Reset Terminal Font Size</span>
+                <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+0</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <button class="titlebar-menu-item" type="button" @click="handleToggleFullScreen">
+                <span>{{ isFullscreen ? 'Exit Full Screen' : 'Full Screen' }}</span>
+                <span class="titlebar-menu-item-hint">F11</span>
               </button>
             </div>
           </div>
@@ -744,8 +1036,13 @@ function handleBookmarkConnect(connection: SavedConnection) {
     </div>
 
     <div class="tab-bar">
-      <div class="tab-strip">
+      <TransitionGroup
+        name="tab-sort"
+        tag="div"
+        :class="['tab-strip', { 'is-dragging': draggedTabId }]"
+      >
         <button
+          key="__bookmark__"
           class="tab-new-btn bookmark-toggle-btn"
           :class="{ active: sidebarOpen }"
           title="Bookmarks"
@@ -759,15 +1056,20 @@ function handleBookmarkConnect(connection: SavedConnection) {
           v-for="tab in tabs"
           :key="tab.id"
           class="tab-item"
-          :class="{ active: activeTabId === tab.id }"
-          @click="selectTab(tab.id)"
+          :data-tab-id="tab.id"
+          :class="{ active: activeTabId === tab.id, dragging: draggedTabId === tab.id }"
+          @pointerdown="handleTabPointerDown($event, tab.id)"
+          @pointermove="handleTabPointerMove($event, tab.id)"
+          @pointerup="handleTabPointerUp($event, tab.id)"
+          @pointercancel="handleTabPointerCancel(tab.id)"
+          @click="handleTabClick(tab.id)"
         >
           <span class="tab-title">{{ tab.title }}</span>
           <button class="tab-close-btn" title="Close Tab" @click.stop="handleCloseTab(tab.id)">×</button>
         </div>
 
-        <button class="tab-new-btn" type="button" title="New Tab" @mousedown.stop @click="handleOpenNewTabMenu">+</button>
-      </div>
+        <button key="__newtab__" class="tab-new-btn" type="button" title="New Tab" @mousedown.stop @click="handleOpenNewTabMenu">+</button>
+      </TransitionGroup>
 
       <div class="tab-bar-actions">
         <button

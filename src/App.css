@@ -358,7 +358,7 @@
   color: #969696;
   font-size: 13px;
   flex: 0 0 auto;
-  transition: background 0.1s, color 0.1s;
+  transition: background 0.1s, color 0.1s, opacity 0.1s;
   user-select: none;
   box-sizing: border-box;
   border-top: 2px solid transparent;
@@ -373,6 +373,33 @@
   background: #1e1e1e;
   color: #ffffff;
   border-top-color: #007acc;
+}
+
+.tab-item.dragging {
+  background: #404040;
+  color: #ffffff;
+  border-top-color: #007acc;
+  outline: 1px solid rgba(0, 122, 204, 0.45);
+  outline-offset: -1px;
+  cursor: grabbing;
+  opacity: 1;
+  position: relative;
+  z-index: 10;
+}
+
+.tab-item.dragging .tab-close-btn {
+  opacity: 1;
+}
+
+/* other tabs dim slightly while one is being dragged */
+.tab-strip.is-dragging .tab-item:not(.dragging) {
+  opacity: 0.55;
+  transition: opacity 0.1s;
+}
+
+/* smooth slide animation when tabs reorder */
+.tab-sort-move {
+  transition: transform 0.15s ease;
 }
 
 .tab-title {
@@ -425,6 +452,12 @@
 .tab-new-btn:hover {
   background: #2b2b2b;
   color: #fff;
+}
+
+/* grabbing cursor across the entire window while dragging a tab */
+.app-container.tab-dragging,
+.app-container.tab-dragging * {
+  cursor: grabbing !important;
 }
 
 .bookmark-toggle-btn {
