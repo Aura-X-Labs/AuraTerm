@@ -4,8 +4,14 @@ all: help
 
 ifeq ($(OS),Windows_NT)
 BUNDLE = nsis
+# For Windows, we use powershell to time the commands. Use $$ to escape $ for Make.
+TIME_PREFIX = powershell -ExecutionPolicy Bypass -Command "$$s=Get-Date;
+TIME_SUFFIX = ; $$e=Get-Date; Write-Host \"`nExecution time: $$($$e-$$s)\""
 else
 UNAME_S := $(shell uname -s)
+# For Unix, we use /usr/bin/time
+TIME_PREFIX = /usr/bin/time -p
+TIME_SUFFIX =
 ifeq ($(UNAME_S),Darwin)
 BUNDLE = app,dmg
 else
@@ -14,10 +20,10 @@ endif
 endif
 
 build: clean
-	npm run tauri -- build --bundles $(BUNDLE)
+	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) npm run tauri -- build --bundles $(BUNDLE) $(TIME_SUFFIX),$(TIME_PREFIX) npm run tauri -- build --bundles $(BUNDLE))
 
 clean:
-	@python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]"
+	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) python -c \"import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]\" $(TIME_SUFFIX),$(TIME_PREFIX) python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]")
 
 help:
 	@echo "Makefile targets:"
@@ -30,8 +36,8 @@ help:
 
 release:
 	@echo "Updating release metadata JSON..."
-	@python scripts/release.py
+	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) python scripts/release.py $(TIME_SUFFIX),$(TIME_PREFIX) python scripts/release.py)
 
 upload: release
 	@echo "Uploading target artifacts..."
-	@python scripts/upload.py
+	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) python scripts/upload.py $(TIME_SUFFIX),$(TIME_PREFIX) python scripts/upload.py)

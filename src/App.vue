@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
@@ -41,6 +41,12 @@ interface Tab {
   logPath?: string;
 }
 
+interface TabContextMenuState {
+  x: number;
+  y: number;
+  tabId: string;
+}
+
 type AppMenuId = "file" | "view" | "help";
 type FileSubmenuId = "new-session" | "preferences";
 
@@ -53,21 +59,23 @@ const NATO_ALPHABET = [
   "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey",
   "xray", "yankee", "zulu",
 ];
+const TAB_TITLE_SUFFIX_PATTERN = new RegExp(`^(.*) – ((?:${NATO_ALPHABET.join("|")})|\\d+)$`, "i");
+
+function stripGeneratedTabSuffix(title: string) {
+  const match = title.match(TAB_TITLE_SUFFIX_PATTERN);
+  return match ? match[1] : title;
+}
 
 /**
  * 生成唯一的标签页标题
- * 格式：书签名 + NATO字母后缀（如有同名）
- * 例如：生产服务器、生产服务器、生产服务器
+ * 格式：优先使用书签名，其次回退到协议默认标题。
  */
-function generateUniqueTabTitle(bookmarkName: string, baseTitle: string): string {
-  // 优先使用书签名称（如果有自定义）
-  const useBookmarkName = bookmarkName && !bookmarkName.startsWith("New ");
-  const displayName = useBookmarkName ? bookmarkName : baseTitle;
+function generateUniqueTabTitle(bookmarkName: string | undefined, baseTitle: string): string {
+  const displayName = bookmarkName?.trim() || baseTitle;
 
   // 找出所有同名标签页（不带后缀的）
   const sameBaseTabs = tabs.value.filter(t => {
-    const tBase = t.title.split(" – ")[0];
-    return tBase === displayName;
+    return stripGeneratedTabSuffix(t.title) === displayName;
   });
 
   // 如果没有同名，直接返回
@@ -77,12 +85,20 @@ function generateUniqueTabTitle(bookmarkName: string, baseTitle: string): string
 
   // 找出已使用的后缀索引
   const usedIndexes = new Set<number>();
+  const usedNumericSuffixes = new Set<number>();
   for (const t of sameBaseTabs) {
-    const match = t.title.match(/ – (\w+)$/);
+    const match = t.title.match(TAB_TITLE_SUFFIX_PATTERN);
     if (match) {
-      const idx = NATO_ALPHABET.indexOf(match[1].toLowerCase());
+      const suffix = match[2].toLowerCase();
+      const idx = NATO_ALPHABET.indexOf(suffix);
       if (idx >= 0) {
         usedIndexes.add(idx);
+        continue;
+      }
+
+      const numericSuffix = Number.parseInt(suffix, 10);
+      if (Number.isFinite(numericSuffix)) {
+        usedNumericSuffixes.add(numericSuffix);
       }
     }
   }
@@ -94,8 +110,35 @@ function generateUniqueTabTitle(bookmarkName: string, baseTitle: string): string
     }
   }
 
-  // 如果26个字母用完了，回退到数字
-  return `${displayName} – ${sameBaseTabs.length + 1}`;
+  // 如果26个字母用完了，回退到数字后缀
+  let nextNumericSuffix = 1;
+  while (usedNumericSuffixes.has(nextNumericSuffix)) {
+    nextNumericSuffix += 1;
+  }
+
+  return `${displayName} – ${nextNumericSuffix}`;
+}
+
+function buildBaseTabTitle(session: SessionConfig): string {
+  if (session.protocol === "serial") {
+    return `${session.serialConfig.portName} @ ${session.serialConfig.baudRate}`;
+  }
+  if (session.protocol === "telnet") {
+    return `telnet://${session.telnetConfig.host}:${session.telnetConfig.port}`;
+  }
+  if (session.protocol === "ssh") {
+    return `${session.sshConfig.user}@${session.sshConfig.host}`;
+  }
+  return "Local Shell";
+}
+
+function createSessionTab(tabId: string, session: SessionConfig, bookmarkName?: string, logPath?: string): Tab {
+  return {
+    id: tabId,
+    title: generateUniqueTabTitle(bookmarkName, buildBaseTabTitle(session)),
+    session,
+    logPath,
+  };
 }
 
 function formatSerialFrame(serialConfig: SerialConfig) {
@@ -121,11 +164,15 @@ const openMenuId = ref<AppMenuId | null>(null);
 const openFileSubmenuId = ref<FileSubmenuId | null>(null);
 const draggedTabId = ref<string | null>(null);
 const dragPreviewTabId = ref<string | null>(null);
+const renamingTabId = ref<string | null>(null);
+const renamingTabTitle = ref("");
+const tabContextMenu = ref<TabContextMenuState | null>(null);
 const suppressTabClick = ref(false);
 let pendingTabDrag: { tabId: string; startX: number; startY: number } | null = null;
 let tabDragMoved = false;
 const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
 const menuBarRef = ref<HTMLDivElement | null>(null);
+const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const isFullscreen = ref(false);
 const termRefs = new Map<string, TerminalHandle>();
 const cleanupFns: Array<() => void> = [];
@@ -133,6 +180,7 @@ const cleanupFns: Array<() => void> = [];
 function closeOpenMenus() {
   openMenuId.value = null;
   openFileSubmenuId.value = null;
+  tabContextMenu.value = null;
 }
 
 watch(settings, (value) => {
@@ -162,6 +210,37 @@ watch(openMenuId, (menuId, _previous, onCleanup) => {
   const handleKeyDown = (event: KeyboardEvent) => {
     if (event.key === "Escape") {
       openMenuId.value = null;
+    }
+  };
+
+  document.addEventListener("pointerdown", handlePointerDown);
+  window.addEventListener("keydown", handleKeyDown);
+
+  onCleanup(() => {
+    document.removeEventListener("pointerdown", handlePointerDown);
+    window.removeEventListener("keydown", handleKeyDown);
+  });
+});
+
+watch(tabContextMenu, (value, _previous, onCleanup) => {
+  if (!value) {
+    return;
+  }
+
+  const handlePointerDown = (event: PointerEvent) => {
+    const target = event.target;
+    if (!(target instanceof Node)) {
+      return;
+    }
+    if (tabContextMenuRef.value?.contains(target)) {
+      return;
+    }
+    tabContextMenu.value = null;
+  };
+
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      tabContextMenu.value = null;
     }
   };
 
@@ -430,6 +509,81 @@ function handleTabClick(tabId: string) {
     return;
   }
   selectTab(tabId);
+}
+
+function startTabRename(tabId: string) {
+  const tab = tabs.value.find((item) => item.id === tabId);
+  if (!tab) {
+    return;
+  }
+
+  tabContextMenu.value = null;
+  renamingTabId.value = tabId;
+  renamingTabTitle.value = tab.title;
+  activeTabId.value = tabId;
+
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>(`.tab-item[data-tab-id="${tabId}"] .tab-title-input`);
+    input?.focus();
+    input?.select();
+  });
+}
+
+function cancelTabRename() {
+  renamingTabId.value = null;
+  renamingTabTitle.value = "";
+}
+
+function commitTabRename() {
+  if (!renamingTabId.value) {
+    return;
+  }
+
+  const nextTitle = renamingTabTitle.value.trim();
+  if (nextTitle) {
+    tabs.value = tabs.value.map((tab) => (
+      tab.id === renamingTabId.value ? { ...tab, title: nextTitle } : tab
+    ));
+  }
+
+  cancelTabRename();
+}
+
+function handleTabRenameKeyDown(event: KeyboardEvent) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    commitTabRename();
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    cancelTabRename();
+  }
+}
+
+function handleTabContextMenu(event: MouseEvent, tabId: string) {
+  const target = event.target;
+  if (target instanceof Element && target.closest(".tab-close-btn")) {
+    return;
+  }
+
+  event.preventDefault();
+  activeTabId.value = tabId;
+  tabContextMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    tabId,
+  };
+}
+
+function handleRenameTabFromContextMenu() {
+  const tabId = tabContextMenu.value?.tabId;
+  if (!tabId) {
+    return;
+  }
+
+  startTabRename(tabId);
 }
 
 function moveTabToIndex(tabId: string, targetIndex: number) {
@@ -747,6 +901,14 @@ function handleCloseTab(id: string) {
   const previousTabs = tabs.value;
   const nextTabs = previousTabs.filter((tab) => tab.id !== id);
 
+  if (tabContextMenu.value?.tabId === id) {
+    tabContextMenu.value = null;
+  }
+
+  if (renamingTabId.value === id) {
+    cancelTabRename();
+  }
+
   if (activeTabId.value === id) {
     const index = previousTabs.findIndex((tab) => tab.id === id);
     activeTabId.value = nextTabs.length > 0 ? nextTabs[Math.max(0, index - 1)].id : "";
@@ -764,38 +926,22 @@ function handleCloseTab(id: string) {
 async function handleConnectResult(result: ConnectResult) {
   const newId = `tab-${nextTabId++}`;
   const { protocol, sshConfig, telnetConfig, serialConfig, saveAs, saveGroup } = result;
+  let tab: Tab | null = null;
 
   if (protocol === "ssh" && sshConfig) {
-    tabs.value = [
-      ...tabs.value,
-      {
-        id: newId,
-        title: `${sshConfig.user}@${sshConfig.host}`,
-        session: { protocol: "ssh", sshConfig },
-        logPath: result.logPath,
-      },
-    ];
+    tab = createSessionTab(newId, { protocol: "ssh", sshConfig }, saveAs, result.logPath);
   } else if (protocol === "telnet" && telnetConfig) {
-    tabs.value = [
-      ...tabs.value,
-      {
-        id: newId,
-        title: `telnet://${telnetConfig.host}:${telnetConfig.port}`,
-        session: { protocol: "telnet", telnetConfig },
-        logPath: result.logPath,
-      },
-    ];
+    tab = createSessionTab(newId, { protocol: "telnet", telnetConfig }, saveAs, result.logPath);
   } else if (protocol === "serial" && serialConfig) {
-    tabs.value = [
-      ...tabs.value,
-      {
-        id: newId,
-        title: `${serialConfig.portName} @ ${serialConfig.baudRate}`,
-        session: { protocol: "serial", serialConfig },
-        logPath: result.logPath,
-      },
-    ];
+    tab = createSessionTab(newId, { protocol: "serial", serialConfig }, saveAs, result.logPath);
   }
+
+  if (!tab) {
+    showConnectDialog.value = false;
+    return;
+  }
+
+  tabs.value = [...tabs.value, tab];
 
   if (protocol === "serial" && serialConfig) {
     rememberSerialConfig(serialConfig);
@@ -847,11 +993,8 @@ function handleBookmarkConnect(connection: SavedConnection) {
   const newId = `tab-${nextTabId++}`;
   const protocol = connection.protocol ?? "ssh";
 
-  // 计算基础标题（协议默认格式）
-  let baseTitle: string;
   let tab: Tab;
   if (protocol === "serial" && connection.portName && connection.baudRate) {
-    baseTitle = `${connection.portName} @ ${connection.baudRate}`;
     const serialConfig: SerialConfig = {
       portName: connection.portName,
       baudRate: connection.baudRate,
@@ -861,50 +1004,30 @@ function handleBookmarkConnect(connection: SavedConnection) {
       flowControl: connection.flowControl ?? "none",
     };
     rememberSerialConfig(serialConfig);
-    tab = {
-      id: newId,
-      title: "", // 稍后设置
-      session: { protocol: "serial", serialConfig },
-      logPath: connection.logPath,
-    };
+    tab = createSessionTab(newId, { protocol: "serial", serialConfig }, connection.name, connection.logPath);
   } else if (protocol === "telnet") {
-    baseTitle = `telnet://${connection.host}:${connection.port}`;
-    tab = {
-      id: newId,
-      title: "", // 稍后设置
-      session: {
-        protocol: "telnet",
-        telnetConfig: {
-          host: connection.host,
-          port: connection.port,
-        },
+    tab = createSessionTab(newId, {
+      protocol: "telnet",
+      telnetConfig: {
+        host: connection.host,
+        port: connection.port,
       },
-      logPath: connection.logPath,
-    };
+    }, connection.name, connection.logPath);
   } else {
-    baseTitle = `${connection.user}@${connection.host}`;
     const reconnectType = normalizeReconnectType(connection);
-    tab = {
-      id: newId,
-      title: "", // 稍后设置
-      session: {
-        protocol: "ssh",
-        sshConfig: {
-          host: connection.host,
-          port: connection.port,
-          user: connection.user,
-          password: connection.password,
-          privateKey: connection.authType === "key" ? connection.privateKey : undefined,
-          autoReconnect: isReconnectEnabled(reconnectType),
-          reconnectType,
-        },
+    tab = createSessionTab(newId, {
+      protocol: "ssh",
+      sshConfig: {
+        host: connection.host,
+        port: connection.port,
+        user: connection.user,
+        password: connection.password,
+        privateKey: connection.authType === "key" ? connection.privateKey : undefined,
+        autoReconnect: isReconnectEnabled(reconnectType),
+        reconnectType,
       },
-      logPath: connection.logPath,
-    };
+    }, connection.name, connection.logPath);
   }
-
-  // 使用书签名 + NATO字母后缀生成唯一标题
-  tab.title = generateUniqueTabTitle(connection.name, baseTitle);
 
   if (tab.session.protocol === "serial") {
     updateSerialConnectionState(newId, "connecting");
@@ -1121,14 +1244,27 @@ function handleBookmarkConnect(connection: SavedConnection) {
           :key="tab.id"
           class="tab-item"
           :data-tab-id="tab.id"
+          :title="renamingTabId === tab.id ? undefined : `${tab.title}\nRight-click to rename`"
           :class="{ active: activeTabId === tab.id, dragging: draggedTabId === tab.id }"
           @pointerdown="handleTabPointerDown($event, tab.id)"
           @pointermove="handleTabPointerMove($event, tab.id)"
           @pointerup="handleTabPointerUp($event, tab.id)"
           @pointercancel="handleTabPointerCancel(tab.id)"
           @click="handleTabClick(tab.id)"
+          @contextmenu.prevent.stop="handleTabContextMenu($event, tab.id)"
         >
-          <span class="tab-title">{{ tab.title }}</span>
+          <input
+            v-if="renamingTabId === tab.id"
+            v-model="renamingTabTitle"
+            class="tab-title-input"
+            type="text"
+            maxlength="120"
+            @blur="commitTabRename"
+            @click.stop
+            @keydown="handleTabRenameKeyDown"
+            @pointerdown.stop
+          >
+          <span v-else class="tab-title">{{ tab.title }}</span>
           <button class="tab-close-btn" title="Close Tab" @click.stop="handleCloseTab(tab.id)">×</button>
         </div>
 
@@ -1149,6 +1285,15 @@ function handleBookmarkConnect(connection: SavedConnection) {
         </button>
         <button class="tab-new-btn tab-settings-btn" type="button" title="Settings" @mousedown.stop @click.stop="handleOpenSettings">&#x2699;</button>
       </div>
+    </div>
+
+    <div
+      v-if="tabContextMenu"
+      ref="tabContextMenuRef"
+      class="tab-context-menu"
+      :style="{ top: `${tabContextMenu.y}px`, left: `${tabContextMenu.x}px` }"
+    >
+      <button class="tab-context-item" type="button" @click="handleRenameTabFromContextMenu">Rename Tab</button>
     </div>
 
     <div class="workspace">

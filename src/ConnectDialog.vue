@@ -269,6 +269,7 @@ function handleSubmit(event: Event) {
   }
 
   const sshSecret = password.value !== "" ? password.value : undefined;
+  const customConnectionName = connectionName.value.trim();
 
   const serialConfig: SerialConfig | undefined = isSerial.value ? {
     portName: serialPortName.value.trim(),
@@ -292,7 +293,7 @@ function handleSubmit(event: Event) {
     } : undefined,
     telnetConfig: isTelnet.value ? { host: host.value, port: parseInt(telnetPort.value, 10) || 23 } : undefined,
     serialConfig,
-    saveAs: saveConnection.value ? (connectionName.value.trim() || defaultName.value) : undefined,
+    saveAs: saveConnection.value ? (customConnectionName || defaultName.value) : undefined,
     saveGroup: saveConnection.value && connectionGroup.value.trim() ? connectionGroup.value.trim() : undefined,
     logPath: enableLog.value ? (logFilePath.value.trim() || defaultLogPath.value) : undefined,
   });
