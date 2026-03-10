@@ -39,7 +39,7 @@ export interface AppSettings {
   windowBounds: WindowBounds | null;
   /** Default directory for session logs */
   logSavePath: string;
-  /** Default log filename template, e.g. "{timestamp}_{session}" */
+  /** Default log filename template, e.g. "{session}_{timestamp}" */
   logFileNameTemplate: string;
   theme: TerminalTheme;
 
@@ -81,7 +81,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shellPath: null,
   windowBounds: null,
   logSavePath: "~/AuraTerm/logs",
-  logFileNameTemplate: "{timestamp}_{session}",
+  logFileNameTemplate: "{session}_{timestamp}",
   theme: DEFAULT_THEME,
 
   ctrlCCopy: true,

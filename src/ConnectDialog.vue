@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings, type SerialHistoryItem } from "./settings";
+import { buildDefaultLogPath } from "./logging";
 import { isReconnectEnabled, type ConnectResult, type ConnectionProtocol, type ReconnectType, type SerialConfig } from "./types";
 import "./ConnectDialog.css";
 
@@ -178,57 +179,16 @@ const defaultName = computed(() => {
   return serialPortName.value ? `serial://${serialPortName.value}@${serialBaudRate.value}` : "";
 });
 
-const safeDefaultName = computed(() => defaultName.value.replace(/[^a-zA-Z0-9\-_@.]/g, "_") || "session");
-
-function sanitizeFileSegment(value: string) {
-  return value.replace(/[^a-zA-Z0-9\-_@.]/g, "_") || "session";
-}
-
-function sanitizeFileNameTemplateResult(value: string) {
-  return value.replace(/[^a-zA-Z0-9\-_@.{}]/g, "_") || "session";
-}
-
-function renderLogFileNameTemplate() {
-  const rawTemplate = (props.settings?.logFileNameTemplate ?? DEFAULT_SETTINGS.logFileNameTemplate).trim();
-  const template = rawTemplate || DEFAULT_SETTINGS.logFileNameTemplate;
-  const protocolText = protocol.value;
-  const hostText = host.value.trim() || "localhost";
-  const userText = user.value.trim() || "user";
-  const portText = isSsh.value
-    ? (String(parseInt(port.value, 10) || 22))
-    : isTelnet.value
-      ? (String(parseInt(telnetPort.value, 10) || 23))
-      : "";
-  const serialPortText = serialPortName.value.trim() || "serial";
-  const baudRateText = String(parseInt(serialBaudRate.value, 10) || 9600);
-
-  const tokens: Record<string, string> = {
-    session: safeDefaultName.value,
-    protocol: sanitizeFileSegment(protocolText),
-    host: sanitizeFileSegment(hostText),
-    user: sanitizeFileSegment(userText),
-    port: sanitizeFileSegment(portText),
-    serialPort: sanitizeFileSegment(serialPortText),
-    baudRate: sanitizeFileSegment(baudRateText),
-  };
-
-  const rendered = template.replace(/\{(session|protocol|host|user|port|serialPort|baudRate)\}/g, (_match, token: string) => {
-    return tokens[token] ?? "";
-  });
-
-  return sanitizeFileNameTemplateResult(rendered);
-}
-
-function joinLogPath(directory: string, fileName: string) {
-  const normalizedDirectory = directory.trim().replace(/[\\/]+$/, "") || DEFAULT_SETTINGS.logSavePath;
-  const separator = normalizedDirectory.includes("\\") ? "\\" : "/";
-  return `${normalizedDirectory}${separator}${fileName}.log`;
-}
-
 const defaultLogPath = computed(() => {
-  const logDir = (props.settings?.logSavePath ?? DEFAULT_SETTINGS.logSavePath).trim() || DEFAULT_SETTINGS.logSavePath;
-  const fileName = renderLogFileNameTemplate();
-  return joinLogPath(logDir, fileName);
+  return buildDefaultLogPath(props.settings, {
+    protocol: protocol.value,
+    host: host.value,
+    user: user.value,
+    port: isSsh.value ? (parseInt(port.value, 10) || 22) : isTelnet.value ? (parseInt(telnetPort.value, 10) || 23) : undefined,
+    serialPort: serialPortName.value,
+    baudRate: parseInt(serialBaudRate.value, 10) || 9600,
+    session: defaultName.value,
+  });
 });
 
 const canConnect = computed(() => {

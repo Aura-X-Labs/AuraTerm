@@ -763,6 +763,7 @@ async function handleConnectResult(result: ConnectResult) {
     id: crypto.randomUUID(),
     name: saveAs,
     group: saveGroup,
+    logPath: result.logPath,
     protocol,
     host: protocol === "ssh" ? sshConfig!.host : protocol === "telnet" ? telnetConfig!.host : "",
     port: protocol === "ssh" ? sshConfig!.port : protocol === "telnet" ? telnetConfig!.port : 0,
@@ -809,6 +810,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
       id: newId,
       title: `${connection.portName} @ ${connection.baudRate}`,
       session: { protocol: "serial", serialConfig },
+      logPath: connection.logPath,
     };
   } else if (protocol === "telnet") {
     tab = {
@@ -821,6 +823,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
           port: connection.port,
         },
       },
+      logPath: connection.logPath,
     };
   } else {
     const reconnectType = normalizeReconnectType(connection);
@@ -839,6 +842,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
           reconnectType,
         },
       },
+      logPath: connection.logPath,
     };
   }
 
@@ -1088,7 +1092,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
     </div>
 
     <div class="workspace">
-      <BookmarkSidebar v-if="sidebarOpen" :refresh-token="sidebarRefreshToken" @connect="handleBookmarkConnect" />
+      <BookmarkSidebar v-if="sidebarOpen" :refresh-token="sidebarRefreshToken" :settings="settings" @connect="handleBookmarkConnect" />
 
       <div class="terminal-wrapper">
         <div class="terminal-container">

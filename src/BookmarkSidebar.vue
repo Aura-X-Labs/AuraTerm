@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { buildConnectionLogContext, buildDefaultLogPath, normalizeOptionalLogPath } from "./logging";
+import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection } from "./types";
 
 interface ContextMenu {
@@ -9,9 +11,12 @@ interface ContextMenu {
   connection: SavedConnection;
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   refreshToken?: number;
-}>();
+  settings?: AppSettings;
+}>(), {
+  settings: () => DEFAULT_SETTINGS,
+});
 
 const emit = defineEmits<{
   connect: [connection: SavedConnection];
@@ -195,6 +200,28 @@ function updateDraft<K extends keyof SavedConnection>(key: K, value: SavedConnec
   editDraft.value = { ...editDraft.value, [key]: value };
 }
 
+function updateLogEnabled(enabled: boolean) {
+  if (!editDraft.value) {
+    return;
+  }
+
+  editDraft.value = {
+    ...editDraft.value,
+    logPath: enabled ? (editDraft.value.logPath ?? "") : undefined,
+  };
+}
+
+function handleLogEnabledChange(event: Event) {
+  updateLogEnabled((event.target as HTMLInputElement).checked);
+}
+
+const editDraftDefaultLogPath = computed(() => {
+  if (!editDraft.value) {
+    return "";
+  }
+  return buildDefaultLogPath(props.settings, buildConnectionLogContext(editDraft.value));
+});
+
 async function saveDraft() {
   if (!editDraft.value || !editingConnection.value) {
     return;
@@ -226,6 +253,7 @@ async function saveDraft() {
     ...editDraft.value,
     name: editDraft.value.name.trim(),
     group: editDraft.value.group?.trim() || undefined,
+    logPath: normalizeOptionalLogPath(editDraft.value.logPath, editDraftDefaultLogPath.value),
     host: protocol === "serial" ? "" : editDraft.value.host.trim(),
     port: protocol === "serial" ? 0 : editDraft.value.port,
     user: protocol === "ssh" ? editDraft.value.user.trim() : "",
@@ -440,6 +468,27 @@ async function saveDraft() {
               </div>
             </template>
           </template>
+
+          <div class="form-group">
+            <label>
+              <input
+                type="checkbox"
+                :checked="editDraft.logPath !== undefined"
+                @change="handleLogEnabledChange"
+              >
+              Save Session Log
+            </label>
+            <input
+              v-if="editDraft.logPath !== undefined"
+              type="text"
+              :value="editDraft.logPath"
+              :placeholder="editDraftDefaultLogPath"
+              @input="updateDraft('logPath', inputValue($event))"
+            >
+            <div v-if="editDraft.logPath !== undefined" class="form-hint">
+              Leave blank to use the default log path template.
+            </div>
+          </div>
 
           <div v-if="editError" class="bookmark-editor-error">{{ editError }}</div>
         </div>

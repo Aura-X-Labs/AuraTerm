@@ -19,8 +19,6 @@ const SSH_TRANSFER_PROGRESS_EVENT: &str = "ssh-transfer-progress";
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
 const TRANSFER_PROGRESS_EMIT_STEP: u64 = 256 * 1024;
 const AURATERM_RECONNECT_SESSION_PREFIX: &str = "at-";
-const INTERACTIVE_WRITE_TIMEOUT_SECS: u64 = 10;
-
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SshTransferMode {
@@ -103,6 +101,11 @@ pub struct PtyExitPayload {
     pub message: String,
 }
 
+enum InteractiveWriteOutcome {
+    Sent,
+    Dropped(String),
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconnectSessionPromptPayload {
@@ -147,6 +150,7 @@ struct ReconnectConfig {
     checked_existing_sessions: bool,
     cols: u32,
     rows: u32,
+    last_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -1037,8 +1041,12 @@ pub async fn write_ssh_pty_input(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let mut connections = state.connections.lock().await;
-    if let Some(tx) = connections.get_mut(&id) {
+    let tx = {
+        let connections = state.connections.lock().await;
+        connections.get(&id).cloned()
+    };
+
+    if let Some(tx) = tx {
         if tx.send(data).await.is_err() {
             let message = "SSH connection lost; input was not sent".to_string();
             let _ = app.emit(
@@ -1128,7 +1136,14 @@ async fn authenticate_ssh(
     auth_response_rx: &mut mpsc::Receiver<String>,
 ) -> Result<SharedSshHandle, String> {
     let handler = ClientHandler {};
-    let config = Arc::new(client::Config { ..Default::default() });
+    let config = Arc::new(client::Config {
+        // Send a keepalive every 15 s; disconnect only after 8 consecutive
+        // missing replies (= 120 s). This more frequent probing helps detect
+        // TCP silent drops by NAT/Firewall faster while maintaining tolerance.
+        keepalive_interval: Some(std::time::Duration::from_secs(15)),
+        keepalive_max: 8,
+        ..Default::default()
+    });
 
     let mut session = client::connect(config, addr, handler)
         .await
@@ -1471,6 +1486,7 @@ pub async fn start_ssh_pty(
             checked_existing_sessions: false,
             cols,
             rows,
+            last_error: None,
         });
 
         // Create a cancellation notifier and register it.
@@ -1543,12 +1559,28 @@ async fn run_reconnect_loop(
         }
 
         if !first_attempt {
+            // Get the last error if available
+            let last_error = {
+                let mut configs = state.reconnect_configs.lock().await;
+                if let Some(cfg) = configs.get_mut(&id) {
+                    cfg.last_error.take()
+                } else {
+                    None
+                }
+            };
+
+            let notice = if let Some(err) = last_error {
+                format!("\r\n\x1b[31m[Disconnected: {err}]\x1b[0m\r\n\x1b[33m[Reconnecting in 5 s...]\x1b[0m\r\n")
+            } else {
+                "\r\n\x1b[33m[Disconnected; reconnecting in 5 s...]\x1b[0m\r\n".to_string()
+            };
+
             // Emit a notice to the terminal.
             let _ = app.emit(
                 "pty-output",
                 TerminalDataPayload {
                     id: id.clone(),
-                    data: "\r\n\x1b[33m[Disconnected; reconnecting in 5 s...]\x1b[0m\r\n".to_string(),
+                    data: notice,
                 },
             );
 
@@ -1725,12 +1757,16 @@ async fn do_single_ssh_connect(
         set_reconnect_session_metadata(state, id, Some(selected_session_name.clone()), None).await;
     }
 
-    let (input_tx, input_rx) = mpsc::channel::<String>(32);
+    let (input_tx, input_rx) = mpsc::channel::<String>(512);
     let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
     state.connections.lock().await.insert(id.to_string(), input_tx);
     state.resize_channels.lock().await.insert(id.to_string(), resize_tx);
-    state.handles.lock().await.insert(id.to_string(), session_handle);
+    state
+        .handles
+        .lock()
+        .await
+        .insert(id.to_string(), session_handle.clone());
 
     let _ = app.emit(
         "ssh-connected",
@@ -1763,9 +1799,19 @@ async fn do_single_ssh_connect(
     let connection_id = id.to_string();
     let app_handle = app.clone();
     let state_clone = state.clone();
+    let session_handle_for_io = session_handle.clone();
 
     tokio::spawn(async move {
-        run_channel_io_loop(app_handle, state_clone, connection_id, channel, input_rx, resize_rx).await;
+        run_channel_io_loop(
+            app_handle,
+            state_clone,
+            connection_id,
+            session_handle_for_io,
+            channel,
+            input_rx,
+            resize_rx,
+        )
+        .await;
     });
 
     Ok(auth_response_rx)
@@ -1776,17 +1822,19 @@ async fn run_channel_io_loop(
     app: AppHandle,
     state: SshState,
     id: String,
+    handle: SharedSshHandle,
     mut channel: russh::Channel<client::Msg>,
     mut input_rx: mpsc::Receiver<String>,
     mut resize_rx: mpsc::Receiver<(u32, u32)>,
 ) {
-    let mut exit_message = None;
+    let mut last_write_error_notice_at: Option<std::time::Instant> = None;
+    let final_exit_message;
 
     loop {
         tokio::select! {
-            Some(msg) = channel.wait() => {
+            msg = channel.wait() => {
                 match msg {
-                    ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. } => {
+                    Some(ChannelMsg::Data { ref data }) | Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                         let _ = app.emit(
                             "pty-output",
                             TerminalDataPayload {
@@ -1795,7 +1843,12 @@ async fn run_channel_io_loop(
                             },
                         );
                     }
-                    ChannelMsg::Eof | ChannelMsg::Close => {
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => {
+                        final_exit_message = Some("SSH connection closed by remote".to_string());
+                        break;
+                    }
+                    None => {
+                        final_exit_message = Some("SSH channel closed (None)".to_string());
                         break;
                     }
                     _ => {}
@@ -1803,37 +1856,22 @@ async fn run_channel_io_loop(
             }
             Some(input) = input_rx.recv() => {
                 let input_bytes = input.into_bytes();
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_secs(INTERACTIVE_WRITE_TIMEOUT_SECS),
-                    channel.data(input_bytes.as_slice()),
-                ).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        let message = format!("SSH write failed: {error}");
-                        let _ = app.emit(
-                            "pty-output",
-                            TerminalDataPayload {
-                                id: id.clone(),
-                                data: format!("\r\n\x1b[31m[{message}]\x1b[0m\r\n"),
-                            },
-                        );
-                        exit_message = Some(message);
-                        break;
-                    }
-                    Err(_) => {
-                        let message = format!(
-                            "SSH write timed out after {} seconds; connection lost",
-                            INTERACTIVE_WRITE_TIMEOUT_SECS
-                        );
-                        let _ = app.emit(
-                            "pty-output",
-                            TerminalDataPayload {
-                                id: id.clone(),
-                                data: format!("\r\n\x1b[31m[{message}]\x1b[0m\r\n"),
-                            },
-                        );
-                        exit_message = Some(message);
-                        break;
+                match write_interactive_input(&mut channel, &handle, input_bytes.as_slice()).await {
+                    InteractiveWriteOutcome::Sent => {}
+                    InteractiveWriteOutcome::Dropped(message) => {
+                        let should_emit = last_write_error_notice_at
+                            .map(|t| t.elapsed() >= std::time::Duration::from_secs(2))
+                            .unwrap_or(true);
+                        if should_emit {
+                            last_write_error_notice_at = Some(std::time::Instant::now());
+                            let _ = app.emit(
+                                "pty-output",
+                                TerminalDataPayload {
+                                    id: id.clone(),
+                                    data: format!("\r\n\x1b[33m[{message}]\x1b[0m\r\n"),
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -1845,7 +1883,10 @@ async fn run_channel_io_loop(
                     cfg.rows = r;
                 }
             }
-            else => break,
+            else => {
+                final_exit_message = Some("Interactive IO loop ended unexpectedly".to_string());
+                break;
+            }
         }
     }
 
@@ -1853,6 +1894,14 @@ async fn run_channel_io_loop(
     state.connections.lock().await.remove(&id);
     state.resize_channels.lock().await.remove(&id);
     state.handles.lock().await.remove(&id);
+
+    // If auto-reconnect is enabled, store the exit message so it can be shown.
+    if let Some(ref msg) = final_exit_message {
+        if let Some(cfg) = state.reconnect_configs.lock().await.get_mut(&id) {
+             cfg.last_error = Some(msg.clone());
+        }
+    }
+
     // Do NOT emit pty-exit here when auto-reconnect is enabled; the reconnect loop handles messaging.
     let has_reconnect = state.reconnect_flags.lock().await.contains_key(&id);
     if !has_reconnect {
@@ -1860,8 +1909,37 @@ async fn run_channel_io_loop(
             "pty-exit",
             PtyExitPayload {
                 id: id.clone(),
-                message: exit_message.unwrap_or_else(|| "SSH connection closed".to_string()),
+                message: final_exit_message.unwrap_or_else(|| "SSH connection closed".to_string()),
             },
         );
+    }
+}
+
+/// Try to write interactive input to the SSH channel.
+///
+/// **Important**: We intentionally do NOT cancel / abort `channel.data()` via a
+/// short timeout.  In russh the channel internally manages an SSH window; when
+/// the window is full (fast typing / slow consumer) the write future blocks
+/// until the server sends a window-adjust.  Cancelling the future mid-flight
+/// corrupts the channel and produces "channel closed" errors on subsequent
+/// writes — which is exactly the bug the user reported.
+///
+/// Any write error here is treated as non-fatal for session lifetime.
+/// We keep the read loop alive and wait for explicit `Eof`/`Close` from the
+/// remote side before exiting, which avoids false session exits.
+async fn write_interactive_input(
+    channel: &mut russh::Channel<client::Msg>,
+    _handle: &SharedSshHandle,
+    input_bytes: &[u8],
+) -> InteractiveWriteOutcome {
+    match channel.data(input_bytes).await {
+        // Write succeeded — everything is fine.
+        Ok(()) => InteractiveWriteOutcome::Sent,
+
+        // Do not terminate the whole session on a single write failure.
+        // If the session is really gone, channel.wait() will soon emit Close/Eof.
+        Err(error) => InteractiveWriteOutcome::Dropped(format!(
+            "SSH write failed: {error}; input dropped"
+        )),
     }
 }

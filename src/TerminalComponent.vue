@@ -179,6 +179,39 @@ let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let terminalCleanup: (() => void) | null = null;
 let stopSessionWatch: (() => void) | null = null;
+let pendingInputBuffer = "";
+let pendingInputTimer: number | null = null;
+
+function clearPendingInputFlush() {
+  if (pendingInputTimer !== null) {
+    window.clearTimeout(pendingInputTimer);
+    pendingInputTimer = null;
+  }
+}
+
+function flushPendingInput() {
+  clearPendingInputFlush();
+  if (!pendingInputBuffer || !ptyId.value) {
+    pendingInputBuffer = "";
+    return;
+  }
+  const payload = pendingInputBuffer;
+  pendingInputBuffer = "";
+  void writeSessionInput(ptyId.value, payload, activeSessionRef.value).catch((error) => {
+    console.error("input failed", error);
+  });
+}
+
+function queueTerminalInput(data: string) {
+  pendingInputBuffer += data;
+  if (pendingInputTimer !== null) {
+    return;
+  }
+  // Micro-batch keystrokes to reduce IPC pressure and backend queue jitter.
+  pendingInputTimer = window.setTimeout(() => {
+    flushPendingInput();
+  }, 10);
+}
 
 watch(effectiveSettings, (value) => {
   settingsRef.value = value;
@@ -249,11 +282,8 @@ function sendData(text: string) {
   if (!ptyId.value) {
     return;
   }
-  const id = ptyId.value;
   const data = text.endsWith("\n") ? text : `${text}\n`;
-  void writeSessionInput(id, data, activeSessionRef.value).catch((error) => {
-    console.error("sendData failed", error);
-  });
+  queueTerminalInput(data);
 }
 
 function fit() {
@@ -440,9 +470,7 @@ onMounted(() => {
       && ["macos", "linux"].includes(osType.value)
       && data === "\x08";
     const normalizedData = shouldNormalizeBackspace ? "\x7f" : data;
-    void writeSessionInput(ptyId.value, normalizedData, activeSessionRef.value).catch((error) => {
-      console.error("input failed", error);
-    });
+    queueTerminalInput(normalizedData);
   });
 
   const resizeDisposable = terminal.onResize(({ cols, rows }) => {
@@ -469,6 +497,7 @@ onMounted(() => {
   window.addEventListener("resize", handleWindowResize);
 
   terminalCleanup = () => {
+    flushPendingInput();
     window.removeEventListener("resize", handleWindowResize);
     terminalElement.removeEventListener("mousedown", handleMiddleMouseDown);
     terminalElement.removeEventListener("auxclick", handleMiddleClick);
@@ -669,6 +698,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  flushPendingInput();
   stopSessionWatch?.();
   terminalCleanup?.();
 });

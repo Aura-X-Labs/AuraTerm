@@ -17,6 +17,8 @@ pub struct SavedConnection {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
     #[serde(default = "default_protocol")]
     pub protocol: String,
     #[serde(default)]

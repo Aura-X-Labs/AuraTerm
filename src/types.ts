@@ -93,6 +93,7 @@ export interface SavedConnection {
   id: string;
   name: string;
   group?: string;
+  logPath?: string;
   protocol?: ConnectionProtocol;
   host: string;
   port: number;
