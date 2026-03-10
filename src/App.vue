@@ -46,6 +46,58 @@ type FileSubmenuId = "new-session" | "preferences";
 
 let nextTabId = 1;
 
+// NATO 字母表，用于生成唯一的标签页后缀
+const NATO_ALPHABET = [
+  "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+  "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+  "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey",
+  "xray", "yankee", "zulu",
+];
+
+/**
+ * 生成唯一的标签页标题
+ * 格式：书签名 + NATO字母后缀（如有同名）
+ * 例如：生产服务器、生产服务器、生产服务器
+ */
+function generateUniqueTabTitle(bookmarkName: string, baseTitle: string): string {
+  // 优先使用书签名称（如果有自定义）
+  const useBookmarkName = bookmarkName && !bookmarkName.startsWith("New ");
+  const displayName = useBookmarkName ? bookmarkName : baseTitle;
+
+  // 找出所有同名标签页（不带后缀的）
+  const sameBaseTabs = tabs.value.filter(t => {
+    const tBase = t.title.split(" – ")[0];
+    return tBase === displayName;
+  });
+
+  // 如果没有同名，直接返回
+  if (sameBaseTabs.length === 0) {
+    return displayName;
+  }
+
+  // 找出已使用的后缀索引
+  const usedIndexes = new Set<number>();
+  for (const t of sameBaseTabs) {
+    const match = t.title.match(/ – (\w+)$/);
+    if (match) {
+      const idx = NATO_ALPHABET.indexOf(match[1].toLowerCase());
+      if (idx >= 0) {
+        usedIndexes.add(idx);
+      }
+    }
+  }
+
+  // 找到下一个可用的字母
+  for (let i = 0; i < NATO_ALPHABET.length; i++) {
+    if (!usedIndexes.has(i)) {
+      return `${displayName} – ${NATO_ALPHABET[i]}`;
+    }
+  }
+
+  // 如果26个字母用完了，回退到数字
+  return `${displayName} – ${sameBaseTabs.length + 1}`;
+}
+
 function formatSerialFrame(serialConfig: SerialConfig) {
   const parity = serialConfig.parity === "none" ? "N" : serialConfig.parity === "even" ? "E" : "O";
   return `${serialConfig.dataBits}${parity}${serialConfig.stopBits}`;
@@ -795,8 +847,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
   const newId = `tab-${nextTabId++}`;
   const protocol = connection.protocol ?? "ssh";
 
+  // 计算基础标题（协议默认格式）
+  let baseTitle: string;
   let tab: Tab;
   if (protocol === "serial" && connection.portName && connection.baudRate) {
+    baseTitle = `${connection.portName} @ ${connection.baudRate}`;
     const serialConfig: SerialConfig = {
       portName: connection.portName,
       baudRate: connection.baudRate,
@@ -808,14 +863,15 @@ function handleBookmarkConnect(connection: SavedConnection) {
     rememberSerialConfig(serialConfig);
     tab = {
       id: newId,
-      title: `${connection.portName} @ ${connection.baudRate}`,
+      title: "", // 稍后设置
       session: { protocol: "serial", serialConfig },
       logPath: connection.logPath,
     };
   } else if (protocol === "telnet") {
+    baseTitle = `telnet://${connection.host}:${connection.port}`;
     tab = {
       id: newId,
-      title: `telnet://${connection.host}:${connection.port}`,
+      title: "", // 稍后设置
       session: {
         protocol: "telnet",
         telnetConfig: {
@@ -826,10 +882,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
       logPath: connection.logPath,
     };
   } else {
+    baseTitle = `${connection.user}@${connection.host}`;
     const reconnectType = normalizeReconnectType(connection);
     tab = {
       id: newId,
-      title: `${connection.user}@${connection.host}`,
+      title: "", // 稍后设置
       session: {
         protocol: "ssh",
         sshConfig: {
@@ -845,6 +902,9 @@ function handleBookmarkConnect(connection: SavedConnection) {
       logPath: connection.logPath,
     };
   }
+
+  // 使用书签名 + NATO字母后缀生成唯一标题
+  tab.title = generateUniqueTabTitle(connection.name, baseTitle);
 
   if (tab.session.protocol === "serial") {
     updateSerialConnectionState(newId, "connecting");
