@@ -261,6 +261,7 @@ watch(() => props.isActive, (isActive) => {
   }
   setTimeout(() => {
     fitAddon?.fit();
+    terminal?.focus();
   }, 0);
 });
 
@@ -288,6 +289,10 @@ function sendData(text: string) {
 
 function fit() {
   fitAddon?.fit();
+}
+
+function focus() {
+  terminal?.focus();
 }
 
 function getSshReconnectType(sshConfig: SshConfig): ReconnectType {
@@ -345,6 +350,7 @@ defineExpose<TerminalHandle>({
   saveLog,
   sendData,
   fit,
+  focus,
 });
 
 onMounted(() => {
@@ -378,6 +384,9 @@ onMounted(() => {
   terminal.loadAddon(fitAddon);
   terminal.open(terminalRootRef.value);
   fitAddon.fit();
+  if (props.isActive) {
+    terminal.focus();
+  }
 
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (event.type !== "keydown") {

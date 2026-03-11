@@ -298,6 +298,11 @@ onMounted(async () => {
   try {
     cleanupFns.push(await listen("tauri://focus", () => {
       isWindowFocused.value = true;
+      // Focus the active terminal when the window regains focus
+      const handle = termRefs.get(activeTabId.value);
+      if (handle) {
+        handle.focus();
+      }
     }));
     cleanupFns.push(await listen("tauri://blur", () => {
       isWindowFocused.value = false;

@@ -127,4 +127,5 @@ export interface TerminalHandle {
   saveLog: (tabTitle: string) => Promise<string>;
   sendData: (text: string) => void;
   fit: () => void;
+  focus: () => void;
 }
