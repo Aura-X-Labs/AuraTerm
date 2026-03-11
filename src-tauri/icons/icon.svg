@@ -34,8 +34,8 @@
     <rect x="178" y="178" width="668" height="668" rx="135" fill="url(#shine)"/>
 
     <!-- prompt -->
-    <path d="M310 350 L404 410 L310 470" fill="none" stroke="#e9f6ff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
-    <line x1="440" y1="470" x2="565" y2="470" stroke="#e9f6ff" stroke-width="34" stroke-linecap="round" opacity="0.95"/>
+    <path d="M310 300 L404 360 L310 420" fill="none" stroke="#e9f6ff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+    <line x1="440" y1="420" x2="565" y2="420" stroke="#e9f6ff" stroke-width="34" stroke-linecap="round" opacity="0.95"/>
 
     <!-- 3-line left-aligned label block -->
     <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
@@ -43,9 +43,9 @@
        text-anchor="start"
        fill="#d5dde2"
        opacity="0.92">
-      <text x="300" y="620" font-size="76" letter-spacing="1.2">ssh</text>
-      <text x="300" y="705" font-size="76" letter-spacing="1.2">telnet</text>
-      <text x="300" y="790" font-size="76" letter-spacing="1.6">serial</text>
+      <text x="300" y="570" font-size="80" letter-spacing="1.5">ssh</text>
+      <text x="300" y="660" font-size="80" letter-spacing="1.5">telnet</text>
+      <text x="300" y="750" font-size="80" letter-spacing="1.5">serial</text>
     </g>
   </g>
 </svg>
