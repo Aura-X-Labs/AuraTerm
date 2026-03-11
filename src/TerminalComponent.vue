@@ -483,6 +483,9 @@ onMounted(() => {
   });
 
   const handleWindowResize = () => {
+    if (!props.isActive) {
+      return;
+    }
     fitAddon?.fit();
     if (!ptyId.value || !terminal) {
       return;
@@ -514,7 +517,26 @@ onMounted(() => {
     fitAddon = null;
   };
 
-  stopSessionWatch = watch(activeSession, (session, _previous, onCleanup) => {
+  const sessionKey = computed(() => {
+    const s = activeSession.value;
+    switch (s.protocol) {
+      case "local":
+        return `local:${s.cwd || ""}`;
+      case "ssh":
+        // Include password/key in key to restart if auth changes
+        return `ssh:${s.sshConfig.user}@${s.sshConfig.host}:${s.sshConfig.port}:${s.sshConfig.password || ""}:${s.sshConfig.privateKey || ""}`;
+      case "telnet":
+        return `telnet:${s.telnetConfig.host}:${s.telnetConfig.port}`;
+      case "serial":
+        return `serial:${s.serialConfig.portName}:${s.serialConfig.baudRate}:${s.serialConfig.dataBits}:${s.serialConfig.stopBits}:${s.serialConfig.parity}:${s.serialConfig.flowControl}`;
+      default:
+        return "unknown";
+    }
+  });
+
+  stopSessionWatch = watch(sessionKey, (newKey, oldKey, onCleanup) => {
+    console.log(`[Terminal] Session key changed: ${oldKey} -> ${newKey}`);
+    const session = activeSession.value;
     let disposed = false;
     let unlistenOutput: UnlistenFn | null = null;
     let unlistenExit: UnlistenFn | null = null;
@@ -524,6 +546,7 @@ onMounted(() => {
     let unlistenSerialConnected: UnlistenFn | null = null;
 
     const cleanup = () => {
+      console.log(`[Terminal] Cleaning up session: ${newKey}`);
       disposed = true;
       unlistenOutput?.();
       unlistenExit?.();
@@ -534,7 +557,9 @@ onMounted(() => {
       if (ptyId.value) {
         const id = ptyId.value;
         ptyId.value = null;
-        void closeSession(id, session).catch(() => {});
+        void closeSession(id, session).catch((err) => {
+          console.error(`[Terminal] Failed to close session ${id}:`, err);
+        });
       }
     };
 
@@ -542,9 +567,11 @@ onMounted(() => {
 
     const connect = async () => {
       if (!terminal) {
+        console.warn("[Terminal] Cannot connect: terminal not initialized");
         return;
       }
 
+      console.log(`[Terminal] Starting new session: ${newKey}`);
       logBuffer.value = "";
       if (logPathRef.value) {
         const trimmedPath = logPathRef.value.trim();

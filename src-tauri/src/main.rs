@@ -616,6 +616,13 @@ fn main() {
                 let about_item = MenuItem::with_id(_app, "about", "About AuraTerm", true, None::<&str>)?;
                 let fullscreen_item = PredefinedMenuItem::fullscreen(_app, None)?;
 
+                let undo_item = PredefinedMenuItem::undo(_app, None)?;
+                let redo_item = PredefinedMenuItem::redo(_app, None)?;
+                let cut_item = PredefinedMenuItem::cut(_app, None)?;
+                let copy_item = PredefinedMenuItem::copy(_app, None)?;
+                let paste_item = PredefinedMenuItem::paste(_app, None)?;
+                let select_all_item = PredefinedMenuItem::select_all(_app, None)?;
+
                 let new_session_menu = SubmenuBuilder::new(_app, "New Session")
                     .item(&new_local_item)
                     .item(&new_ssh_item)
@@ -635,6 +642,15 @@ fn main() {
                     .separator()
                     .item(&exit_item)
                     .build()?;
+                let edit_menu = SubmenuBuilder::new(_app, "Edit")
+                    .item(&undo_item)
+                    .item(&redo_item)
+                    .separator()
+                    .item(&cut_item)
+                    .item(&copy_item)
+                    .item(&paste_item)
+                    .item(&select_all_item)
+                    .build()?;
                 let view_menu = SubmenuBuilder::new(_app, "View")
                     .item(&toggle_bookmarks_item)
                     .item(&toggle_remote_files_item)
@@ -650,6 +666,7 @@ fn main() {
                     .build()?;
                 let menu = MenuBuilder::new(_app)
                     .item(&file_menu)
+                    .item(&edit_menu)
                     .item(&view_menu)
                     .item(&help_menu)
                     .build()?;
