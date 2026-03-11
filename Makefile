@@ -4,14 +4,14 @@ all: help
 
 ifeq ($(OS),Windows_NT)
 BUNDLE = nsis
-# For Windows, we use powershell to time the commands. Use $$ to escape $ for Make.
-TIME_PREFIX = powershell -ExecutionPolicy Bypass -Command "$$s=Get-Date;
-TIME_SUFFIX = ; $$e=Get-Date; Write-Host \"`nExecution time: $$($$e-$$s)\""
+# For Windows, we use powershell to time the commands.
+# Use $(1) as a placeholder for the command to be executed.
+# We use [int] to ensure integer division/truncation for seconds.
+TIME_CMD = powershell -ExecutionPolicy Bypass -Command "$$s=Get-Date; $(1); $$e=Get-Date; $$t=$$e-$$s; $$h=[Math]::Floor($$t.TotalHours); $$m=$$t.Minutes; $$sec=$$t.Seconds; $$ts=[int]$$t.TotalSeconds; Write-Host (\"`nElapsed: {0:D2}:{1:D2}:{2:D2} ({3}s)\" -f [int]$$h, [int]$$m, [int]$$sec, $$ts)"
 else
 UNAME_S := $(shell uname -s)
-# For Unix, we use /usr/bin/time
-TIME_PREFIX = /usr/bin/time -p
-TIME_SUFFIX =
+# For Unix, we use a shell-based timing to ensure consistent format across BSD/macOS and GNU/Linux
+TIME_CMD = START=$$(date +%s); $(1); END=$$(date +%s); DIFF=$$(($$END - $$START)); H=$$(($$DIFF / 3600)); M=$$(($$DIFF % 3600 / 60)); S=$$(($$DIFF % 60)); printf "\nElapsed: %02d:%02d:%02d (%ds)\n" $$H $$M $$S $$DIFF
 ifeq ($(UNAME_S),Darwin)
 BUNDLE = app,dmg
 else
@@ -19,11 +19,15 @@ BUNDLE = app
 endif
 endif
 
+# Helper to run command with timing
+# Usage: $(call run_timed,command)
+run_timed = @$(subst $$(1),$(1),$(TIME_CMD))
+
 build: clean
-	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) npm run tauri -- build --bundles $(BUNDLE) $(TIME_SUFFIX),$(TIME_PREFIX) npm run tauri -- build --bundles $(BUNDLE))
+	$(call run_timed,npm run tauri -- build --bundles $(BUNDLE))
 
 clean:
-	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) python -c \"import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]\" $(TIME_SUFFIX),$(TIME_PREFIX) python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]")
+	@python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]"
 
 help:
 	@echo "Makefile targets:"
@@ -36,8 +40,8 @@ help:
 
 release:
 	@echo "Updating release metadata JSON..."
-	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) python scripts/release.py $(TIME_SUFFIX),$(TIME_PREFIX) python scripts/release.py)
+	@python scripts/release.py
 
 upload: release
 	@echo "Uploading target artifacts..."
-	@$(if $(filter Windows_NT,$(OS)),$(TIME_PREFIX) python scripts/upload.py $(TIME_SUFFIX),$(TIME_PREFIX) python scripts/upload.py)
+	$(call run_timed,python scripts/upload.py)

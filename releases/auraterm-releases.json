@@ -14,9 +14,9 @@
       "version": "0.1.8",
       "filename": "AuraTerm_0.1.8_aarch64.dmg",
       "platform": "macos-arm64",
-      "sha256": "b415529d90a77bf8c50fff58389b9ca7044eb8f7908e3279415eb8196a1dfdf6",
+      "sha256": "d8ee1f795a5fd6cdccf1b5a0acbb979a115de9c15787875cb8a827245f71615f",
       "notes": "automated release",
-      "published_at": "2026-03-10"
+      "published_at": "2026-03-11"
     },
     {
       "version": "0.1.7",
