@@ -80,8 +80,13 @@
 }
 
 .about-logo {
-  font-size: 64px;
   margin-bottom: 10px;
+}
+
+.about-logo-img {
+  width: 128px;
+  height: 128px;
+  object-fit: contain;
 }
 
 .about-content {

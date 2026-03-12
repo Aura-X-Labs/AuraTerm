@@ -31,7 +31,7 @@ import type {
   SshConfig,
   TerminalHandle,
 } from "./types";
-import logoUrl from "../src-tauri/icons/icon.png";
+import logoUrl from "./logo.png";
 import "./App.css";
 
 interface Tab {

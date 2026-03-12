@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import logo from "./logo.png";
 import "./AboutDialog.css";
 
 const emit = defineEmits<{
@@ -34,7 +35,9 @@ function openExternal(url: string) {
       </div>
 
       <div class="about-body">
-        <div class="about-logo">🖥️</div>
+        <div class="about-logo">
+          <img :src="logo" alt="AuraTerm Logo" class="about-logo-img" />
+        </div>
 
         <div class="about-content">
           <h3>AuraTerm</h3>
