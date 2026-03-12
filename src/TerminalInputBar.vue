@@ -74,8 +74,22 @@ function handleQuickButton(button: QuickButton) {
 }
 
 function openEditor() {
-  editButtons.value = structuredClone(props.quickButtons);
-  showEditor.value = true;
+  console.log('openEditor called');
+  console.log('props.quickButtons:', props.quickButtons);
+  console.log('structuredClone available:', typeof structuredClone !== 'undefined');
+  
+  try {
+    editButtons.value = structuredClone(props.quickButtons);
+    console.log('structuredClone succeeded');
+    showEditor.value = true;
+    console.log('showEditor set to true');
+  } catch (error) {
+    console.error('openEditor failed:', error);
+    // Fallback to compatible deep copy approach
+    editButtons.value = props.quickButtons.map(btn => ({ ...btn }));
+    showEditor.value = true;
+    console.log('Fallback deep copy succeeded');
+  }
 }
 
 function saveEditor() {
