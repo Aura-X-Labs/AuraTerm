@@ -1,15 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { buildConnectionLogContext, buildDefaultLogPath, normalizeOptionalLogPath } from "./logging";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
-import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection } from "./types";
-
-interface ContextMenu {
-  x: number;
-  y: number;
-  connection: SavedConnection;
-}
+import { type SavedConnection } from "./types";
+import BookmarkEditor from "./BookmarkEditor.vue";
 
 const props = withDefaults(defineProps<{
   refreshToken?: number;
@@ -23,6 +17,7 @@ const emit = defineEmits<{
 }>();
 
 const UNGROUPED_LABEL = "Ungrouped";
+const RECENTLY_USED_LABEL = "Recently Used";
 
 function toDisplayGroup(value?: string) {
   return value?.trim() || UNGROUPED_LABEL;
@@ -48,61 +43,42 @@ function buildIcon(connection: SavedConnection) {
   return "🖥";
 }
 
-function inputValue(event: Event) {
-  return (event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
-}
-
-function toNumber(value: string, fallback: number) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function toDataBits(value: string): 5 | 6 | 7 | 8 {
-  const parsed = Number(value);
-  if (parsed === 5 || parsed === 6 || parsed === 7) {
-    return parsed;
-  }
-  return 8;
-}
-
-function toStopBits(value: string): 1 | 2 {
-  return Number(value) === 2 ? 2 : 1;
-}
-
-function toParity(value: string): "none" | "odd" | "even" {
-  if (value === "odd" || value === "even") {
-    return value;
-  }
-  return "none";
-}
-
-function toFlowControl(value: string): "none" | "hardware" | "software" {
-  if (value === "hardware" || value === "software") {
-    return value;
-  }
-  return "none";
-}
-
-function toAuthType(value: string): "password" | "key" | "none" {
-  if (value === "key" || value === "none") {
-    return value;
-  }
-  return "password";
-}
-
-function toReconnectType(value: string): ReconnectType {
-  if (value === "simple" || value === "screen" || value === "tmux") {
-    return value;
-  }
-  return "manual";
-}
-
 const connections = ref<SavedConnection[]>([]);
-const contextMenu = ref<ContextMenu | null>(null);
+const contextMenu = ref<{ x: number; y: number; connection: SavedConnection } | null>(null);
 const editingConnection = ref<SavedConnection | null>(null);
-const editDraft = ref<SavedConnection | null>(null);
-const editError = ref("");
 const contextMenuRef = ref<HTMLDivElement | null>(null);
+const collapsedGroups = ref<Set<string>>(new Set());
+const searchQuery = ref("");
+
+const STORAGE_KEY_COLLAPSED = "auraterm:collapsed-groups";
+
+function loadCollapsedState() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY_COLLAPSED);
+    if (saved) {
+      collapsedGroups.value = new Set(JSON.parse(saved));
+    }
+  } catch (error) {
+    console.error("Failed to load collapsed state", error);
+  }
+}
+
+function saveCollapsedState() {
+  localStorage.setItem(STORAGE_KEY_COLLAPSED, JSON.stringify(Array.from(collapsedGroups.value)));
+}
+
+function toggleGroup(group: string) {
+  if (collapsedGroups.value.has(group)) {
+    collapsedGroups.value.delete(group);
+  } else {
+    collapsedGroups.value.add(group);
+  }
+  saveCollapsedState();
+}
+
+function isGroupCollapsed(group: string) {
+  return collapsedGroups.value.has(group);
+}
 
 async function loadConnections() {
   try {
@@ -114,6 +90,7 @@ async function loadConnections() {
 
 watch(() => props.refreshToken, () => {
   void loadConnections();
+  loadCollapsedState();
 }, { immediate: true });
 
 watch(contextMenu, (value, _previous, onCleanup) => {
@@ -133,15 +110,49 @@ watch(contextMenu, (value, _previous, onCleanup) => {
   });
 });
 
+const filteredConnections = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) {
+    return connections.value;
+  }
+  return connections.value.filter((c) => {
+    return (
+      c.name.toLowerCase().includes(query) ||
+      c.host.toLowerCase().includes(query) ||
+      (c.user && c.user.toLowerCase().includes(query)) ||
+      (c.portName && c.portName.toLowerCase().includes(query)) ||
+      (c.group && c.group.toLowerCase().includes(query))
+    );
+  });
+});
+
 const groupedConnections = computed(() => {
   const groups = new Map<string, SavedConnection[]>();
-  for (const connection of connections.value) {
+
+  // Add "Recently Used" group if there is a search query or we just want them shown
+  // But typically "Recently Used" should be its own special top-level group
+  const recentlyUsed = [...connections.value]
+    .filter(c => c.lastUsed)
+    .sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))
+    .slice(0, 5);
+
+  if (recentlyUsed.length > 0 && !searchQuery.value.trim()) {
+    groups.set(RECENTLY_USED_LABEL, recentlyUsed);
+  }
+
+  for (const connection of filteredConnections.value) {
     const group = toDisplayGroup(connection.group);
     const list = groups.get(group) ?? [];
     list.push(connection);
     groups.set(group, list);
   }
   return Array.from(groups.entries()).sort(([left], [right]) => {
+    if (left === RECENTLY_USED_LABEL) {
+      return -1;
+    }
+    if (right === RECENTLY_USED_LABEL) {
+      return 1;
+    }
     if (left === UNGROUPED_LABEL) {
       return 1;
     }
@@ -177,99 +188,14 @@ async function handleDelete(id: string) {
 
 function openEditDialog(connection: SavedConnection) {
   editingConnection.value = connection;
-  const reconnectType = normalizeReconnectType(connection);
-  editDraft.value = {
-    ...connection,
-    autoReconnect: isReconnectEnabled(reconnectType),
-    reconnectType,
-  };
-  editError.value = "";
   contextMenu.value = null;
 }
 
 function closeEditDialog() {
   editingConnection.value = null;
-  editDraft.value = null;
-  editError.value = "";
 }
 
-function updateDraft<K extends keyof SavedConnection>(key: K, value: SavedConnection[K]) {
-  if (!editDraft.value) {
-    return;
-  }
-  editDraft.value = { ...editDraft.value, [key]: value };
-}
-
-function updateLogEnabled(enabled: boolean) {
-  if (!editDraft.value) {
-    return;
-  }
-
-  editDraft.value = {
-    ...editDraft.value,
-    logPath: enabled ? (editDraft.value.logPath ?? "") : undefined,
-  };
-}
-
-function handleLogEnabledChange(event: Event) {
-  updateLogEnabled((event.target as HTMLInputElement).checked);
-}
-
-const editDraftDefaultLogPath = computed(() => {
-  if (!editDraft.value) {
-    return "";
-  }
-  return buildDefaultLogPath(props.settings, buildConnectionLogContext(editDraft.value));
-});
-
-async function saveDraft() {
-  if (!editDraft.value || !editingConnection.value) {
-    return;
-  }
-
-  const protocol = editDraft.value.protocol ?? "ssh";
-  const reconnectType = protocol === "ssh" ? normalizeReconnectType(editDraft.value) : undefined;
-  if (!editDraft.value.name.trim()) {
-    editError.value = "Name cannot be empty.";
-    return;
-  }
-  if (protocol === "serial") {
-    if (!editDraft.value.portName?.trim()) {
-      editError.value = "Serial port cannot be empty.";
-      return;
-    }
-  } else {
-    if (!editDraft.value.host.trim()) {
-      editError.value = "Host cannot be empty.";
-      return;
-    }
-    if (protocol === "ssh" && !editDraft.value.user.trim()) {
-      editError.value = "SSH username cannot be empty.";
-      return;
-    }
-  }
-
-  const normalized: SavedConnection = {
-    ...editDraft.value,
-    name: editDraft.value.name.trim(),
-    group: editDraft.value.group?.trim() || undefined,
-    logPath: normalizeOptionalLogPath(editDraft.value.logPath, editDraftDefaultLogPath.value),
-    host: protocol === "serial" ? "" : editDraft.value.host.trim(),
-    port: protocol === "serial" ? 0 : editDraft.value.port,
-    user: protocol === "ssh" ? editDraft.value.user.trim() : "",
-    authType: protocol === "ssh" ? editDraft.value.authType : "none",
-    password: protocol === "ssh" ? editDraft.value.password : undefined,
-    privateKey: protocol === "ssh" && editDraft.value.authType === "key" ? editDraft.value.privateKey : undefined,
-    autoReconnect: protocol === "ssh" && reconnectType ? isReconnectEnabled(reconnectType) : undefined,
-    reconnectType,
-    portName: protocol === "serial" ? editDraft.value.portName?.trim() : undefined,
-    baudRate: protocol === "serial" ? editDraft.value.baudRate : undefined,
-    dataBits: protocol === "serial" ? editDraft.value.dataBits : undefined,
-    stopBits: protocol === "serial" ? editDraft.value.stopBits : undefined,
-    parity: protocol === "serial" ? editDraft.value.parity : undefined,
-    flowControl: protocol === "serial" ? editDraft.value.flowControl : undefined,
-  };
-
+async function handleSaveConnection(normalized: SavedConnection) {
   try {
     await invoke("save_connection", { connection: normalized });
     connections.value = connections.value.map((connection) => (
@@ -278,7 +204,9 @@ async function saveDraft() {
     closeEditDialog();
   } catch (error) {
     console.error("Failed to save connection", error);
-    editError.value = String(error);
+    // Note: Error handling is now partially inside BookmarkEditor, 
+    // but we catch backend errors here.
+    alert(`Failed to save: ${error}`);
   }
 }
 </script>
@@ -290,6 +218,17 @@ async function saveDraft() {
       <button class="bookmark-refresh-btn" title="Refresh list" @click="loadConnections">↻</button>
     </div>
 
+    <div class="bookmark-search-container">
+      <input
+        v-model="searchQuery"
+        type="text"
+        class="bookmark-search-input"
+        placeholder="Search bookmarks..."
+        spellcheck="false"
+      >
+      <button v-if="searchQuery" class="bookmark-search-clear" @click="searchQuery = ''">×</button>
+    </div>
+
     <div v-if="connections.length === 0" class="bookmark-empty">
       No saved connections.
       <br>
@@ -298,13 +237,26 @@ async function saveDraft() {
       creating a new session to add one.
     </div>
 
+    <div v-else-if="filteredConnections.length === 0" class="bookmark-empty">
+      No bookmarks match your search.
+    </div>
+
     <div v-else class="bookmark-list">
-      <div v-for="[group, items] in groupedConnections" :key="group" class="bookmark-group">
-        <div class="bookmark-group-header">
-          <span class="bookmark-group-name">{{ group }}</span>
+        <div
+          v-for="[group, items] in groupedConnections"
+          :key="group"
+          class="bookmark-group"
+          :class="{ collapsed: isGroupCollapsed(group) }"
+          :data-group="group"
+        >
+          <div class="bookmark-group-header" @click="toggleGroup(group)">
+          <div class="bookmark-group-header-left">
+            <span class="bookmark-group-arrow">›</span>
+            <span class="bookmark-group-name">{{ group }}</span>
+          </div>
           <span class="bookmark-group-count">{{ items.length }}</span>
         </div>
-        <ul class="bookmark-group-list">
+        <ul v-if="!isGroupCollapsed(group)" class="bookmark-group-list">
           <li
             v-for="connection in items"
             :key="connection.id"
@@ -333,171 +285,247 @@ async function saveDraft() {
       <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection.id)">🗑 Delete</button>
     </div>
 
-    <div v-if="editingConnection && editDraft" class="bookmark-editor-overlay" @click="closeEditDialog">
-      <div class="bookmark-editor-dialog" @click.stop>
-        <div class="bookmark-editor-header">
-          <div>
-            <div class="bookmark-editor-title">Edit Bookmark</div>
-            <div class="bookmark-editor-subtitle">
-              {{ editDraft.protocol === 'serial' ? 'Serial Settings' : editDraft.protocol === 'telnet' ? 'Telnet Settings' : 'SSH Settings' }}
-            </div>
-          </div>
-          <button type="button" class="bookmark-editor-close" @click="closeEditDialog">×</button>
-        </div>
-
-        <div class="bookmark-editor-body">
-          <div class="bookmark-editor-grid">
-            <div class="form-group">
-              <label>Name</label>
-              <input type="text" :value="editDraft.name" @input="updateDraft('name', inputValue($event))">
-            </div>
-            <div class="form-group">
-              <label>Group</label>
-              <input type="text" :value="editDraft.group ?? ''" placeholder="Ungrouped" @input="updateDraft('group', inputValue($event))">
-            </div>
-          </div>
-
-          <template v-if="editDraft.protocol === 'serial'">
-            <div class="bookmark-editor-grid">
-              <div class="form-group bookmark-editor-span-2">
-                <label>Serial Port</label>
-                <input
-                  type="text"
-                  :value="editDraft.portName ?? ''"
-                  placeholder="/dev/cu.usbserial-1410"
-                  @input="updateDraft('portName', inputValue($event))"
-                >
-              </div>
-              <div class="form-group">
-                <label>Baud Rate</label>
-                <input
-                  type="number"
-                  :value="editDraft.baudRate ?? 9600"
-                  @input="updateDraft('baudRate', toNumber(inputValue($event), 9600))"
-                >
-              </div>
-              <div class="form-group">
-                <label>Data Bits</label>
-                <select :value="String(editDraft.dataBits ?? 8)" @change="updateDraft('dataBits', toDataBits(inputValue($event)))">
-                  <option value="5">5</option>
-                  <option value="6">6</option>
-                  <option value="7">7</option>
-                  <option value="8">8</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label>Stop Bits</label>
-                <select :value="String(editDraft.stopBits ?? 1)" @change="updateDraft('stopBits', toStopBits(inputValue($event)))">
-                  <option value="1">1</option>
-                  <option value="2">2</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label>Parity</label>
-                <select :value="editDraft.parity ?? 'none'" @change="updateDraft('parity', toParity(inputValue($event)))">
-                  <option value="none">None</option>
-                  <option value="odd">Odd</option>
-                  <option value="even">Even</option>
-                </select>
-              </div>
-              <div class="form-group bookmark-editor-span-2">
-                <label>Flow Control</label>
-                <select :value="editDraft.flowControl ?? 'none'" @change="updateDraft('flowControl', toFlowControl(inputValue($event)))">
-                  <option value="none">None</option>
-                  <option value="hardware">Hardware</option>
-                  <option value="software">Software</option>
-                </select>
-              </div>
-            </div>
-          </template>
-
-          <template v-else>
-            <div class="bookmark-editor-grid">
-              <div class="form-group bookmark-editor-span-2">
-                <label>Host</label>
-                <input type="text" :value="editDraft.host" @input="updateDraft('host', inputValue($event))">
-              </div>
-              <div class="form-group">
-                <label>Port</label>
-                <input type="number" :value="editDraft.port" @input="updateDraft('port', toNumber(inputValue($event), 0))">
-              </div>
-              <div v-if="(editDraft.protocol ?? 'ssh') === 'ssh'" class="form-group">
-                <label>User</label>
-                <input type="text" :value="editDraft.user" @input="updateDraft('user', inputValue($event))">
-              </div>
-              <div v-else class="form-group">
-                <label>Protocol</label>
-                <input type="text" value="Telnet" disabled>
-              </div>
-            </div>
-
-            <template v-if="(editDraft.protocol ?? 'ssh') === 'ssh'">
-              <div class="bookmark-editor-grid">
-                <div class="form-group">
-                  <label>Auth Method</label>
-                  <select :value="editDraft.authType" @change="updateDraft('authType', toAuthType(inputValue($event)))">
-                    <option value="password">Password</option>
-                    <option value="key">Private Key</option>
-                  </select>
-                </div>
-              </div>
-
-              <div v-if="editDraft.authType === 'password'" class="form-group">
-                <label>Password</label>
-                <input type="password" :value="editDraft.password ?? ''" @input="updateDraft('password', inputValue($event))">
-              </div>
-
-              <div v-else class="form-group">
-                <label>Private Key (PEM)</label>
-                <textarea rows="5" :value="editDraft.privateKey ?? ''" @input="updateDraft('privateKey', inputValue($event))" />
-              </div>
-
-              <div class="bookmark-editor-grid">
-                <div class="form-group bookmark-editor-span-2">
-                  <label>Reconnect Mode</label>
-                  <select
-                    :value="normalizeReconnectType(editDraft)"
-                    @change="updateDraft('reconnectType', toReconnectType(inputValue($event)))"
-                  >
-                    <option value="manual">Manual</option>
-                    <option value="simple">Simple</option>
-                    <option value="tmux">tmux</option>
-                    <option value="screen">screen</option>
-                  </select>
-                </div>
-              </div>
-            </template>
-          </template>
-
-          <div class="form-group">
-            <label>
-              <input
-                type="checkbox"
-                :checked="editDraft.logPath !== undefined"
-                @change="handleLogEnabledChange"
-              >
-              Save Session Log
-            </label>
-            <input
-              v-if="editDraft.logPath !== undefined"
-              type="text"
-              :value="editDraft.logPath"
-              :placeholder="editDraftDefaultLogPath"
-              @input="updateDraft('logPath', inputValue($event))"
-            >
-            <div v-if="editDraft.logPath !== undefined" class="form-hint">
-              Leave blank to use the default log path template.
-            </div>
-          </div>
-
-          <div v-if="editError" class="bookmark-editor-error">{{ editError }}</div>
-        </div>
-
-        <div class="bookmark-editor-footer">
-          <button type="button" class="bookmark-editor-btn secondary" @click="closeEditDialog">Cancel</button>
-          <button type="button" class="bookmark-editor-btn primary" @click="saveDraft">Save</button>
-        </div>
-      </div>
-    </div>
+    <BookmarkEditor
+      v-if="editingConnection"
+      :connection="editingConnection"
+      :settings="props.settings"
+      @save="handleSaveConnection"
+      @cancel="closeEditDialog"
+    />
   </div>
 </template>
+
+<style>
+.bookmark-sidebar {
+  width: 260px;
+  background: #252526;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.bookmark-sidebar-header {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bookmark-sidebar-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #ccc;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.bookmark-refresh-btn {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 1.1rem;
+  padding: 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.bookmark-refresh-btn:hover {
+  background: #333;
+  color: #fff;
+}
+
+.bookmark-search-container {
+  padding: 6px 12px 12px 12px;
+  position: relative;
+  border-bottom: 1px solid #333;
+}
+
+.bookmark-search-input {
+  width: 100%;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 4px 24px 4px 8px;
+  color: #ccc;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.bookmark-search-input:focus {
+  border-color: #0078d4;
+}
+
+.bookmark-search-clear {
+  position: absolute;
+  right: 18px;
+  top: 4px;
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  line-height: 1;
+}
+
+.bookmark-search-clear:hover {
+  color: #fff;
+}
+
+.bookmark-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: #666;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.bookmark-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.bookmark-group {
+  margin-bottom: 12px;
+}
+
+.bookmark-group-header {
+  padding: 4px 12px 4px 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #2d2d2d;
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+
+.bookmark-group-header:hover {
+  background: #333;
+}
+
+.bookmark-group-header-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bookmark-group-arrow {
+  font-size: 1.1rem;
+  color: #666;
+  transition: transform 0.2s;
+  width: 16px;
+  text-align: center;
+  display: inline-block;
+  transform: rotate(90deg);
+}
+
+.bookmark-group.collapsed .bookmark-group-arrow {
+  transform: rotate(0deg);
+}
+
+.bookmark-group-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #888;
+}
+
+.bookmark-group[data-group="Recently Used"] .bookmark-group-header {
+  border-top: 1px solid #333;
+}
+
+.bookmark-group[data-group="Recently Used"] .bookmark-group-name {
+  color: #0078d4;
+  font-style: italic;
+}
+
+.bookmark-group-count {
+  font-size: 0.7rem;
+  color: #555;
+  background: #383838;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.bookmark-group-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.bookmark-item {
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.bookmark-item:hover {
+  background: #2a2d2e;
+}
+
+.bookmark-icon {
+  font-size: 1.2rem;
+  opacity: 0.8;
+}
+
+.bookmark-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.bookmark-name {
+  font-size: 0.9rem;
+  color: #ccc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bookmark-host {
+  font-size: 0.75rem;
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bookmark-context-menu {
+  position: fixed;
+  background: #252526;
+  border: 1px solid #454545;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border-radius: 4px;
+  padding: 4px;
+  z-index: 1000;
+  min-width: 120px;
+}
+
+.bookmark-context-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: #ccc;
+  font-size: 0.85rem;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.bookmark-context-item:hover {
+  background: #0078d4;
+  color: #fff;
+}
+
+.bookmark-context-item.danger:hover {
+  background: #e81123;
+}
+</style>
