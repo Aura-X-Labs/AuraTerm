@@ -643,6 +643,13 @@
   border-radius: 2px;
 }
 
+.quick-buttons-hint {
+  font-size: 11px;
+  color: #555;
+  margin-right: 8px;
+  font-style: italic;
+}
+
 .quick-btn {
   flex-shrink: 0;
   padding: 2px 10px;
@@ -781,7 +788,17 @@
   padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+}
+
+.quick-btn-editor-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: #2a2a2a;
+  border: 1px solid #333;
+  border-radius: 6px;
 }
 
 .quick-btn-editor-empty {
@@ -794,7 +811,7 @@
 .quick-btn-editor-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .quick-btn-editor-order {
@@ -839,12 +856,15 @@
 }
 
 .quick-btn-editor-input--label {
-  width: 110px;
-  flex-shrink: 0;
+  flex: 1;
 }
 
 .quick-btn-editor-input--command {
   flex: 1;
+  min-height: 60px;
+  resize: vertical;
+  font-family: Consolas, "Courier New", monospace;
+  line-height: 1.4;
 }
 
 .quick-btn-editor-delete {

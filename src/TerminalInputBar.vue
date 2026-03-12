@@ -74,22 +74,13 @@ function handleQuickButton(button: QuickButton) {
 }
 
 function openEditor() {
-  console.log('openEditor called');
-  console.log('props.quickButtons:', props.quickButtons);
-  console.log('structuredClone available:', typeof structuredClone !== 'undefined');
-  
   try {
     editButtons.value = structuredClone(props.quickButtons);
-    console.log('structuredClone succeeded');
-    showEditor.value = true;
-    console.log('showEditor set to true');
   } catch (error) {
-    console.error('openEditor failed:', error);
     // Fallback to compatible deep copy approach
     editButtons.value = props.quickButtons.map(btn => ({ ...btn }));
-    showEditor.value = true;
-    console.log('Fallback deep copy succeeded');
   }
+  showEditor.value = true;
 }
 
 function saveEditor() {
@@ -143,6 +134,9 @@ function closeEditor() {
     </div>
 
     <div class="quick-buttons-bar">
+      <span v-if="quickButtons.length === 0" class="quick-buttons-hint">
+        No quick buttons yet. Click Edit to add.
+      </span>
       <button
         v-for="button in quickButtons"
         :key="button.id"
@@ -187,33 +181,37 @@ function closeEditor() {
             No buttons yet — click <strong>+ Add</strong> to create one.
           </p>
 
-          <div v-for="(button, index) in editButtons" :key="button.id" class="quick-btn-editor-row">
-            <div class="quick-btn-editor-order">
-              <button type="button" :disabled="index === 0" title="Move up" @click="moveButton(button.id, -1)">▲</button>
-              <button
-                type="button"
-                :disabled="index === editButtons.length - 1"
-                title="Move down"
-                @click="moveButton(button.id, 1)"
+          <div v-for="(button, index) in editButtons" :key="button.id" class="quick-btn-editor-item">
+            <div class="quick-btn-editor-row">
+              <div class="quick-btn-editor-order">
+                <button type="button" :disabled="index === 0" title="Move up" @click="moveButton(button.id, -1)">▲</button>
+                <button
+                  type="button"
+                  :disabled="index === editButtons.length - 1"
+                  title="Move down"
+                  @click="moveButton(button.id, 1)"
+                >
+                  ▼
+                </button>
+              </div>
+              <input
+                type="text"
+                class="quick-btn-editor-input quick-btn-editor-input--label"
+                placeholder="Label (Display name)"
+                :value="button.label"
+                @input="updateButton(button.id, 'label', inputValue($event))"
               >
-                ▼
-              </button>
+              <button type="button" class="quick-btn-editor-delete" title="Delete" @click="deleteButton(button.id)">×</button>
             </div>
-            <input
-              type="text"
-              class="quick-btn-editor-input quick-btn-editor-input--label"
-              placeholder="Label"
-              :value="button.label"
-              @input="updateButton(button.id, 'label', inputValue($event))"
-            >
-            <input
-              type="text"
-              class="quick-btn-editor-input quick-btn-editor-input--command"
-              placeholder="Command  (e.g.  ls -la)"
-              :value="button.command"
-              @input="updateButton(button.id, 'command', inputValue($event))"
-            >
-            <button type="button" class="quick-btn-editor-delete" title="Delete" @click="deleteButton(button.id)">×</button>
+            <div class="quick-btn-editor-row">
+              <textarea
+                class="quick-btn-editor-input quick-btn-editor-input--command"
+                placeholder="Command (e.g. ls -la)"
+                :value="button.command"
+                spellcheck="false"
+                @input="updateButton(button.id, 'command', inputValue($event))"
+              />
+            </div>
           </div>
         </div>
 
