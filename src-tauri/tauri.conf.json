@@ -1,6 +1,6 @@
 {
   "productName": "AuraTerm",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "identifier": "com.auraterm.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",

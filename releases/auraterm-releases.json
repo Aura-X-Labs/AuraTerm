@@ -1,7 +1,15 @@
 {
   "product": "AuraTerm",
-  "latest": "0.1.9",
+  "latest": "0.2.0",
   "releases": [
+    {
+      "version": "0.2.0",
+      "filename": "AuraTerm_0.2.0_aarch64.dmg",
+      "platform": "macos-arm64",
+      "sha256": "0b055842a8b1bbbed350fe7529278b0f44182fbf83b085ce6939ed35a6c6f794",
+      "notes": "automated release",
+      "published_at": "2026-03-13"
+    },
     {
       "version": "0.1.9",
       "filename": "AuraTerm_0.1.9_aarch64.dmg",
