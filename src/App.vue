@@ -13,6 +13,7 @@ import TerminalInputBar from "./TerminalInputBar.vue";
 import RemoteFileManager from "./RemoteFileManager.vue";
 import {
   DEFAULT_SETTINGS,
+  MAX_INPUT_HISTORY,
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
   normalizeAppSettings,
@@ -460,6 +461,26 @@ function sendToActiveTerminal(text: string) {
   if (handle) {
     handle.sendData(text);
   }
+}
+
+function addToInputHistory(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+
+  const current = settingsRef.value.inputHistory ?? [];
+  // Remove duplicate and add to front
+  const filtered = current.filter(h => h !== trimmed);
+  const newHistory = [trimmed, ...filtered].slice(0, MAX_INPUT_HISTORY);
+
+  persistSettingsSilently({
+    ...settingsRef.value,
+    inputHistory: newHistory,
+  });
+}
+
+function handleInputSend(text: string) {
+  addToInputHistory(text.replace(/\n$/, '')); // Remove trailing newline for history
+  sendToActiveTerminal(text);
 }
 
 async function handleButtonsChange(buttons: QuickButton[]) {
@@ -1329,7 +1350,8 @@ function handleBookmarkConnect(connection: SavedConnection) {
         <TerminalInputBar
           v-if="settings.showInputBar"
           :quick-buttons="settings.quickButtons"
-          @send="sendToActiveTerminal"
+          :input-history="settings.inputHistory"
+          @send="handleInputSend"
           @buttons-change="handleButtonsChange"
           @resize="fitActiveTerminal"
         />

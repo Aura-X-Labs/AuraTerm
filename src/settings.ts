@@ -57,6 +57,8 @@ export interface AppSettings {
   lastSerialConfig: SerialHistoryItem | null;
   /** Recent serial port configurations for quick presets */
   recentSerialConfigs: SerialHistoryItem[];
+  /** Input history for the input bar (most recent first) */
+  inputHistory: string[];
 }
 
 const LEGACY_DEFAULT_THEME: TerminalTheme = {
@@ -91,7 +93,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   quickButtons: [],
   lastSerialConfig: null,
   recentSerialConfigs: [],
+  inputHistory: [],
 };
+
+export const MAX_INPUT_HISTORY = 100;
 
 function normalizeColor(value?: string | null) {
   return value?.trim().toLowerCase();
@@ -124,5 +129,6 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     quickButtons: value?.quickButtons ?? DEFAULT_SETTINGS.quickButtons,
     lastSerialConfig: value?.lastSerialConfig ?? DEFAULT_SETTINGS.lastSerialConfig,
     recentSerialConfigs: value?.recentSerialConfigs ?? DEFAULT_SETTINGS.recentSerialConfigs,
+    inputHistory: value?.inputHistory ?? DEFAULT_SETTINGS.inputHistory,
   };
 }

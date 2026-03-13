@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import type { QuickButton } from "./settings";
 
 const props = defineProps<{
   quickButtons: QuickButton[];
+  inputHistory: string[];
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +24,18 @@ const textareaH = ref(DEFAULT_TEXTAREA_H);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 let dragStartY = 0;
 let dragStartH = 0;
+
+// History navigation state
+const historyIndex = ref(-1);
+const savedTextBeforeNav = ref("");
+
+watch(text, () => {
+  // Reset history index when user types manually (not during navigation)
+  if (historyIndex.value >= 0) {
+    historyIndex.value = -1;
+    savedTextBeforeNav.value = "";
+  }
+});
 
 function inputValue(event: Event) {
   return (event.target as HTMLInputElement | HTMLTextAreaElement).value;
@@ -62,6 +75,37 @@ function doSend(payload: string) {
 }
 
 function handleKeyDown(event: KeyboardEvent) {
+  // PageUp: navigate to older history (index increases)
+  if (event.key === "PageUp") {
+    event.preventDefault();
+    if (props.inputHistory.length === 0) return;
+    if (historyIndex.value < 0) {
+      savedTextBeforeNav.value = text.value;
+    }
+    const nextIndex = Math.min(historyIndex.value + 1, props.inputHistory.length - 1);
+    if (nextIndex !== historyIndex.value) {
+      historyIndex.value = nextIndex;
+      text.value = props.inputHistory[nextIndex] ?? "";
+    }
+    return;
+  }
+
+  // PageDown: navigate to newer history (index decreases)
+  if (event.key === "PageDown") {
+    event.preventDefault();
+    if (historyIndex.value < 0) return;
+    const nextIndex = historyIndex.value - 1;
+    if (nextIndex < 0) {
+      historyIndex.value = -1;
+      text.value = savedTextBeforeNav.value;
+      savedTextBeforeNav.value = "";
+    } else {
+      historyIndex.value = nextIndex;
+      text.value = props.inputHistory[nextIndex] ?? "";
+    }
+    return;
+  }
+
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();
     doSend(text.value);
@@ -176,7 +220,7 @@ function closeEditor() {
         class="terminal-input-textarea"
         :style="{ height: `${textareaH}px` }"
         :value="text"
-        placeholder="Type here…  Ctrl+Enter (⌘+Enter on macOS) to send"
+        placeholder="Type here…  Ctrl+Enter to send  ·  PgUp/PgDn for history"
         spellcheck="false"
         autocorrect="off"
         autocapitalize="off"
