@@ -1045,7 +1045,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
 
 <template>
   <div :class="appClassName">
-    <div class="titlebar" @mousedown="handleTitlebarMouseDown">
+    <div class="titlebar" @mousedown="handleTitlebarMouseDown" @dblclick="handleToggleMaximize">
       <div v-if="osType !== 'windows'" class="titlebar-controls" aria-label="Window controls" data-no-drag="true">
         <button
           class="titlebar-control-btn titlebar-control-close"

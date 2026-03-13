@@ -585,8 +585,8 @@ fn main() {
 
                 let new_window_item = MenuItem::with_id(_app, "menu-new-window", "New Window", true, Some("Cmd+N"))?;
                 let close_window_item = MenuItem::with_id(_app, "menu-close-window", "Close Window", true, Some("Cmd+W"))?;
-                let minimize_item = PredefinedMenuItem::minimize(_app, None)?;
-                let zoom_item = PredefinedMenuItem::maximize(_app, None)?;
+                let minimize_item = MenuItem::with_id(_app, "minimize", "Minimize", true, Some("Cmd+M"))?;
+                let zoom_item = MenuItem::with_id(_app, "maximize", "Zoom", true, None::<&str>)?;
 
                 let new_local_item = MenuItem::with_id(_app, "menu-new-local", "Local Shell", true, None::<&str>)?;
                 let new_ssh_item = MenuItem::with_id(_app, "menu-new-ssh", "SSH", true, None::<&str>)?;
@@ -694,6 +694,22 @@ fn main() {
         })
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
+                "minimize" => {
+                    if let Some(window) = app.webview_windows().values().next() {
+                        let _ = window.minimize();
+                    }
+                }
+                "maximize" => {
+                    if let Some(window) = app.webview_windows().values().next() {
+                        if let Ok(is_maximized) = window.is_maximized() {
+                            if is_maximized {
+                                let _ = window.unmaximize();
+                            } else {
+                                let _ = window.maximize();
+                            }
+                        }
+                    }
+                }
                 "about" => {
                     let _ = app.emit("show-about", ());
                 }
