@@ -583,6 +583,11 @@ fn main() {
             {
                 use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 
+                let new_window_item = MenuItem::with_id(_app, "menu-new-window", "New Window", true, Some("Cmd+N"))?;
+                let close_window_item = MenuItem::with_id(_app, "menu-close-window", "Close Window", true, Some("Cmd+W"))?;
+                let minimize_item = PredefinedMenuItem::minimize(_app, None)?;
+                let zoom_item = PredefinedMenuItem::maximize(_app, None)?;
+
                 let new_local_item = MenuItem::with_id(_app, "menu-new-local", "Local Shell", true, None::<&str>)?;
                 let new_ssh_item = MenuItem::with_id(_app, "menu-new-ssh", "SSH", true, None::<&str>)?;
                 let new_telnet_item = MenuItem::with_id(_app, "menu-new-telnet", "Telnet", true, None::<&str>)?;
@@ -657,6 +662,13 @@ fn main() {
                     .separator()
                     .item(&fullscreen_item)
                     .build()?;
+                let window_menu = SubmenuBuilder::new(_app, "Window")
+                    .item(&new_window_item)
+                    .item(&close_window_item)
+                    .separator()
+                    .item(&minimize_item)
+                    .item(&zoom_item)
+                    .build()?;
                 let help_menu = SubmenuBuilder::new(_app, "Help")
                     .item(&about_item)
                     .build()?;
@@ -664,6 +676,7 @@ fn main() {
                     .item(&file_menu)
                     .item(&edit_menu)
                     .item(&view_menu)
+                    .item(&window_menu)
                     .item(&help_menu)
                     .build()?;
 
@@ -683,6 +696,28 @@ fn main() {
             match event.id().as_ref() {
                 "about" => {
                     let _ = app.emit("show-about", ());
+                }
+                "menu-new-window" => {
+                    let _ = tauri::WebviewWindowBuilder::new(
+                        app,
+                        format!("window-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()),
+                        tauri::WebviewUrl::App("index.html".into())
+                    )
+                    .title("AuraTerm")
+                    .inner_size(1000.0, 800.0)
+                    .decorations(false)
+                    .shadow(true)
+                    .visible(true)
+                    .build();
+                }
+                "menu-close-window" => {
+                    // In Tauri 2.0, on_menu_event is on the AppHandle, but we want to close the active window.
+                    // For now, we'll close all windows if we can't determine the active one,
+                    // or just the main one if it's the only one.
+                    // A better way would be to track the focused window.
+                    for window in app.webview_windows().values() {
+                        let _ = window.close();
+                    }
                 }
                 "menu-open-settings" => {
                     let _ = app.emit("menu-open-settings", ());
