@@ -747,8 +747,9 @@
   background: #252525;
   border: 1px solid #3a3a3a;
   border-radius: 8px;
-  width: 560px;
+  width: 720px;
   max-width: 92vw;
+  height: 500px;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
@@ -784,21 +785,128 @@
 
 .quick-btn-editor-body {
   flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px;
+  overflow: hidden;
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  padding: 0;
 }
 
-.quick-btn-editor-item {
+.quick-btn-editor-sidebar {
+  width: 240px;
+  border-right: 1px solid #333;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px;
   background: #2a2a2a;
-  border: 1px solid #333;
-  border-radius: 6px;
+}
+
+.quick-btn-editor-sidebar-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #333;
+  transition: background 0.2s;
+}
+
+.quick-btn-editor-sidebar-item:hover {
+  background: #333;
+}
+
+.quick-btn-editor-sidebar-item.active {
+  background: #0078d4;
+  color: #fff;
+}
+
+.quick-btn-editor-sidebar-label {
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: 8px;
+}
+
+.quick-btn-editor-sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.6;
+}
+
+.quick-btn-editor-sidebar-item:hover .quick-btn-editor-sidebar-actions,
+.quick-btn-editor-sidebar-item.active .quick-btn-editor-sidebar-actions {
+  opacity: 1;
+}
+
+.quick-btn-editor-sidebar-actions button {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-size: 10px;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+  line-height: 1;
+}
+
+.quick-btn-editor-sidebar-actions button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.quick-btn-editor-sidebar-actions button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.quick-btn-editor-sidebar-delete {
+  color: #ff8888 !important;
+}
+
+.quick-btn-editor-sidebar-item.active .quick-btn-editor-sidebar-delete {
+  color: #fff !important;
+}
+
+.quick-btn-editor-content {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.quick-btn-editor-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+}
+
+.quick-btn-editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-btn-editor-field--command {
+  flex: 1;
+}
+
+.quick-btn-editor-field label {
+  font-size: 12px;
+  color: #aaa;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.quick-btn-editor-content-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #666;
+  font-size: 14px;
+  text-align: center;
 }
 
 .quick-btn-editor-empty {
@@ -806,39 +914,6 @@
   font-size: 13px;
   text-align: center;
   padding: 20px 0;
-}
-
-.quick-btn-editor-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.quick-btn-editor-order {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.quick-btn-editor-order button {
-  background: none;
-  border: 1px solid #3a3a3a;
-  color: #666;
-  font-size: 9px;
-  line-height: 1;
-  padding: 1px 4px;
-  cursor: pointer;
-  border-radius: 3px;
-}
-
-.quick-btn-editor-order button:hover:not(:disabled) {
-  color: #ccc;
-  border-color: #555;
-}
-
-.quick-btn-editor-order button:disabled {
-  opacity: 0.25;
-  cursor: default;
 }
 
 .quick-btn-editor-input {
@@ -861,29 +936,10 @@
 
 .quick-btn-editor-input--command {
   flex: 1;
-  min-height: 60px;
-  resize: vertical;
+  min-height: 200px;
+  resize: none;
   font-family: Consolas, "Courier New", monospace;
   line-height: 1.4;
-}
-
-.quick-btn-editor-delete {
-  background: none;
-  border: 1px solid #3a3a3a;
-  color: #888;
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  flex-shrink: 0;
-}
-
-.quick-btn-editor-delete:hover {
-  background: #5a1a1a;
-  color: #f88;
-  border-color: #7a2a2a;
 }
 
 .quick-btn-editor-footer {

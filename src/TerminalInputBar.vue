@@ -18,6 +18,7 @@ const DEFAULT_TEXTAREA_H = 90;
 const text = ref("");
 const showEditor = ref(false);
 const editButtons = ref<QuickButton[]>([]);
+const selectedButtonId = ref<string | null>(null);
 const textareaH = ref(DEFAULT_TEXTAREA_H);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 let dragStartY = 0;
@@ -80,6 +81,11 @@ function openEditor() {
     // Fallback to compatible deep copy approach
     editButtons.value = props.quickButtons.map(btn => ({ ...btn }));
   }
+  if (editButtons.value.length > 0) {
+    selectedButtonId.value = editButtons.value[0].id;
+  } else {
+    selectedButtonId.value = null;
+  }
   showEditor.value = true;
 }
 
@@ -89,7 +95,9 @@ function saveEditor() {
 }
 
 function addButton() {
-  editButtons.value = [...editButtons.value, { id: crypto.randomUUID(), label: "", command: "" }];
+  const newId = crypto.randomUUID();
+  editButtons.value = [...editButtons.value, { id: newId, label: "", command: "" }];
+  selectedButtonId.value = newId;
 }
 
 function updateButton(id: string, field: "label" | "command", value: string) {
@@ -99,7 +107,16 @@ function updateButton(id: string, field: "label" | "command", value: string) {
 }
 
 function deleteButton(id: string) {
+  const index = editButtons.value.findIndex(b => b.id === id);
   editButtons.value = editButtons.value.filter((button) => button.id !== id);
+  if (selectedButtonId.value === id) {
+    if (editButtons.value.length > 0) {
+      const nextIndex = Math.min(index, editButtons.value.length - 1);
+      selectedButtonId.value = editButtons.value[nextIndex].id;
+    } else {
+      selectedButtonId.value = null;
+    }
+  }
 }
 
 function moveButton(id: string, direction: -1 | 1) {
@@ -177,40 +194,66 @@ function closeEditor() {
         </div>
 
         <div class="quick-btn-editor-body">
-          <p v-if="editButtons.length === 0" class="quick-btn-editor-empty">
-            No buttons yet — click <strong>+ Add</strong> to create one.
-          </p>
-
-          <div v-for="(button, index) in editButtons" :key="button.id" class="quick-btn-editor-item">
-            <div class="quick-btn-editor-row">
-              <div class="quick-btn-editor-order">
-                <button type="button" :disabled="index === 0" title="Move up" @click="moveButton(button.id, -1)">▲</button>
+          <div class="quick-btn-editor-sidebar">
+            <div
+              v-for="(button, index) in editButtons"
+              :key="button.id"
+              class="quick-btn-editor-sidebar-item"
+              :class="{ active: selectedButtonId === button.id }"
+              @click="selectedButtonId = button.id"
+            >
+              <span class="quick-btn-editor-sidebar-label">
+                {{ button.label.trim() || '(No Label)' }}
+              </span>
+              <div class="quick-btn-editor-sidebar-actions">
+                <button type="button" :disabled="index === 0" title="Move up" @click.stop="moveButton(button.id, -1)">▲</button>
                 <button
                   type="button"
                   :disabled="index === editButtons.length - 1"
                   title="Move down"
-                  @click="moveButton(button.id, 1)"
+                  @click.stop="moveButton(button.id, 1)"
                 >
                   ▼
                 </button>
+                <button type="button" class="quick-btn-editor-sidebar-delete" title="Delete" @click.stop="deleteButton(button.id)">×</button>
               </div>
-              <input
-                type="text"
-                class="quick-btn-editor-input quick-btn-editor-input--label"
-                placeholder="Label (Display name)"
-                :value="button.label"
-                @input="updateButton(button.id, 'label', inputValue($event))"
-              >
-              <button type="button" class="quick-btn-editor-delete" title="Delete" @click="deleteButton(button.id)">×</button>
             </div>
-            <div class="quick-btn-editor-row">
-              <textarea
-                class="quick-btn-editor-input quick-btn-editor-input--command"
-                placeholder="Command (e.g. ls -la)"
-                :value="button.command"
-                spellcheck="false"
-                @input="updateButton(button.id, 'command', inputValue($event))"
-              />
+            <p v-if="editButtons.length === 0" class="quick-btn-editor-empty">
+              No buttons yet.
+            </p>
+          </div>
+
+          <div class="quick-btn-editor-content">
+            <template v-if="selectedButtonId">
+              <div
+                v-for="button in editButtons.filter(b => b.id === selectedButtonId)"
+                :key="button.id"
+                class="quick-btn-editor-detail"
+              >
+                <div class="quick-btn-editor-field">
+                  <label>Label</label>
+                  <input
+                    type="text"
+                    class="quick-btn-editor-input quick-btn-editor-input--label"
+                    placeholder="Display name"
+                    :value="button.label"
+                    @input="updateButton(button.id, 'label', inputValue($event))"
+                  >
+                </div>
+                <div class="quick-btn-editor-field quick-btn-editor-field--command">
+                  <label>Command</label>
+                  <textarea
+                    class="quick-btn-editor-input quick-btn-editor-input--command"
+                    placeholder="Command to send (e.g. ls -la)"
+                    :value="button.command"
+                    spellcheck="false"
+                    @input="updateButton(button.id, 'command', inputValue($event))"
+                  />
+                </div>
+              </div>
+            </template>
+            <div v-else class="quick-btn-editor-content-empty">
+              Select a button to edit or click <strong>+ Add</strong> to create one.
             </div>
           </div>
         </div>
