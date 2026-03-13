@@ -345,6 +345,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
 
 .bookmark-search-input {
   width: 100%;
+  box-sizing: border-box;
   background: #1e1e1e;
   border: 1px solid #3c3c3c;
   border-radius: 4px;
