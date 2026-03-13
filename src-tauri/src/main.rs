@@ -630,15 +630,11 @@ fn main() {
                     .item(&new_serial_item)
                     .build()?;
 
-                let preferences_menu = SubmenuBuilder::new(_app, "Preferences")
-                    .item(&settings_item)
-                    .build()?;
-
                 let file_menu = SubmenuBuilder::new(_app, "File")
                     .item(&new_session_menu)
                     .item(&close_tab_item)
                     .separator()
-                    .item(&preferences_menu)
+                    .item(&settings_item)
                     .separator()
                     .item(&exit_item)
                     .build()?;
