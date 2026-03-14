@@ -59,6 +59,12 @@ export interface AppSettings {
   recentSerialConfigs: SerialHistoryItem[];
   /** Input history for the input bar (most recent first) */
   inputHistory: string[];
+  /** Whether to restore the previous session tabs on startup */
+  restoreTabsOnStartup: boolean;
+  /** Persisted split-pane layout state */
+  paneLayout: unknown | null;
+  /** Persisted workspace snapshot including tabs and pane layout */
+  workspaceState: unknown | null;
 }
 
 const LEGACY_DEFAULT_THEME: TerminalTheme = {
@@ -94,6 +100,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   lastSerialConfig: null,
   recentSerialConfigs: [],
   inputHistory: [],
+  restoreTabsOnStartup: false,
+  paneLayout: null,
+  workspaceState: null,
 };
 
 export const MAX_INPUT_HISTORY = 100;
@@ -130,5 +139,8 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     lastSerialConfig: value?.lastSerialConfig ?? DEFAULT_SETTINGS.lastSerialConfig,
     recentSerialConfigs: value?.recentSerialConfigs ?? DEFAULT_SETTINGS.recentSerialConfigs,
     inputHistory: value?.inputHistory ?? DEFAULT_SETTINGS.inputHistory,
+    restoreTabsOnStartup: value?.restoreTabsOnStartup ?? DEFAULT_SETTINGS.restoreTabsOnStartup,
+    paneLayout: value?.paneLayout ?? DEFAULT_SETTINGS.paneLayout,
+    workspaceState: value?.workspaceState ?? DEFAULT_SETTINGS.workspaceState,
   };
 }

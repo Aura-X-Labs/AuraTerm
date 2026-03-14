@@ -46,7 +46,8 @@ interface ReconnectSessionPromptState {
 
 const props = defineProps<{
   sessionId: string;
-  isActive: boolean;
+  isVisible: boolean;
+  isFocused: boolean;
   session: SessionConfig;
   logPath?: string;
   settings?: AppSettings;
@@ -255,13 +256,26 @@ watch(effectiveSettings, (value) => {
   fitAddon?.fit();
 }, { deep: true });
 
-watch(() => props.isActive, (isActive) => {
-  if (!isActive) {
+watch(() => props.isFocused, (isFocused) => {
+  if (!isFocused || !props.isVisible) {
     return;
   }
   setTimeout(() => {
     fitAddon?.fit();
     terminal?.focus();
+  }, 0);
+});
+
+watch(() => props.isVisible, (isVisible) => {
+  if (!isVisible) {
+    return;
+  }
+
+  setTimeout(() => {
+    fitAddon?.fit();
+    if (props.isFocused) {
+      terminal?.focus();
+    }
   }, 0);
 });
 
@@ -384,7 +398,7 @@ onMounted(() => {
   terminal.loadAddon(fitAddon);
   terminal.open(terminalRootRef.value);
   fitAddon.fit();
-  if (props.isActive) {
+  if (props.isFocused) {
     terminal.focus();
   }
 
@@ -492,7 +506,7 @@ onMounted(() => {
   });
 
   const handleWindowResize = () => {
-    if (!props.isActive) {
+    if (!props.isVisible) {
       return;
     }
     fitAddon?.fit();
@@ -812,7 +826,7 @@ function handleSkipReconnectSession() {
       position: 'relative',
       width: '100%',
       height: '100%',
-      display: isActive ? 'flex' : 'none',
+      display: isVisible ? 'flex' : 'none',
       flexDirection: 'column',
     }"
   >

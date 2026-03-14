@@ -48,10 +48,81 @@ interface TabContextMenuState {
   tabId: string;
 }
 
+type PaneAxis = "horizontal" | "vertical";
+
+interface PaneLeafNode {
+  kind: "leaf";
+  paneId: string;
+  tabId: string | null;
+}
+
+interface PaneSplitNode {
+  kind: "split";
+  splitId: string;
+  axis: PaneAxis;
+  ratio: number;
+  first: PaneNode;
+  second: PaneNode;
+}
+
+type PaneNode = PaneLeafNode | PaneSplitNode;
+
+interface PaneRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface PaneLeafLayout {
+  paneId: string;
+  tabId: string | null;
+  rect: PaneRect;
+}
+
+interface PaneSplitHandleLayout {
+  splitId: string;
+  axis: PaneAxis;
+  parentRect: PaneRect;
+  position: number;
+}
+
+interface RemovePaneResult {
+  node: PaneNode | null;
+  removed: boolean;
+  fallbackPaneId: string | null;
+}
+
+interface PersistedPaneLayoutState {
+  root: PaneNode;
+  focusedPaneId: string | null;
+}
+
+interface PersistedTabSnapshot {
+  id: string;
+  title: string;
+  session: SessionConfig;
+  logPath?: string;
+}
+
+interface PersistedWorkspaceState {
+  version: 1;
+  tabs: PersistedTabSnapshot[];
+  paneLayout: PaneNode;
+  focusedPaneId: string | null;
+  activeTabId: string | null;
+}
+
 type AppMenuId = "file" | "view" | "help";
 type FileSubmenuId = "new-session" | "preferences";
 
 let nextTabId = 1;
+let nextPaneId = 1;
+let nextSplitId = 1;
+const PANE_HEADER_HEIGHT = 30;
+const PANE_INSET = 4;
+const MIN_PANE_RATIO = 0.15;
+const MAX_PANE_RATIO = 0.85;
 
 // NATO 字母表，用于生成唯一的标签页后缀
 const NATO_ALPHABET = [
@@ -147,8 +218,14 @@ function formatSerialFrame(serialConfig: SerialConfig) {
   return `${serialConfig.dataBits}${parity}${serialConfig.stopBits}`;
 }
 
-const tabs = ref<Tab[]>([{ id: "tab-0", title: "Local Shell", session: { protocol: "local" } }]);
-const activeTabId = ref("tab-0");
+const tabs = ref<Tab[]>([]);
+const paneLayout = ref<PaneNode>({
+  kind: "leaf",
+  paneId: "pane-0",
+  tabId: null,
+});
+const focusedPaneId = ref("pane-0");
+const activeTabId = ref("");
 const osType = ref("windows");
 const showConnectDialog = ref(false);
 const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
@@ -165,6 +242,7 @@ const openMenuId = ref<AppMenuId | null>(null);
 const openFileSubmenuId = ref<FileSubmenuId | null>(null);
 const draggedTabId = ref<string | null>(null);
 const dragPreviewTabId = ref<string | null>(null);
+const hoveredEmptyPaneId = ref<string | null>(null);
 const renamingTabId = ref<string | null>(null);
 const renamingTabTitle = ref("");
 const tabContextMenu = ref<TabContextMenuState | null>(null);
@@ -174,9 +252,776 @@ let tabDragMoved = false;
 const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const tabContextMenuRef = ref<HTMLDivElement | null>(null);
+const terminalContainerRef = ref<HTMLDivElement | null>(null);
 const isFullscreen = ref(false);
 const termRefs = new Map<string, TerminalHandle>();
+const paneViewportRefs = new Map<string, HTMLElement>();
 const cleanupFns: Array<() => void> = [];
+let paneResizeObserver: ResizeObserver | null = null;
+let pendingFitFrame: number | null = null;
+const pendingFitTabIds = new Set<string>();
+let cleanupPaneResizeTracking: (() => void) | null = null;
+let persistWorkspaceStateTimer: number | null = null;
+const hasLoadedSettings = ref(false);
+
+function createDefaultPaneLayoutState(sourceTabs: Tab[]): PersistedPaneLayoutState {
+  return {
+    root: {
+      kind: "leaf",
+      paneId: "pane-0",
+      tabId: sourceTabs[0]?.id ?? null,
+    },
+    focusedPaneId: "pane-0",
+  };
+}
+
+function createDefaultLocalShellTab(tabId = "tab-0"): Tab {
+  return {
+    id: tabId,
+    title: "Local Shell",
+    session: { protocol: "local" },
+  };
+}
+
+function syncTabIdCounter(sourceTabs: Array<{ id: string }>) {
+  let maxTabIndex = -1;
+
+  for (const item of sourceTabs) {
+    maxTabIndex = Math.max(maxTabIndex, parseSequenceId(item.id, "tab-") ?? -1);
+  }
+
+  nextTabId = Math.max(nextTabId, maxTabIndex + 1);
+}
+
+function createPaneId() {
+  return `pane-${nextPaneId++}`;
+}
+
+function createSplitId() {
+  return `split-${nextSplitId++}`;
+}
+
+function parseSequenceId(value: string | null | undefined, prefix: string) {
+  if (!value || !value.startsWith(prefix)) {
+    return null;
+  }
+
+  const numericValue = Number.parseInt(value.slice(prefix.length), 10);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function syncPaneIdCounters(node: PaneNode) {
+  let maxPaneIndex = -1;
+  let maxSplitIndex = -1;
+
+  const walk = (current: PaneNode) => {
+    if (current.kind === "leaf") {
+      maxPaneIndex = Math.max(maxPaneIndex, parseSequenceId(current.paneId, "pane-") ?? -1);
+      return;
+    }
+
+    maxSplitIndex = Math.max(maxSplitIndex, parseSequenceId(current.splitId, "split-") ?? -1);
+    walk(current.first);
+    walk(current.second);
+  };
+
+  walk(node);
+  nextPaneId = Math.max(nextPaneId, maxPaneIndex + 1);
+  nextSplitId = Math.max(nextSplitId, maxSplitIndex + 1);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function restoreSessionConfig(value: unknown): SessionConfig | null {
+  if (!isRecord(value) || typeof value.protocol !== "string") {
+    return null;
+  }
+
+  if (value.protocol === "local") {
+    return {
+      protocol: "local",
+      cwd: typeof value.cwd === "string" ? value.cwd : undefined,
+    };
+  }
+
+  if (value.protocol === "ssh" && isRecord(value.sshConfig)) {
+    const sshConfig = value.sshConfig;
+    if (typeof sshConfig.host !== "string" || typeof sshConfig.port !== "number" || typeof sshConfig.user !== "string") {
+      return null;
+    }
+
+    return {
+      protocol: "ssh",
+      sshConfig: {
+        host: sshConfig.host,
+        port: sshConfig.port,
+        user: sshConfig.user,
+        password: typeof sshConfig.password === "string" ? sshConfig.password : undefined,
+        privateKey: typeof sshConfig.privateKey === "string" ? sshConfig.privateKey : undefined,
+        autoReconnect: typeof sshConfig.autoReconnect === "boolean" ? sshConfig.autoReconnect : undefined,
+        reconnectType: sshConfig.reconnectType === "manual"
+          || sshConfig.reconnectType === "simple"
+          || sshConfig.reconnectType === "screen"
+          || sshConfig.reconnectType === "tmux"
+          ? sshConfig.reconnectType
+          : undefined,
+      },
+    };
+  }
+
+  if (value.protocol === "telnet" && isRecord(value.telnetConfig)) {
+    const telnetConfig = value.telnetConfig;
+    if (typeof telnetConfig.host !== "string" || typeof telnetConfig.port !== "number") {
+      return null;
+    }
+
+    return {
+      protocol: "telnet",
+      telnetConfig: {
+        host: telnetConfig.host,
+        port: telnetConfig.port,
+      },
+    };
+  }
+
+  if (value.protocol === "serial" && isRecord(value.serialConfig)) {
+    const serialConfig = value.serialConfig;
+    if (
+      typeof serialConfig.portName !== "string"
+      || typeof serialConfig.baudRate !== "number"
+      || (serialConfig.dataBits !== 5 && serialConfig.dataBits !== 6 && serialConfig.dataBits !== 7 && serialConfig.dataBits !== 8)
+      || (serialConfig.stopBits !== 1 && serialConfig.stopBits !== 2)
+      || (serialConfig.parity !== "none" && serialConfig.parity !== "odd" && serialConfig.parity !== "even")
+      || (serialConfig.flowControl !== "none" && serialConfig.flowControl !== "hardware" && serialConfig.flowControl !== "software")
+    ) {
+      return null;
+    }
+
+    return {
+      protocol: "serial",
+      serialConfig: {
+        portName: serialConfig.portName,
+        baudRate: serialConfig.baudRate,
+        dataBits: serialConfig.dataBits,
+        stopBits: serialConfig.stopBits,
+        parity: serialConfig.parity,
+        flowControl: serialConfig.flowControl,
+      },
+    };
+  }
+
+  return null;
+}
+
+function restorePersistedTabSnapshot(value: unknown): Tab | null {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.title !== "string") {
+    return null;
+  }
+
+  const session = restoreSessionConfig(value.session);
+  if (!session) {
+    return null;
+  }
+
+  return {
+    id: value.id,
+    title: value.title,
+    session,
+    logPath: typeof value.logPath === "string" ? value.logPath : undefined,
+  };
+}
+
+function restorePaneNode(value: unknown): PaneNode | null {
+  if (!isRecord(value) || value.kind !== "leaf" && value.kind !== "split") {
+    return null;
+  }
+
+  if (value.kind === "leaf") {
+    if (typeof value.paneId !== "string") {
+      return null;
+    }
+
+    return {
+      kind: "leaf",
+      paneId: value.paneId,
+      tabId: typeof value.tabId === "string" ? value.tabId : null,
+    };
+  }
+
+  if (typeof value.splitId !== "string") {
+    return null;
+  }
+  if (value.axis !== "horizontal" && value.axis !== "vertical") {
+    return null;
+  }
+
+  const first = restorePaneNode(value.first);
+  const second = restorePaneNode(value.second);
+  if (!first || !second) {
+    return null;
+  }
+
+  return {
+    kind: "split",
+    splitId: value.splitId,
+    axis: value.axis,
+    ratio: clampPaneRatio(typeof value.ratio === "number" ? value.ratio : 0.5),
+    first,
+    second,
+  };
+}
+
+function sanitizePaneTabs(node: PaneNode, sourceTabs: Tab[]): PaneNode {
+  const availableTabIds = new Set(sourceTabs.map((tab) => tab.id));
+  const assignedTabIds = new Set<string>();
+
+  const sanitize = (current: PaneNode): PaneNode => {
+    if (current.kind === "leaf") {
+      const nextTabId = current.tabId && availableTabIds.has(current.tabId) && !assignedTabIds.has(current.tabId)
+        ? current.tabId
+        : null;
+
+      if (nextTabId) {
+        assignedTabIds.add(nextTabId);
+      }
+
+      return {
+        ...current,
+        tabId: nextTabId,
+      };
+    }
+
+    return {
+      ...current,
+      ratio: clampPaneRatio(current.ratio),
+      first: sanitize(current.first),
+      second: sanitize(current.second),
+    };
+  };
+
+  return sanitize(node);
+}
+
+function restorePaneLayoutState(value: unknown, sourceTabs: Tab[]): PersistedPaneLayoutState {
+  if (!isRecord(value)) {
+    const fallbackState = createDefaultPaneLayoutState(sourceTabs);
+    syncPaneIdCounters(fallbackState.root);
+    return fallbackState;
+  }
+
+  const restoredRoot = restorePaneNode(value.root);
+  if (!restoredRoot) {
+    const fallbackState = createDefaultPaneLayoutState(sourceTabs);
+    syncPaneIdCounters(fallbackState.root);
+    return fallbackState;
+  }
+
+  const sanitizedRoot = fillEmptyPanes(sanitizePaneTabs(restoredRoot, sourceTabs), sourceTabs);
+  syncPaneIdCounters(sanitizedRoot);
+  const preferredFocusedPaneId = typeof value.focusedPaneId === "string" ? value.focusedPaneId : null;
+  const focusedPane = preferredFocusedPaneId ? findPaneById(sanitizedRoot, preferredFocusedPaneId) : null;
+
+  return {
+    root: sanitizedRoot,
+    focusedPaneId: focusedPane?.paneId ?? getFirstLeafPane(sanitizedRoot).paneId,
+  };
+}
+
+function restoreWorkspaceState(value: unknown): PersistedWorkspaceState | null {
+  if (!isRecord(value) || !Array.isArray(value.tabs) || value.version !== 1) {
+    return null;
+  }
+
+  const restoredTabs: Tab[] = [];
+  const usedIds = new Set<string>();
+  for (const item of value.tabs) {
+    const restoredTab = restorePersistedTabSnapshot(item);
+    if (!restoredTab || usedIds.has(restoredTab.id)) {
+      continue;
+    }
+    usedIds.add(restoredTab.id);
+    restoredTabs.push(restoredTab);
+  }
+
+  if (restoredTabs.length === 0) {
+    return null;
+  }
+
+  const paneState = restorePaneLayoutState({
+    root: value.paneLayout,
+    focusedPaneId: value.focusedPaneId,
+  }, restoredTabs);
+  const activeTabId = typeof value.activeTabId === "string" && restoredTabs.some((tab) => tab.id === value.activeTabId)
+    ? value.activeTabId
+    : null;
+
+  return {
+    version: 1,
+    tabs: restoredTabs,
+    paneLayout: paneState.root,
+    focusedPaneId: paneState.focusedPaneId,
+    activeTabId,
+  };
+}
+
+function createPersistedPaneLayoutState(): PersistedPaneLayoutState {
+  return {
+    root: paneLayout.value,
+    focusedPaneId: focusedPaneId.value || null,
+  };
+}
+
+function createPersistedWorkspaceState(restoreEnabled = settingsRef.value.restoreTabsOnStartup): PersistedWorkspaceState | null {
+  if (!restoreEnabled || tabs.value.length === 0) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    tabs: tabs.value.map((tab) => ({
+      id: tab.id,
+      title: tab.title,
+      session: tab.session,
+      logPath: tab.logPath,
+    })),
+    paneLayout: paneLayout.value,
+    focusedPaneId: focusedPaneId.value || null,
+    activeTabId: activeTabId.value || null,
+  };
+}
+
+function prepareSettingsForSave(baseSettings: AppSettings, restoreEnabled = baseSettings.restoreTabsOnStartup) {
+  return normalizeAppSettings({
+    ...baseSettings,
+    paneLayout: createPersistedPaneLayoutState(),
+    workspaceState: createPersistedWorkspaceState(restoreEnabled),
+  });
+}
+
+function applyRestoredWorkspaceState(restoredWorkspaceState: PersistedWorkspaceState) {
+  tabs.value = restoredWorkspaceState.tabs;
+  syncTabIdCounter(restoredWorkspaceState.tabs);
+  paneLayout.value = restoredWorkspaceState.paneLayout;
+  syncPaneIdCounters(restoredWorkspaceState.paneLayout);
+
+  const activeTabPane = restoredWorkspaceState.activeTabId
+    ? findPaneByTabId(restoredWorkspaceState.paneLayout, restoredWorkspaceState.activeTabId)
+    : null;
+  syncFocusedPaneState(activeTabPane?.paneId ?? restoredWorkspaceState.focusedPaneId ?? undefined);
+}
+
+function applyDefaultStartupWorkspace(persistedPaneLayout: unknown) {
+  const defaultTabs = [createDefaultLocalShellTab()];
+  tabs.value = defaultTabs;
+  syncTabIdCounter(defaultTabs);
+  const restoredPaneState = restorePaneLayoutState(persistedPaneLayout, defaultTabs);
+  paneLayout.value = restoredPaneState.root;
+  syncPaneIdCounters(restoredPaneState.root);
+  syncFocusedPaneState(restoredPaneState.focusedPaneId ?? undefined);
+}
+
+function scheduleWorkspaceStatePersistence() {
+  if (!hasLoadedSettings.value) {
+    return;
+  }
+
+  if (persistWorkspaceStateTimer !== null) {
+    window.clearTimeout(persistWorkspaceStateTimer);
+  }
+
+  persistWorkspaceStateTimer = window.setTimeout(() => {
+    persistWorkspaceStateTimer = null;
+    const nextSettings = prepareSettingsForSave(settingsRef.value);
+    if (
+      JSON.stringify(settingsRef.value.paneLayout) === JSON.stringify(nextSettings.paneLayout)
+      && JSON.stringify(settingsRef.value.workspaceState) === JSON.stringify(nextSettings.workspaceState)
+    ) {
+      return;
+    }
+
+    persistSettingsSilently(nextSettings);
+  }, 240);
+}
+
+function findPaneById(node: PaneNode, paneId: string): PaneLeafNode | null {
+  if (node.kind === "leaf") {
+    return node.paneId === paneId ? node : null;
+  }
+
+  return findPaneById(node.first, paneId) ?? findPaneById(node.second, paneId);
+}
+
+function findPaneByTabId(node: PaneNode, tabId: string): PaneLeafNode | null {
+  if (node.kind === "leaf") {
+    return node.tabId === tabId ? node : null;
+  }
+
+  return findPaneByTabId(node.first, tabId) ?? findPaneByTabId(node.second, tabId);
+}
+
+function assignTabToPane(node: PaneNode, paneId: string, tabId: string | null): PaneNode {
+  if (node.kind === "leaf") {
+    return node.paneId === paneId ? { ...node, tabId } : node;
+  }
+
+  return {
+    ...node,
+    first: assignTabToPane(node.first, paneId, tabId),
+    second: assignTabToPane(node.second, paneId, tabId),
+  };
+}
+
+function clearTabFromLayout(node: PaneNode, tabId: string): PaneNode {
+  if (node.kind === "leaf") {
+    return node.tabId === tabId ? { ...node, tabId: null } : node;
+  }
+
+  return {
+    ...node,
+    first: clearTabFromLayout(node.first, tabId),
+    second: clearTabFromLayout(node.second, tabId),
+  };
+}
+
+function splitPane(node: PaneNode, paneId: string, axis: PaneAxis, newPane: PaneLeafNode): PaneNode {
+  if (node.kind === "leaf") {
+    if (node.paneId !== paneId) {
+      return node;
+    }
+
+    return {
+      kind: "split",
+      splitId: createSplitId(),
+      axis,
+      ratio: 0.5,
+      first: node,
+      second: newPane,
+    };
+  }
+
+  return {
+    ...node,
+    first: splitPane(node.first, paneId, axis, newPane),
+    second: splitPane(node.second, paneId, axis, newPane),
+  };
+}
+
+function removePaneWithFallback(node: PaneNode, paneId: string): RemovePaneResult {
+  if (node.kind === "leaf") {
+    return {
+      node: node.paneId === paneId ? null : node,
+      removed: node.paneId === paneId,
+      fallbackPaneId: null,
+    };
+  }
+
+  const firstResult = removePaneWithFallback(node.first, paneId);
+  if (firstResult.removed) {
+    if (!firstResult.node) {
+      return {
+        node: node.second,
+        removed: true,
+        fallbackPaneId: getFirstLeafPane(node.second).paneId,
+      };
+    }
+
+    return {
+      node: { ...node, first: firstResult.node, second: node.second },
+      removed: true,
+      fallbackPaneId: firstResult.fallbackPaneId,
+    };
+  }
+
+  const secondResult = removePaneWithFallback(node.second, paneId);
+  if (secondResult.removed) {
+    if (!secondResult.node) {
+      return {
+        node: node.first,
+        removed: true,
+        fallbackPaneId: getFirstLeafPane(node.first).paneId,
+      };
+    }
+
+    return {
+      node: { ...node, first: node.first, second: secondResult.node },
+      removed: true,
+      fallbackPaneId: secondResult.fallbackPaneId,
+    };
+  }
+
+  return {
+    node,
+    removed: false,
+    fallbackPaneId: null,
+  };
+}
+
+function clampPaneRatio(ratio: number) {
+  return Math.max(MIN_PANE_RATIO, Math.min(MAX_PANE_RATIO, ratio));
+}
+
+function updateSplitRatio(node: PaneNode, splitId: string, ratio: number): PaneNode {
+  if (node.kind === "leaf") {
+    return node;
+  }
+
+  if (node.splitId === splitId) {
+    return {
+      ...node,
+      ratio: clampPaneRatio(ratio),
+    };
+  }
+
+  return {
+    ...node,
+    first: updateSplitRatio(node.first, splitId, ratio),
+    second: updateSplitRatio(node.second, splitId, ratio),
+  };
+}
+
+function collectPaneLeaves(node: PaneNode, rect: PaneRect = { left: 0, top: 0, width: 100, height: 100 }): PaneLeafLayout[] {
+  if (node.kind === "leaf") {
+    return [{ paneId: node.paneId, tabId: node.tabId, rect }];
+  }
+
+  if (node.axis === "vertical") {
+    const firstWidth = rect.width * node.ratio;
+    return [
+      ...collectPaneLeaves(node.first, { ...rect, width: firstWidth }),
+      ...collectPaneLeaves(node.second, {
+        left: rect.left + firstWidth,
+        top: rect.top,
+        width: rect.width - firstWidth,
+        height: rect.height,
+      }),
+    ];
+  }
+
+  const firstHeight = rect.height * node.ratio;
+  return [
+    ...collectPaneLeaves(node.first, { ...rect, height: firstHeight }),
+    ...collectPaneLeaves(node.second, {
+      left: rect.left,
+      top: rect.top + firstHeight,
+      width: rect.width,
+      height: rect.height - firstHeight,
+    }),
+  ];
+}
+
+function collectSplitHandles(node: PaneNode, rect: PaneRect = { left: 0, top: 0, width: 100, height: 100 }): PaneSplitHandleLayout[] {
+  if (node.kind === "leaf") {
+    return [];
+  }
+
+  const position = node.axis === "vertical"
+    ? rect.left + rect.width * node.ratio
+    : rect.top + rect.height * node.ratio;
+  const firstRect = node.axis === "vertical"
+    ? { ...rect, width: rect.width * node.ratio }
+    : { ...rect, height: rect.height * node.ratio };
+  const secondRect = node.axis === "vertical"
+    ? {
+        left: rect.left + rect.width * node.ratio,
+        top: rect.top,
+        width: rect.width - rect.width * node.ratio,
+        height: rect.height,
+      }
+    : {
+        left: rect.left,
+        top: rect.top + rect.height * node.ratio,
+        width: rect.width,
+        height: rect.height - rect.height * node.ratio,
+      };
+
+  return [
+    {
+      splitId: node.splitId,
+      axis: node.axis,
+      parentRect: rect,
+      position,
+    },
+    ...collectSplitHandles(node.first, firstRect),
+    ...collectSplitHandles(node.second, secondRect),
+  ];
+}
+
+function fillEmptyPanes(node: PaneNode, sourceTabs: Tab[]): PaneNode {
+  let nextLayout = node;
+  const visibleTabIds = new Set(
+    collectPaneLeaves(nextLayout)
+      .map((pane) => pane.tabId)
+      .filter((tabId): tabId is string => Boolean(tabId)),
+  );
+
+  for (const pane of collectPaneLeaves(nextLayout)) {
+    if (pane.tabId) {
+      continue;
+    }
+
+    const nextTab = sourceTabs.find((tab) => !visibleTabIds.has(tab.id));
+    if (!nextTab) {
+      break;
+    }
+
+    nextLayout = assignTabToPane(nextLayout, pane.paneId, nextTab.id);
+    visibleTabIds.add(nextTab.id);
+  }
+
+  return nextLayout;
+}
+
+function getTabTitle(tabId: string | null) {
+  return tabs.value.find((tab) => tab.id === tabId)?.title ?? "Empty Pane";
+}
+
+function getTabById(tabId: string | null) {
+  return tabs.value.find((tab) => tab.id === tabId) ?? null;
+}
+
+function getTabProtocolLabel(tabId: string | null) {
+  const tab = getTabById(tabId);
+  if (!tab) {
+    return "No Session";
+  }
+
+  switch (tab.session.protocol) {
+    case "local":
+      return "Local";
+    case "ssh":
+      return "SSH";
+    case "telnet":
+      return "Telnet";
+    case "serial":
+      return "Serial";
+  }
+}
+
+function getFirstLeafPane(node: PaneNode): PaneLeafNode {
+  if (node.kind === "leaf") {
+    return node;
+  }
+
+  return getFirstLeafPane(node.first);
+}
+
+function syncFocusedPaneState(preferredPaneId?: string) {
+  const nextFocusedPane = preferredPaneId
+    ? findPaneById(paneLayout.value, preferredPaneId)
+    : null;
+  const fallbackPane = nextFocusedPane ?? (paneLayout.value ? getFirstLeafPane(paneLayout.value) : null);
+
+  if (!fallbackPane) {
+    focusedPaneId.value = "";
+    activeTabId.value = "";
+    return;
+  }
+
+  focusedPaneId.value = fallbackPane.paneId;
+  activeTabId.value = fallbackPane.tabId ?? "";
+}
+
+function focusPane(paneId: string) {
+  const pane = findPaneById(paneLayout.value, paneId);
+  if (!pane) {
+    return;
+  }
+
+  focusedPaneId.value = paneId;
+  activeTabId.value = pane.tabId ?? "";
+}
+
+function assignTabToFocusedPane(tabId: string) {
+  const targetPane = findPaneById(paneLayout.value, focusedPaneId.value) ?? getFirstLeafPane(paneLayout.value);
+  paneLayout.value = clearTabFromLayout(paneLayout.value, tabId);
+  paneLayout.value = assignTabToPane(paneLayout.value, targetPane.paneId, tabId);
+  focusedPaneId.value = targetPane.paneId;
+  activeTabId.value = tabId;
+}
+
+function moveTabToPane(tabId: string, paneId: string) {
+  const targetPane = findPaneById(paneLayout.value, paneId);
+  if (!targetPane) {
+    return;
+  }
+
+  paneLayout.value = clearTabFromLayout(paneLayout.value, tabId);
+  paneLayout.value = assignTabToPane(paneLayout.value, paneId, tabId);
+  focusedPaneId.value = paneId;
+  activeTabId.value = tabId;
+}
+
+function findFirstHiddenTabId() {
+  const visibleTabIds = new Set(
+    collectPaneLeaves(paneLayout.value)
+      .map((pane) => pane.tabId)
+      .filter((tabId): tabId is string => Boolean(tabId)),
+  );
+  return tabs.value.find((tab) => !visibleTabIds.has(tab.id))?.id ?? null;
+}
+
+function handleSplitPane(axis: PaneAxis, paneId = focusedPaneId.value) {
+  const targetPane = findPaneById(paneLayout.value, paneId);
+  if (!targetPane) {
+    return;
+  }
+
+  const nextPaneId = createPaneId();
+  const hiddenTabId = findFirstHiddenTabId();
+  paneLayout.value = splitPane(paneLayout.value, paneId, axis, {
+    kind: "leaf",
+    paneId: nextPaneId,
+    tabId: hiddenTabId,
+  });
+  focusedPaneId.value = nextPaneId;
+  activeTabId.value = hiddenTabId ?? "";
+}
+
+function handleClosePane(paneId = focusedPaneId.value) {
+  const leafPanes = collectPaneLeaves(paneLayout.value);
+  if (leafPanes.length <= 1) {
+    return;
+  }
+
+  const result = removePaneWithFallback(paneLayout.value, paneId);
+  if (!result.node) {
+    return;
+  }
+
+  paneLayout.value = fillEmptyPanes(result.node, tabs.value);
+  const nextFocusedPaneId = paneId === focusedPaneId.value
+    ? result.fallbackPaneId ?? focusedPaneId.value
+    : focusedPaneId.value;
+  syncFocusedPaneState(nextFocusedPaneId);
+  void nextTick(() => {
+    fitVisibleTerminals();
+  });
+}
+
+function getPaneShellStyle(rect: PaneRect) {
+  return {
+    left: `calc(${rect.left}% + ${PANE_INSET}px)`,
+    top: `calc(${rect.top}% + ${PANE_INSET}px)`,
+    width: `calc(${rect.width}% - ${PANE_INSET * 2}px)`,
+    height: `calc(${rect.height}% - ${PANE_INSET * 2}px)`,
+  };
+}
+
+function getTerminalViewportStyle(rect: PaneRect, isVisible: boolean) {
+  return {
+    display: isVisible ? "block" : "none",
+    left: `calc(${rect.left}% + ${PANE_INSET + 1}px)`,
+    top: `calc(${rect.top}% + ${PANE_INSET + PANE_HEADER_HEIGHT + 1}px)`,
+    width: `calc(${rect.width}% - ${(PANE_INSET + 1) * 2}px)`,
+    height: `calc(${rect.height}% - ${PANE_INSET * 2 + PANE_HEADER_HEIGHT + 2}px)`,
+  };
+}
+
+function isPaneFocused(paneId: string) {
+  return isWindowFocused.value && focusedPaneId.value === paneId;
+}
 
 function closeOpenMenus() {
   openMenuId.value = null;
@@ -296,6 +1141,25 @@ function handleGlobalKeyDown(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  if (typeof ResizeObserver !== "undefined") {
+    paneResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width < 2 || entry.contentRect.height < 2) {
+          continue;
+        }
+
+        const tabId = (entry.target as HTMLElement).dataset.tabId;
+        if (tabId) {
+          queueTerminalFit(tabId);
+        }
+      }
+    });
+
+    for (const element of paneViewportRefs.values()) {
+      paneResizeObserver.observe(element);
+    }
+  }
+
   try {
     cleanupFns.push(await listen("tauri://focus", () => {
       isWindowFocused.value = true;
@@ -325,10 +1189,27 @@ onMounted(async () => {
 
   try {
     const loaded = await invoke<AppSettings>("get_settings");
-    settings.value = normalizeAppSettings(loaded);
+    const normalizedSettings = normalizeAppSettings(loaded);
+    settings.value = normalizedSettings;
+    settingsRef.value = normalizedSettings;
+
+    const restoredWorkspaceState = normalizedSettings.restoreTabsOnStartup
+      ? restoreWorkspaceState(normalizedSettings.workspaceState)
+      : null;
+
+    if (restoredWorkspaceState) {
+      applyRestoredWorkspaceState(restoredWorkspaceState);
+    } else {
+      applyDefaultStartupWorkspace(normalizedSettings.paneLayout);
+    }
   } catch {
-    settings.value = normalizeAppSettings();
+    const fallbackSettings = normalizeAppSettings();
+    settings.value = fallbackSettings;
+    settingsRef.value = fallbackSettings;
+    applyDefaultStartupWorkspace(fallbackSettings.paneLayout);
   }
+
+  hasLoadedSettings.value = true;
 
   try {
     cleanupFns.push(await listen("show-about", () => {
@@ -363,6 +1244,15 @@ onMounted(async () => {
     cleanupFns.push(await listen("menu-toggle-remote-files", () => {
       handleToggleRemoteFileManager();
     }));
+    cleanupFns.push(await listen("menu-split-right", () => {
+      handleSplitPaneFromView("vertical");
+    }));
+    cleanupFns.push(await listen("menu-split-down", () => {
+      handleSplitPaneFromView("horizontal");
+    }));
+    cleanupFns.push(await listen("menu-close-pane", () => {
+      handleClosePaneFromView();
+    }));
     cleanupFns.push(await listen("menu-increase-font-size", () => {
       handleIncreaseTerminalFontSize();
     }));
@@ -380,9 +1270,32 @@ onMounted(async () => {
   cleanupFns.push(() => {
     window.removeEventListener("keydown", handleGlobalKeyDown);
   });
+
+  void nextTick(() => {
+    fitVisibleTerminals();
+  });
 });
 
 onBeforeUnmount(() => {
+  if (hasLoadedSettings.value) {
+    const finalSettings = prepareSettingsForSave(settingsRef.value);
+    void invoke("save_settings", { settings: finalSettings }).catch((error) => {
+      console.error("save_settings on unmount failed", error);
+    });
+  }
+
+  if (persistWorkspaceStateTimer !== null) {
+    window.clearTimeout(persistWorkspaceStateTimer);
+    persistWorkspaceStateTimer = null;
+  }
+  cleanupPaneResizeTracking?.();
+  cleanupPaneResizeTracking = null;
+  if (pendingFitFrame !== null) {
+    window.cancelAnimationFrame(pendingFitFrame);
+    pendingFitFrame = null;
+  }
+  paneResizeObserver?.disconnect();
+  paneResizeObserver = null;
   cleanupTabPointerTracking();
   while (cleanupFns.length > 0) {
     const cleanup = cleanupFns.pop();
@@ -390,6 +1303,17 @@ onBeforeUnmount(() => {
   }
 });
 
+const paneLeaves = computed(() => collectPaneLeaves(paneLayout.value));
+const paneSplitHandles = computed(() => collectSplitHandles(paneLayout.value));
+const paneByTabId = computed<Record<string, PaneLeafLayout>>(() => {
+  const result: Record<string, PaneLeafLayout> = {};
+  for (const pane of paneLeaves.value) {
+    if (pane.tabId) {
+      result[pane.tabId] = pane;
+    }
+  }
+  return result;
+});
 const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value));
 const activeSshConfig = computed<SshConfig | null>(() => (
   activeTab.value?.session.protocol === "ssh" ? activeTab.value.session.sshConfig : null
@@ -411,15 +1335,141 @@ const appClassName = computed(() => [
   draggedTabId.value ? "tab-dragging" : "",
 ]);
 
+function flushPendingTerminalFits() {
+  pendingFitFrame = null;
+  const tabIds = [...pendingFitTabIds];
+  pendingFitTabIds.clear();
+
+  for (const tabId of tabIds) {
+    if (!paneByTabId.value[tabId]) {
+      continue;
+    }
+    termRefs.get(tabId)?.fit();
+  }
+}
+
+function queueTerminalFit(tabId: string | null | undefined) {
+  if (!tabId) {
+    return;
+  }
+
+  pendingFitTabIds.add(tabId);
+  if (pendingFitFrame !== null) {
+    return;
+  }
+
+  pendingFitFrame = window.requestAnimationFrame(() => {
+    flushPendingTerminalFits();
+  });
+}
+
+function fitVisibleTerminals() {
+  for (const pane of paneLeaves.value) {
+    queueTerminalFit(pane.tabId);
+  }
+}
+
+function focusActiveTerminal() {
+  if (!activeTabId.value) {
+    return;
+  }
+  termRefs.get(activeTabId.value)?.focus();
+}
+
+function setPaneViewportRef(tabId: string, instance: Element | null) {
+  const element = instance instanceof HTMLElement ? instance : null;
+  const previous = paneViewportRefs.get(tabId);
+
+  if (previous && previous !== element) {
+    paneResizeObserver?.unobserve(previous);
+    paneViewportRefs.delete(tabId);
+  }
+
+  if (!element) {
+    return;
+  }
+
+  element.dataset.tabId = tabId;
+  paneViewportRefs.set(tabId, element);
+  paneResizeObserver?.observe(element);
+  if (paneByTabId.value[tabId]) {
+    queueTerminalFit(tabId);
+  }
+}
+
+function getSplitHandleStyle(handle: PaneSplitHandleLayout) {
+  if (handle.axis === "vertical") {
+    return {
+      left: `calc(${handle.position}% - 5px)`,
+      top: `${handle.parentRect.top}%`,
+      width: "10px",
+      height: `${handle.parentRect.height}%`,
+    };
+  }
+
+  return {
+    left: `${handle.parentRect.left}%`,
+    top: `calc(${handle.position}% - 5px)`,
+    width: `${handle.parentRect.width}%`,
+    height: "10px",
+  };
+}
+
+function handlePaneResizePointerDown(event: PointerEvent, handle: PaneSplitHandleLayout) {
+  if (event.button !== 0 || !terminalContainerRef.value) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  cleanupPaneResizeTracking?.();
+
+  const applyRatioFromPointer = (pointerEvent: PointerEvent) => {
+    const containerRect = terminalContainerRef.value?.getBoundingClientRect();
+    if (!containerRect || containerRect.width <= 0 || containerRect.height <= 0) {
+      return;
+    }
+
+    const pointerPercentX = ((pointerEvent.clientX - containerRect.left) / containerRect.width) * 100;
+    const pointerPercentY = ((pointerEvent.clientY - containerRect.top) / containerRect.height) * 100;
+    const ratio = handle.axis === "vertical"
+      ? (pointerPercentX - handle.parentRect.left) / handle.parentRect.width
+      : (pointerPercentY - handle.parentRect.top) / handle.parentRect.height;
+
+    paneLayout.value = updateSplitRatio(paneLayout.value, handle.splitId, ratio);
+  };
+
+  const handlePointerMove = (pointerEvent: PointerEvent) => {
+    applyRatioFromPointer(pointerEvent);
+  };
+
+  const stopTracking = () => {
+    window.removeEventListener("pointermove", handlePointerMove);
+    window.removeEventListener("pointerup", stopTracking);
+    window.removeEventListener("pointercancel", stopTracking);
+    cleanupPaneResizeTracking = null;
+    void nextTick(() => {
+      fitVisibleTerminals();
+    });
+  };
+
+  cleanupPaneResizeTracking = stopTracking;
+  window.addEventListener("pointermove", handlePointerMove);
+  window.addEventListener("pointerup", stopTracking);
+  window.addEventListener("pointercancel", stopTracking);
+  applyRatioFromPointer(event);
+}
+
 async function handleSaveSettings(newSettings: AppSettings) {
-  const normalizedSettings = normalizeAppSettings(newSettings);
+  const normalizedSettings = prepareSettingsForSave(newSettings, newSettings.restoreTabsOnStartup);
   await invoke("save_settings", { settings: normalizedSettings }).catch(console.error);
+  settingsRef.value = normalizedSettings;
   settings.value = normalizedSettings;
   showSettings.value = false;
 }
 
 function persistSettingsSilently(newSettings: AppSettings) {
-  const normalizedSettings = normalizeAppSettings(newSettings);
+  const normalizedSettings = prepareSettingsForSave(newSettings, newSettings.restoreTabsOnStartup);
   settingsRef.value = normalizedSettings;
   settings.value = normalizedSettings;
   void invoke("save_settings", { settings: normalizedSettings }).catch((error) => {
@@ -484,8 +1534,9 @@ function handleInputSend(text: string) {
 }
 
 async function handleButtonsChange(buttons: QuickButton[]) {
-  const newSettings = normalizeAppSettings({ ...settings.value, quickButtons: buttons });
+  const newSettings = prepareSettingsForSave({ ...settings.value, quickButtons: buttons });
   await invoke("save_settings", { settings: newSettings }).catch(console.error);
+  settingsRef.value = newSettings;
   settings.value = newSettings;
 }
 
@@ -503,20 +1554,38 @@ function setTerminalRef(tabId: string, instance: unknown) {
   const handle = instance as TerminalHandle | null;
   if (handle) {
     termRefs.set(tabId, handle);
+    if (paneByTabId.value[tabId]) {
+      queueTerminalFit(tabId);
+    }
     return;
   }
   termRefs.delete(tabId);
 }
 
 function fitActiveTerminal() {
-  const handle = termRefs.get(activeTabId.value);
-  if (handle) {
-    handle.fit();
-  }
+  fitVisibleTerminals();
 }
 
 watch(() => settings.value.showInputBar, () => {
-  setTimeout(fitActiveTerminal, 0);
+  void nextTick(() => {
+    fitActiveTerminal();
+  });
+});
+
+watch([paneLayout, sidebarOpen, showRemoteFileManager], () => {
+  void nextTick(() => {
+    fitVisibleTerminals();
+  });
+}, { deep: true });
+
+watch([tabs, paneLayout, focusedPaneId, activeTabId], () => {
+  scheduleWorkspaceStatePersistence();
+}, { deep: true });
+
+watch(focusedPaneId, () => {
+  void nextTick(() => {
+    focusActiveTerminal();
+  });
 });
 
 watch(activeSshConfig, (value) => {
@@ -526,6 +1595,32 @@ watch(activeSshConfig, (value) => {
 });
 
 function selectTab(tabId: string) {
+  const visiblePane = findPaneByTabId(paneLayout.value, tabId);
+  if (visiblePane) {
+    focusPane(visiblePane.paneId);
+    return;
+  }
+
+  assignTabToFocusedPane(tabId);
+}
+
+function splitTabToPane(tabId: string, axis: PaneAxis) {
+  const visiblePane = findPaneByTabId(paneLayout.value, tabId);
+  if (visiblePane) {
+    focusPane(visiblePane.paneId);
+    handleSplitPane(axis, visiblePane.paneId);
+    return;
+  }
+
+  const targetPane = findPaneById(paneLayout.value, focusedPaneId.value) ?? getFirstLeafPane(paneLayout.value);
+  const nextPaneId = createPaneId();
+  paneLayout.value = clearTabFromLayout(paneLayout.value, tabId);
+  paneLayout.value = splitPane(paneLayout.value, targetPane.paneId, axis, {
+    kind: "leaf",
+    paneId: nextPaneId,
+    tabId,
+  });
+  focusedPaneId.value = nextPaneId;
   activeTabId.value = tabId;
 }
 
@@ -595,7 +1690,12 @@ function handleTabContextMenu(event: MouseEvent, tabId: string) {
   }
 
   event.preventDefault();
-  activeTabId.value = tabId;
+  const visiblePane = findPaneByTabId(paneLayout.value, tabId);
+  if (visiblePane) {
+    focusPane(visiblePane.paneId);
+  } else {
+    activeTabId.value = tabId;
+  }
   tabContextMenu.value = {
     x: event.clientX,
     y: event.clientY,
@@ -610,6 +1710,42 @@ function handleRenameTabFromContextMenu() {
   }
 
   startTabRename(tabId);
+}
+
+function handleSplitTabFromContextMenu(axis: PaneAxis) {
+  const tabId = tabContextMenu.value?.tabId;
+  if (!tabId) {
+    return;
+  }
+
+  tabContextMenu.value = null;
+  splitTabToPane(tabId, axis);
+}
+
+function handleMoveTabToFocusedPaneFromContextMenu() {
+  const tabId = tabContextMenu.value?.tabId;
+  if (!tabId) {
+    return;
+  }
+
+  tabContextMenu.value = null;
+  assignTabToFocusedPane(tabId);
+}
+
+function handleClosePaneFromContextMenu() {
+  const tabId = tabContextMenu.value?.tabId;
+  if (!tabId) {
+    return;
+  }
+
+  const pane = findPaneByTabId(paneLayout.value, tabId) ?? findPaneById(paneLayout.value, focusedPaneId.value);
+  tabContextMenu.value = null;
+  if (!pane) {
+    return;
+  }
+
+  focusPane(pane.paneId);
+  handleClosePane(pane.paneId);
 }
 
 function moveTabToIndex(tabId: string, targetIndex: number) {
@@ -642,13 +1778,28 @@ function cleanupTabPointerTracking() {
 function beginTabDrag(tabId: string) {
   draggedTabId.value = tabId;
   dragPreviewTabId.value = tabId;
+  hoveredEmptyPaneId.value = null;
   activeTabId.value = tabId;
   tabDragMoved = true;
   suppressTabClick.value = true;
 }
 
+function updateDraggedEmptyPaneTarget(clientX: number, clientY: number) {
+  if (!draggedTabId.value) {
+    hoveredEmptyPaneId.value = null;
+    return;
+  }
+
+  const hoveredElement = document.elementFromPoint(clientX, clientY);
+  const target = hoveredElement instanceof HTMLElement
+    ? hoveredElement.closest<HTMLElement>(".terminal-pane-empty[data-pane-id]")
+    : null;
+  hoveredEmptyPaneId.value = target?.dataset.paneId ?? null;
+}
+
 function finishTabDrag() {
   const moved = tabDragMoved;
+  hoveredEmptyPaneId.value = null;
   cleanupTabPointerTracking();
   pendingTabDrag = null;
   tabDragMoved = false;
@@ -699,6 +1850,8 @@ function handleTabPointerMove(event: PointerEvent, tabId: string) {
     beginTabDrag(pendingTabDrag.tabId);
   }
 
+  updateDraggedEmptyPaneTarget(event.clientX, event.clientY);
+
   // Use bounding rects of all tabs to find the drop target while pointer is captured
   const allTabEls = document.querySelectorAll<HTMLElement>(".tab-item[data-tab-id]");
   let targetTabEl: HTMLElement | null = null;
@@ -734,6 +1887,12 @@ function handleTabPointerUp(_event: PointerEvent, tabId: string) {
   if (!pendingTabDrag || pendingTabDrag.tabId !== tabId) {
     return;
   }
+
+  const dropPaneId = draggedTabId.value ? hoveredEmptyPaneId.value : null;
+  if (draggedTabId.value && dropPaneId) {
+    moveTabToPane(draggedTabId.value, dropPaneId);
+  }
+
   finishTabDrag();
 }
 
@@ -745,6 +1904,7 @@ function handleTabPointerCancel(tabId: string) {
   tabDragMoved = false;
   draggedTabId.value = null;
   dragPreviewTabId.value = null;
+  hoveredEmptyPaneId.value = null;
   suppressTabClick.value = false;
 }
 
@@ -887,6 +2047,16 @@ function handleToggleRemoteFileManager() {
   toggleRemoteFileManager();
 }
 
+function handleSplitPaneFromView(axis: PaneAxis) {
+  closeOpenMenus();
+  handleSplitPane(axis);
+}
+
+function handleClosePaneFromView() {
+  closeOpenMenus();
+  handleClosePane();
+}
+
 function handleCloseActiveTab() {
   closeOpenMenus();
   if (!activeTab.value) {
@@ -915,7 +2085,7 @@ function handleNewLocalSession() {
   const newId = `tab-${nextTabId++}`;
   const cwd = window.getStartupDir?.() ?? undefined;
   tabs.value = [...tabs.value, { id: newId, title: "Local Shell", session: { protocol: "local", cwd } }];
-  activeTabId.value = newId;
+  assignTabToFocusedPane(newId);
 }
 
 function openConnect(protocol: ConnectionProtocol) {
@@ -935,12 +2105,10 @@ function handleCloseTab(id: string) {
     cancelTabRename();
   }
 
-  if (activeTabId.value === id) {
-    const index = previousTabs.findIndex((tab) => tab.id === id);
-    activeTabId.value = nextTabs.length > 0 ? nextTabs[Math.max(0, index - 1)].id : "";
-  }
-
   tabs.value = nextTabs;
+  paneLayout.value = clearTabFromLayout(paneLayout.value, id);
+  paneLayout.value = fillEmptyPanes(paneLayout.value, nextTabs);
+  syncFocusedPaneState(focusedPaneId.value);
 
   if (id in serialConnectionStates.value) {
     const nextStates = { ...serialConnectionStates.value };
@@ -974,7 +2142,7 @@ async function handleConnectResult(result: ConnectResult) {
     updateSerialConnectionState(newId, "connecting");
   }
 
-  activeTabId.value = newId;
+  assignTabToFocusedPane(newId);
   showConnectDialog.value = false;
 
   if (!saveAs) {
@@ -1060,7 +2228,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
   }
 
   tabs.value = [...tabs.value, tab];
-  activeTabId.value = newId;
+  assignTabToFocusedPane(newId);
 }
 </script>
 
@@ -1173,6 +2341,16 @@ function handleBookmarkConnect(connection: SavedConnection) {
               </button>
               <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleRemoteFileManager">
                 <span>{{ showRemoteFileManager ? 'Hide Remote Files' : 'Show Remote Files' }}</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <button class="titlebar-menu-item" type="button" @click="handleSplitPaneFromView('vertical')">
+                <span>Split Right</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" @click="handleSplitPaneFromView('horizontal')">
+                <span>Split Down</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" :disabled="paneLeaves.length <= 1" @click="handleClosePaneFromView">
+                <span>Close Pane</span>
               </button>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleIncreaseTerminalFontSize">
@@ -1299,6 +2477,34 @@ function handleBookmarkConnect(connection: SavedConnection) {
 
       <div class="tab-bar-actions">
         <button
+          class="tab-new-btn"
+          type="button"
+          title="Split Right"
+          @mousedown.stop
+          @click.stop="handleSplitPane('vertical')"
+        >
+          ║
+        </button>
+        <button
+          class="tab-new-btn"
+          type="button"
+          title="Split Down"
+          @mousedown.stop
+          @click.stop="handleSplitPane('horizontal')"
+        >
+          ＝
+        </button>
+        <button
+          class="tab-new-btn"
+          type="button"
+          title="Close Pane"
+          :disabled="paneLeaves.length <= 1"
+          @mousedown.stop
+          @click.stop="handleClosePane()"
+        >
+          ◫
+        </button>
+        <button
           v-if="activeSshConfig"
           class="tab-new-btn tab-files-btn"
           :class="{ active: showRemoteFileManager }"
@@ -1319,6 +2525,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
       class="tab-context-menu"
       :style="{ top: `${tabContextMenu.y}px`, left: `${tabContextMenu.x}px` }"
     >
+      <button class="tab-context-item" type="button" @click="handleSplitTabFromContextMenu('vertical')">Split Right</button>
+      <button class="tab-context-item" type="button" @click="handleSplitTabFromContextMenu('horizontal')">Split Down</button>
+      <button class="tab-context-item" type="button" @click="handleMoveTabToFocusedPaneFromContextMenu">Move To Focused Pane</button>
+      <button class="tab-context-item" type="button" :disabled="paneLeaves.length <= 1" @click="handleClosePaneFromContextMenu">Close Pane</button>
+      <div class="titlebar-menu-separator" />
       <button class="tab-context-item" type="button" @click="handleRenameTabFromContextMenu">Rename Tab</button>
     </div>
 
@@ -1326,25 +2537,81 @@ function handleBookmarkConnect(connection: SavedConnection) {
       <BookmarkSidebar v-if="sidebarOpen" :refresh-token="sidebarRefreshToken" :settings="settings" @connect="handleBookmarkConnect" />
 
       <div class="terminal-wrapper">
-        <div class="terminal-container">
-          <div
-            v-if="tabs.length === 0"
-            style="display: flex; justify-content: center; align-items: center; height: 100%; color: #666"
-          >
+        <div ref="terminalContainerRef" class="terminal-container split-terminal-container">
+          <div v-if="tabs.length === 0" class="terminal-empty-state">
             No open tabs. Click + to open a new tab.
           </div>
-          <TerminalComponent
-            v-for="tab in tabs"
-            v-else
-            :key="tab.id"
-            :ref="(instance) => setTerminalRef(tab.id, instance)"
-            :session-id="tab.id"
-            :is-active="activeTabId === tab.id"
-            :session="tab.session"
-            :log-path="tab.logPath"
-            :settings="settings"
-            @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"
-          />
+
+          <div v-else class="pane-frame-layer">
+            <div
+              v-for="pane in paneLeaves"
+              :key="pane.paneId"
+              class="terminal-pane-frame"
+              :class="{ focused: isPaneFocused(pane.paneId), empty: !pane.tabId }"
+              :style="getPaneShellStyle(pane.rect)"
+            >
+              <div class="terminal-pane-header">
+                <div class="terminal-pane-header-meta" @mousedown="focusPane(pane.paneId)">
+                  <span class="terminal-pane-title">{{ getTabTitle(pane.tabId) }}</span>
+                  <span class="terminal-pane-protocol">{{ getTabProtocolLabel(pane.tabId) }}</span>
+                </div>
+                <div class="terminal-pane-actions">
+                  <button type="button" title="Split Right" @click.stop="focusPane(pane.paneId); handleSplitPane('vertical', pane.paneId)">║</button>
+                  <button type="button" title="Split Down" @click.stop="focusPane(pane.paneId); handleSplitPane('horizontal', pane.paneId)">＝</button>
+                  <button type="button" title="Close Pane" :disabled="paneLeaves.length <= 1" @click.stop="focusPane(pane.paneId); handleClosePane(pane.paneId)">×</button>
+                </div>
+              </div>
+
+              <div
+                v-if="!pane.tabId"
+                class="terminal-pane-empty"
+                :class="{ 'drag-target': hoveredEmptyPaneId === pane.paneId }"
+                :data-pane-id="pane.paneId"
+                @mousedown="focusPane(pane.paneId)"
+              >
+                <div class="terminal-pane-empty-title">Empty Pane</div>
+                <div class="terminal-pane-empty-desc">
+                  {{ draggedTabId ? 'Release to move this tab into the empty pane.' : 'Drag a tab here, or select a tab above to show it here.' }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="tabs.length > 0" class="terminal-instance-layer">
+            <div
+              v-for="tab in tabs"
+              :key="tab.id"
+              :ref="(instance) => setPaneViewportRef(tab.id, instance as Element | null)"
+              class="terminal-instance-shell"
+              :class="{ visible: Boolean(paneByTabId[tab.id]), focused: activeTabId === tab.id }"
+              :style="getTerminalViewportStyle(paneByTabId[tab.id]?.rect ?? { left: 0, top: 0, width: 0, height: 0 }, Boolean(paneByTabId[tab.id]))"
+              @mousedown="paneByTabId[tab.id] ? focusPane(paneByTabId[tab.id].paneId) : null"
+            >
+              <TerminalComponent
+                :ref="(instance) => setTerminalRef(tab.id, instance)"
+                :session-id="tab.id"
+                :is-visible="Boolean(paneByTabId[tab.id])"
+                :is-focused="activeTabId === tab.id"
+                :session="tab.session"
+                :log-path="tab.logPath"
+                :settings="settings"
+                @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"
+              />
+            </div>
+          </div>
+
+          <div v-if="tabs.length > 0" class="pane-resize-layer">
+            <div
+              v-for="handle in paneSplitHandles"
+              :key="handle.splitId"
+              class="pane-split-handle"
+              :class="handle.axis"
+              :style="getSplitHandleStyle(handle)"
+              @pointerdown="handlePaneResizePointerDown($event, handle)"
+            >
+              <div class="pane-split-handle-grip" />
+            </div>
+          </div>
         </div>
 
         <TerminalInputBar

@@ -86,6 +86,15 @@ pub struct Settings {
     /// Recent serial parameter presets inferred from usage history
     #[serde(default)]
     pub recent_serial_configs: Vec<SerialHistoryItem>,
+    /// Whether to restore the previous session tabs on startup
+    #[serde(default)]
+    pub restore_tabs_on_startup: bool,
+    /// Persisted split-pane layout state from the frontend
+    #[serde(default)]
+    pub pane_layout: Option<serde_json::Value>,
+    /// Persisted workspace snapshot including tabs and pane layout
+    #[serde(default)]
+    pub workspace_state: Option<serde_json::Value>,
 }
 
 fn default_true() -> bool { true }
@@ -111,6 +120,9 @@ impl Default for Settings {
             quick_buttons: vec![],
             last_serial_config: None,
             recent_serial_configs: vec![],
+            restore_tabs_on_startup: false,
+            pane_layout: None,
+            workspace_state: None,
         }
     }
 }

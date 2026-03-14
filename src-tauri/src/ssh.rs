@@ -210,6 +210,21 @@ fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn build_screen_attach_command(session_name: &str) -> String {
+    let escaped_session_name = shell_escape(session_name);
+    format!(
+        concat!(
+            "tmp_rc=$(mktemp /tmp/auraterm-screenrc.XXXXXX 2>/dev/null || mktemp -t auraterm-screenrc.XXXXXX) || exit 1; ",
+            "printf '%s\\n%s\\n' 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' > \"$tmp_rc\"; ",
+            "printf '\\033[32m[AuraTerm] Screen mode: wheel scroll and 10000 lines scrollback enabled.\\033[0m\\n'; ",
+            "screen -S {sess} -X eval 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' >/dev/null 2>&1 || true; ",
+            "screen -dr {sess} 2>/dev/null || screen -c \"$tmp_rc\" -S {sess}; ",
+            "status=$?; rm -f \"$tmp_rc\"; exit $status"
+        ),
+        sess = escaped_session_name,
+    )
+}
+
 fn auraterm_reconnect_session_name(id: &str) -> String {
     format!("{AURATERM_RECONNECT_SESSION_PREFIX}{id}")
 }
@@ -1413,11 +1428,7 @@ async fn open_pty_channel(
                             "tmux new-session -A -s {sess} 2>/dev/null || tmux attach-session -t {sess} 2>/dev/null || tmux new-session -s {sess}; tmux set -g mouse on 2>/dev/null; true",
                             sess = shell_escape(session_name)
                         ),
-                        ReconnectType::Screen => format!(
-                            "screen -dr {} 2>/dev/null || screen -S {}",
-                            shell_escape(session_name),
-                            shell_escape(session_name)
-                        ),
+                        ReconnectType::Screen => build_screen_attach_command(session_name),
                         ReconnectType::Manual => unreachable!(),
                         ReconnectType::Simple => unreachable!(),
                     };

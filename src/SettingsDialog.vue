@@ -199,6 +199,19 @@ function inputChecked(event: Event) {
               @change="update('showInputBar', inputChecked($event))"
             >
           </label>
+
+          <label class="settings-field settings-field--toggle">
+            <span>
+              <strong>Restore Session Tabs On Startup</strong>
+              <small>Restore all open tabs and pane layout after restarting AuraTerm</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :checked="settings.restoreTabsOnStartup"
+              @change="update('restoreTabsOnStartup', inputChecked($event))"
+            >
+          </label>
         </div>
 
         <!-- Keyboard & Mouse Tab -->

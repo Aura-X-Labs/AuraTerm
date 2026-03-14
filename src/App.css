@@ -453,6 +453,16 @@
   color: #ffffff;
 }
 
+.tab-context-item:disabled {
+  color: #737373;
+  cursor: default;
+}
+
+.tab-context-item:disabled:hover {
+  background: transparent;
+  color: #737373;
+}
+
 .tab-close-btn {
   background: transparent;
   border: none;
@@ -497,6 +507,16 @@
 .tab-new-btn:hover {
   background: #2b2b2b;
   color: #fff;
+}
+
+.tab-new-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tab-new-btn:disabled:hover {
+  background: transparent;
+  color: #aaa;
 }
 
 /* grabbing cursor across the entire window while dragging a tab */
@@ -548,6 +568,214 @@
   overflow: hidden;
   position: relative;
   min-width: 0;
+}
+
+.split-terminal-container {
+  background:
+    radial-gradient(circle at top left, rgba(0, 122, 204, 0.12), transparent 24%),
+    linear-gradient(180deg, #06080a 0%, #030405 100%);
+}
+
+.terminal-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #666;
+}
+
+.pane-frame-layer,
+.terminal-instance-layer,
+.pane-resize-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.pane-frame-layer {
+  z-index: 1;
+  pointer-events: none;
+}
+
+.terminal-instance-layer {
+  z-index: 2;
+}
+
+.pane-resize-layer {
+  z-index: 4;
+  pointer-events: none;
+}
+
+.terminal-pane-frame {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #1c252d;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(4, 9, 14, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.terminal-pane-frame.focused {
+  border-color: #007acc;
+  box-shadow: 0 0 0 1px rgba(0, 122, 204, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.terminal-pane-frame.empty {
+  background: rgba(12, 15, 20, 0.92);
+}
+
+.terminal-pane-header {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid #182028;
+  background: linear-gradient(180deg, rgba(20, 28, 36, 0.96), rgba(11, 16, 21, 0.96));
+  pointer-events: auto;
+}
+
+.terminal-pane-header-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  cursor: pointer;
+}
+
+.terminal-pane-title {
+  min-width: 0;
+  color: #f0f3f6;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-pane-protocol {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(0, 122, 204, 0.14);
+  color: #89cbff;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.terminal-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-pane-actions button {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #a3adb7;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.terminal-pane-actions button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.terminal-pane-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.terminal-pane-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #7d8793;
+  pointer-events: auto;
+  text-align: center;
+  padding: 20px;
+  border: 1px dashed transparent;
+  border-radius: 7px;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.terminal-pane-empty.drag-target {
+  border-color: rgba(124, 202, 255, 0.9);
+  background: rgba(10, 40, 66, 0.32);
+  color: #d7ecff;
+  box-shadow: inset 0 0 0 1px rgba(124, 202, 255, 0.18), 0 0 0 1px rgba(124, 202, 255, 0.18);
+}
+
+.terminal-pane-empty-title {
+  color: #dbe4ec;
+  font-size: 14px;
+}
+
+.terminal-pane-empty-desc {
+  font-size: 12px;
+  max-width: 220px;
+  line-height: 1.45;
+}
+
+.terminal-instance-shell {
+  position: absolute;
+  min-width: 0;
+  min-height: 0;
+}
+
+.terminal-instance-shell.visible {
+  display: block;
+}
+
+.pane-split-handle {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.pane-split-handle.vertical {
+  cursor: col-resize;
+}
+
+.pane-split-handle.horizontal {
+  cursor: row-resize;
+}
+
+.pane-split-handle-grip {
+  border-radius: 999px;
+  background: rgba(126, 190, 232, 0.26);
+  box-shadow: 0 0 0 1px rgba(5, 11, 16, 0.55);
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+
+.pane-split-handle.vertical .pane-split-handle-grip {
+  width: 3px;
+  height: min(56px, 55%);
+}
+
+.pane-split-handle.horizontal .pane-split-handle-grip {
+  width: min(56px, 55%);
+  height: 3px;
+}
+
+.pane-split-handle:hover .pane-split-handle-grip,
+.pane-split-handle:active .pane-split-handle-grip {
+  background: rgba(124, 202, 255, 0.92);
+  box-shadow: 0 0 0 1px rgba(124, 202, 255, 0.22), 0 0 18px rgba(124, 202, 255, 0.28);
 }
 
 /* ── Terminal Input Bar ──────────────────────────────────────────────────── */
