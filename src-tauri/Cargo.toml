@@ -1,6 +1,6 @@
 [package]
 name = "auraterm"
-version = "0.2.0"
+version = "0.2.1"
 description = "AuraTerm - Modern TeraTerm alternative"
 authors = ["William Yang"]
 edition = "2021"
