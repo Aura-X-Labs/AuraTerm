@@ -7,7 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { isReconnectEnabled, normalizeReconnectType } from "./types";
-import type { ReconnectType, SerialConnectionState, SessionConfig, SshConfig, TerminalHandle } from "./types";
+import type { ReconnectType, SavedConnection, SerialConnectionState, SessionConfig, SshConfig, TerminalHandle } from "./types";
 import "xterm/css/xterm.css";
 
 interface PtyOutputEvent {
@@ -55,6 +55,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   serialConnectionStateChange: [state: SerialConnectionState];
+  sessionUpdate: [session: SessionConfig];
+  sshPasswordUpdated: [];
 }>();
 
 function stripAnsi(value: string): string {
@@ -74,6 +76,10 @@ function isAuthError(errorText: string): boolean {
     || lower.includes("incorrect password")
     || lower.includes("permission denied")
   );
+}
+
+function writePasswordRetryPrompt(target: Terminal | null) {
+  target?.writeln("\r\n[Authentication failed] Incorrect password. Please enter a new password to retry.");
 }
 
 function formatLogTimestampParts(date = new Date()) {
@@ -285,6 +291,30 @@ function notifySerialConnectionStateChange(state: SerialConnectionState) {
   }
 }
 
+async function persistUpdatedSshPassword(sshConfig: SshConfig) {
+  if (!sshConfig.savedConnectionId) {
+    return;
+  }
+
+  try {
+    const connections = await invoke<SavedConnection[]>("get_connections");
+    const existing = connections.find((connection) => connection.id === sshConfig.savedConnectionId);
+    if (!existing) {
+      return;
+    }
+
+    await invoke("save_connection", {
+      connection: {
+        ...existing,
+        password: sshConfig.password,
+      },
+    });
+    emit("sshPasswordUpdated");
+  } catch (error) {
+    console.error("Failed to persist updated SSH password", error);
+  }
+}
+
 async function saveLog(tabTitle: string) {
   const plain = stripAnsi(logBuffer.value);
   return invoke<string>("save_terminal_log", {
@@ -350,10 +380,11 @@ async function reconnectSshSession() {
   } catch (error) {
     const errorText = String(error);
     ptyId.value = null;
-    terminal.writeln(`\r\n[Reconnect failed] ${errorText}`);
     if (isAuthError(errorText)) {
+      writePasswordRetryPrompt(terminal);
       showRetryOverlay.value = true;
     } else {
+      terminal.writeln(`\r\n[Reconnect failed] ${errorText}`);
       manualReconnectPending.value = true;
       terminal.writeln("\r\n[Press r or R to reconnect]");
     }
@@ -627,15 +658,16 @@ onMounted(() => {
           return;
         }
         const message = event.payload.message;
-        terminal.writeln(`\r\n[Session exited] ${message}`);
         if (activeSessionRef.value.protocol === "serial") {
           notifySerialConnectionStateChange("closed");
         }
         if (activeSessionRef.value.protocol === "ssh" && isAuthError(message)) {
           ptyId.value = null;
+          writePasswordRetryPrompt(terminal);
           showRetryOverlay.value = true;
           return;
         }
+        terminal.writeln(`\r\n[Session exited] ${message}`);
         if (activeSessionRef.value.protocol === "ssh") {
           const reconnectType = getSshReconnectType(activeSessionRef.value.sshConfig);
           if (reconnectType === "manual") {
@@ -738,7 +770,12 @@ onMounted(() => {
         if (session.protocol === "serial") {
           notifySerialConnectionStateChange("error");
         }
-        terminal.writeln(`\r\n[Failed to start session] ${errorText}`);
+        if (session.protocol === "ssh" && isAuthError(errorText)) {
+          writePasswordRetryPrompt(terminal);
+          showRetryOverlay.value = true;
+        } else {
+          terminal.writeln(`\r\n[Failed to start session] ${errorText}`);
+        }
         console.error("connect failed", error);
       }
     };
@@ -762,6 +799,8 @@ function handlePasswordRetry(event: Event) {
   showRetryOverlay.value = false;
   retryPassword.value = "";
   activeSession.value = { protocol: "ssh", sshConfig: newConfig };
+  emit("sessionUpdate", activeSession.value);
+  void persistUpdatedSshPassword(newConfig);
 }
 
 function handleMfaSubmit(event: Event) {

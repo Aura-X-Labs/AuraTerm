@@ -360,6 +360,7 @@ function restoreSessionConfig(value: unknown): SessionConfig | null {
         user: sshConfig.user,
         password: typeof sshConfig.password === "string" ? sshConfig.password : undefined,
         privateKey: typeof sshConfig.privateKey === "string" ? sshConfig.privateKey : undefined,
+        savedConnectionId: typeof sshConfig.savedConnectionId === "string" ? sshConfig.savedConnectionId : undefined,
         autoReconnect: typeof sshConfig.autoReconnect === "boolean" ? sshConfig.autoReconnect : undefined,
         reconnectType: sshConfig.reconnectType === "manual"
           || sshConfig.reconnectType === "simple"
@@ -630,7 +631,6 @@ function scheduleWorkspaceStatePersistence() {
   if (persistWorkspaceStateTimer !== null) {
     window.clearTimeout(persistWorkspaceStateTimer);
   }
-
   persistWorkspaceStateTimer = window.setTimeout(() => {
     persistWorkspaceStateTimer = null;
     const nextSettings = prepareSettingsForSave(settingsRef.value);
@@ -643,6 +643,14 @@ function scheduleWorkspaceStatePersistence() {
 
     persistSettingsSilently(nextSettings);
   }, 240);
+}
+
+function updateTabSession(tabId: string, session: SessionConfig) {
+  tabs.value = tabs.value.map((tab) => (
+    tab.id === tabId
+      ? { ...tab, session }
+      : tab
+  ));
 }
 
 function findPaneById(node: PaneNode, paneId: string): PaneLeafNode | null {
@@ -2121,9 +2129,16 @@ async function handleConnectResult(result: ConnectResult) {
   const newId = `tab-${nextTabId++}`;
   const { protocol, sshConfig, telnetConfig, serialConfig, saveAs, saveGroup } = result;
   let tab: Tab | null = null;
+  const savedConnectionId = saveAs ? crypto.randomUUID() : undefined;
 
   if (protocol === "ssh" && sshConfig) {
-    tab = createSessionTab(newId, { protocol: "ssh", sshConfig }, saveAs, result.logPath);
+    tab = createSessionTab(newId, {
+      protocol: "ssh",
+      sshConfig: {
+        ...sshConfig,
+        savedConnectionId,
+      },
+    }, saveAs, result.logPath);
   } else if (protocol === "telnet" && telnetConfig) {
     tab = createSessionTab(newId, { protocol: "telnet", telnetConfig }, saveAs, result.logPath);
   } else if (protocol === "serial" && serialConfig) {
@@ -2152,7 +2167,7 @@ async function handleConnectResult(result: ConnectResult) {
   const reconnectType = protocol === "ssh" ? normalizeReconnectType(sshConfig) : undefined;
 
   const connection: SavedConnection = {
-    id: crypto.randomUUID(),
+    id: savedConnectionId ?? crypto.randomUUID(),
     name: saveAs,
     group: saveGroup,
     logPath: result.logPath,
@@ -2217,6 +2232,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
         user: connection.user,
         password: connection.password,
         privateKey: connection.authType === "key" ? connection.privateKey : undefined,
+        savedConnectionId: connection.id,
         autoReconnect: isReconnectEnabled(reconnectType),
         reconnectType,
       },
@@ -2595,6 +2611,8 @@ function handleBookmarkConnect(connection: SavedConnection) {
                 :session="tab.session"
                 :log-path="tab.logPath"
                 :settings="settings"
+                @session-update="(session) => updateTabSession(tab.id, session)"
+                @ssh-password-updated="sidebarRefreshToken += 1"
                 @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"
               />
             </div>
