@@ -614,6 +614,7 @@
   overflow: hidden;
   background: rgba(4, 9, 14, 0.5);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  transition: left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out;
 }
 
 .terminal-pane-frame.focused {
@@ -635,6 +636,12 @@
   border-bottom: 1px solid #182028;
   background: linear-gradient(180deg, rgba(20, 28, 36, 0.96), rgba(11, 16, 21, 0.96));
   pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+}
+
+.terminal-pane-header:active {
+  cursor: grabbing;
 }
 
 .terminal-pane-header-meta {
@@ -643,7 +650,7 @@
   align-items: center;
   gap: 8px;
   flex: 1;
-  cursor: pointer;
+  cursor: inherit;
 }
 
 .terminal-pane-title {
@@ -732,10 +739,47 @@
   position: absolute;
   min-width: 0;
   min-height: 0;
+  transition: left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out;
+}
+
+.terminal-pane-drop-preview {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 122, 204, 0.25);
+  border: 2px solid #007acc;
+  z-index: 100;
+  pointer-events: none;
+  transition: all 0.15s ease;
+}
+
+.terminal-pane-drop-preview.top {
+  bottom: 50%;
+}
+
+.terminal-pane-drop-preview.bottom {
+  top: 50%;
+}
+
+.terminal-pane-drop-preview.left {
+  right: 50%;
+}
+
+.terminal-pane-drop-preview.right {
+  left: 50%;
+}
+
+.terminal-pane-drop-preview.center {
+  inset: 4px;
+  background: rgba(0, 122, 204, 0.15);
 }
 
 .terminal-instance-shell.visible {
   display: block;
+}
+
+.app-container.tab-dragging .terminal-pane-frame,
+.app-container.tab-dragging .terminal-instance-shell {
+  transition: none;
 }
 
 .pane-split-handle {
@@ -745,37 +789,50 @@
   justify-content: center;
   pointer-events: auto;
   touch-action: none;
+  z-index: 10;
 }
 
 .pane-split-handle.vertical {
   cursor: col-resize;
+  width: 12px !important;
+  margin-left: -1px;
 }
 
 .pane-split-handle.horizontal {
   cursor: row-resize;
+  height: 12px !important;
+  margin-top: -1px;
 }
 
 .pane-split-handle-grip {
   border-radius: 999px;
   background: rgba(126, 190, 232, 0.26);
   box-shadow: 0 0 0 1px rgba(5, 11, 16, 0.55);
-  transition: background 0.12s ease, box-shadow 0.12s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
 }
 
 .pane-split-handle.vertical .pane-split-handle-grip {
-  width: 3px;
+  width: 2px;
   height: min(56px, 55%);
 }
 
 .pane-split-handle.horizontal .pane-split-handle-grip {
   width: min(56px, 55%);
-  height: 3px;
+  height: 2px;
 }
 
 .pane-split-handle:hover .pane-split-handle-grip,
 .pane-split-handle:active .pane-split-handle-grip {
   background: rgba(124, 202, 255, 0.92);
   box-shadow: 0 0 0 1px rgba(124, 202, 255, 0.22), 0 0 18px rgba(124, 202, 255, 0.28);
+}
+
+.pane-split-handle.vertical:hover .pane-split-handle-grip {
+  transform: scaleX(2);
+}
+
+.pane-split-handle.horizontal:hover .pane-split-handle-grip {
+  transform: scaleY(2);
 }
 
 /* ── Terminal Input Bar ──────────────────────────────────────────────────── */

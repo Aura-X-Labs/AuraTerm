@@ -11,6 +11,7 @@ import SettingsDialog from "./SettingsDialog.vue";
 import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
 import RemoteFileManager from "./RemoteFileManager.vue";
+import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
 import {
   DEFAULT_SETTINGS,
   MAX_INPUT_HISTORY,
@@ -35,12 +36,7 @@ import type {
 import logoUrl from "./logo.png";
 import "./App.css";
 
-interface Tab {
-  id: string;
-  title: string;
-  session: SessionConfig;
-  logPath?: string;
-}
+type Tab = PaneLayoutTab;
 
 interface TabContextMenuState {
   x: number;
@@ -48,81 +44,10 @@ interface TabContextMenuState {
   tabId: string;
 }
 
-type PaneAxis = "horizontal" | "vertical";
-
-interface PaneLeafNode {
-  kind: "leaf";
-  paneId: string;
-  tabId: string | null;
-}
-
-interface PaneSplitNode {
-  kind: "split";
-  splitId: string;
-  axis: PaneAxis;
-  ratio: number;
-  first: PaneNode;
-  second: PaneNode;
-}
-
-type PaneNode = PaneLeafNode | PaneSplitNode;
-
-interface PaneRect {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-}
-
-interface PaneLeafLayout {
-  paneId: string;
-  tabId: string | null;
-  rect: PaneRect;
-}
-
-interface PaneSplitHandleLayout {
-  splitId: string;
-  axis: PaneAxis;
-  parentRect: PaneRect;
-  position: number;
-}
-
-interface RemovePaneResult {
-  node: PaneNode | null;
-  removed: boolean;
-  fallbackPaneId: string | null;
-}
-
-interface PersistedPaneLayoutState {
-  root: PaneNode;
-  focusedPaneId: string | null;
-}
-
-interface PersistedTabSnapshot {
-  id: string;
-  title: string;
-  session: SessionConfig;
-  logPath?: string;
-}
-
-interface PersistedWorkspaceState {
-  version: 1;
-  tabs: PersistedTabSnapshot[];
-  paneLayout: PaneNode;
-  focusedPaneId: string | null;
-  activeTabId: string | null;
-}
-
 type AppMenuId = "file" | "view" | "help";
 type FileSubmenuId = "new-session" | "preferences";
 
 let nextTabId = 1;
-let nextPaneId = 1;
-let nextSplitId = 1;
-const PANE_HEADER_HEIGHT = 30;
-const PANE_INSET = 4;
-const MIN_PANE_RATIO = 0.15;
-const MAX_PANE_RATIO = 0.85;
 
 // NATO 字母表，用于生成唯一的标签页后缀
 const NATO_ALPHABET = [
@@ -219,13 +144,6 @@ function formatSerialFrame(serialConfig: SerialConfig) {
 }
 
 const tabs = ref<Tab[]>([]);
-const paneLayout = ref<PaneNode>({
-  kind: "leaf",
-  paneId: "pane-0",
-  tabId: null,
-});
-const focusedPaneId = ref("pane-0");
-const activeTabId = ref("");
 const osType = ref("windows");
 const showConnectDialog = ref(false);
 const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
@@ -240,40 +158,64 @@ const isWindowFocused = ref(true);
 const serialConnectionStates = ref<Record<string, SerialConnectionState>>({});
 const openMenuId = ref<AppMenuId | null>(null);
 const openFileSubmenuId = ref<FileSubmenuId | null>(null);
-const draggedTabId = ref<string | null>(null);
-const dragPreviewTabId = ref<string | null>(null);
-const hoveredEmptyPaneId = ref<string | null>(null);
 const renamingTabId = ref<string | null>(null);
 const renamingTabTitle = ref("");
 const tabContextMenu = ref<TabContextMenuState | null>(null);
 const suppressTabClick = ref(false);
-let pendingTabDrag: { tabId: string; startX: number; startY: number } | null = null;
-let tabDragMoved = false;
 const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const terminalContainerRef = ref<HTMLDivElement | null>(null);
 const isFullscreen = ref(false);
+const {
+  paneLayout,
+  focusedPaneId,
+  activeTabId,
+  draggedTabId,
+  hoveredEmptyPaneId,
+  dropTargetPaneId,
+  dropTargetPosition,
+  paneLeaves,
+  paneSplitHandles,
+  paneByTabId,
+  restoreWorkspaceState,
+  applyRestoredWorkspaceState,
+  applyPaneLayoutFromTabs,
+  createPersistedPaneLayoutState,
+  createPersistedWorkspaceState,
+  findPaneById,
+  findPaneByTabId,
+  focusPane,
+  assignTabToFocusedPane,
+  selectTab,
+  splitTabToPane,
+  handleSplitPane,
+  handleClosePane,
+  handleTabRemoved,
+  getPaneShellStyle,
+  getTerminalViewportStyle,
+  getSplitHandleStyle,
+  isPaneFocused,
+  getTabTitle,
+  getTabProtocolLabel,
+  handlePaneResizePointerDown,
+  handleTabPointerDown,
+  handleTabPointerMove,
+  handleTabPointerUp,
+  handleTabPointerCancel,
+  handlePaneHeaderPointerDown,
+  handlePaneHeaderPointerMove,
+  handlePaneHeaderPointerUp,
+  handlePaneHeaderPointerCancel,
+} = usePaneLayout({ tabs, isWindowFocused, terminalContainerRef });
 const termRefs = new Map<string, TerminalHandle>();
 const paneViewportRefs = new Map<string, HTMLElement>();
 const cleanupFns: Array<() => void> = [];
 let paneResizeObserver: ResizeObserver | null = null;
 let pendingFitFrame: number | null = null;
 const pendingFitTabIds = new Set<string>();
-let cleanupPaneResizeTracking: (() => void) | null = null;
 let persistWorkspaceStateTimer: number | null = null;
 const hasLoadedSettings = ref(false);
-
-function createDefaultPaneLayoutState(sourceTabs: Tab[]): PersistedPaneLayoutState {
-  return {
-    root: {
-      kind: "leaf",
-      paneId: "pane-0",
-      tabId: sourceTabs[0]?.id ?? null,
-    },
-    focusedPaneId: "pane-0",
-  };
-}
 
 function createDefaultLocalShellTab(tabId = "tab-0"): Tab {
   return {
@@ -287,310 +229,11 @@ function syncTabIdCounter(sourceTabs: Array<{ id: string }>) {
   let maxTabIndex = -1;
 
   for (const item of sourceTabs) {
-    maxTabIndex = Math.max(maxTabIndex, parseSequenceId(item.id, "tab-") ?? -1);
+    const numericValue = item.id.startsWith("tab-") ? Number.parseInt(item.id.slice(4), 10) : Number.NaN;
+    maxTabIndex = Math.max(maxTabIndex, Number.isFinite(numericValue) ? numericValue : -1);
   }
 
   nextTabId = Math.max(nextTabId, maxTabIndex + 1);
-}
-
-function createPaneId() {
-  return `pane-${nextPaneId++}`;
-}
-
-function createSplitId() {
-  return `split-${nextSplitId++}`;
-}
-
-function parseSequenceId(value: string | null | undefined, prefix: string) {
-  if (!value || !value.startsWith(prefix)) {
-    return null;
-  }
-
-  const numericValue = Number.parseInt(value.slice(prefix.length), 10);
-  return Number.isFinite(numericValue) ? numericValue : null;
-}
-
-function syncPaneIdCounters(node: PaneNode) {
-  let maxPaneIndex = -1;
-  let maxSplitIndex = -1;
-
-  const walk = (current: PaneNode) => {
-    if (current.kind === "leaf") {
-      maxPaneIndex = Math.max(maxPaneIndex, parseSequenceId(current.paneId, "pane-") ?? -1);
-      return;
-    }
-
-    maxSplitIndex = Math.max(maxSplitIndex, parseSequenceId(current.splitId, "split-") ?? -1);
-    walk(current.first);
-    walk(current.second);
-  };
-
-  walk(node);
-  nextPaneId = Math.max(nextPaneId, maxPaneIndex + 1);
-  nextSplitId = Math.max(nextSplitId, maxSplitIndex + 1);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function restoreSessionConfig(value: unknown): SessionConfig | null {
-  if (!isRecord(value) || typeof value.protocol !== "string") {
-    return null;
-  }
-
-  if (value.protocol === "local") {
-    return {
-      protocol: "local",
-      cwd: typeof value.cwd === "string" ? value.cwd : undefined,
-    };
-  }
-
-  if (value.protocol === "ssh" && isRecord(value.sshConfig)) {
-    const sshConfig = value.sshConfig;
-    if (typeof sshConfig.host !== "string" || typeof sshConfig.port !== "number" || typeof sshConfig.user !== "string") {
-      return null;
-    }
-
-    return {
-      protocol: "ssh",
-      sshConfig: {
-        host: sshConfig.host,
-        port: sshConfig.port,
-        user: sshConfig.user,
-        password: typeof sshConfig.password === "string" ? sshConfig.password : undefined,
-        privateKey: typeof sshConfig.privateKey === "string" ? sshConfig.privateKey : undefined,
-        savedConnectionId: typeof sshConfig.savedConnectionId === "string" ? sshConfig.savedConnectionId : undefined,
-        autoReconnect: typeof sshConfig.autoReconnect === "boolean" ? sshConfig.autoReconnect : undefined,
-        reconnectType: sshConfig.reconnectType === "manual"
-          || sshConfig.reconnectType === "simple"
-          || sshConfig.reconnectType === "screen"
-          || sshConfig.reconnectType === "tmux"
-          ? sshConfig.reconnectType
-          : undefined,
-      },
-    };
-  }
-
-  if (value.protocol === "telnet" && isRecord(value.telnetConfig)) {
-    const telnetConfig = value.telnetConfig;
-    if (typeof telnetConfig.host !== "string" || typeof telnetConfig.port !== "number") {
-      return null;
-    }
-
-    return {
-      protocol: "telnet",
-      telnetConfig: {
-        host: telnetConfig.host,
-        port: telnetConfig.port,
-      },
-    };
-  }
-
-  if (value.protocol === "serial" && isRecord(value.serialConfig)) {
-    const serialConfig = value.serialConfig;
-    if (
-      typeof serialConfig.portName !== "string"
-      || typeof serialConfig.baudRate !== "number"
-      || (serialConfig.dataBits !== 5 && serialConfig.dataBits !== 6 && serialConfig.dataBits !== 7 && serialConfig.dataBits !== 8)
-      || (serialConfig.stopBits !== 1 && serialConfig.stopBits !== 2)
-      || (serialConfig.parity !== "none" && serialConfig.parity !== "odd" && serialConfig.parity !== "even")
-      || (serialConfig.flowControl !== "none" && serialConfig.flowControl !== "hardware" && serialConfig.flowControl !== "software")
-    ) {
-      return null;
-    }
-
-    return {
-      protocol: "serial",
-      serialConfig: {
-        portName: serialConfig.portName,
-        baudRate: serialConfig.baudRate,
-        dataBits: serialConfig.dataBits,
-        stopBits: serialConfig.stopBits,
-        parity: serialConfig.parity,
-        flowControl: serialConfig.flowControl,
-      },
-    };
-  }
-
-  return null;
-}
-
-function restorePersistedTabSnapshot(value: unknown): Tab | null {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.title !== "string") {
-    return null;
-  }
-
-  const session = restoreSessionConfig(value.session);
-  if (!session) {
-    return null;
-  }
-
-  return {
-    id: value.id,
-    title: value.title,
-    session,
-    logPath: typeof value.logPath === "string" ? value.logPath : undefined,
-  };
-}
-
-function restorePaneNode(value: unknown): PaneNode | null {
-  if (!isRecord(value) || value.kind !== "leaf" && value.kind !== "split") {
-    return null;
-  }
-
-  if (value.kind === "leaf") {
-    if (typeof value.paneId !== "string") {
-      return null;
-    }
-
-    return {
-      kind: "leaf",
-      paneId: value.paneId,
-      tabId: typeof value.tabId === "string" ? value.tabId : null,
-    };
-  }
-
-  if (typeof value.splitId !== "string") {
-    return null;
-  }
-  if (value.axis !== "horizontal" && value.axis !== "vertical") {
-    return null;
-  }
-
-  const first = restorePaneNode(value.first);
-  const second = restorePaneNode(value.second);
-  if (!first || !second) {
-    return null;
-  }
-
-  return {
-    kind: "split",
-    splitId: value.splitId,
-    axis: value.axis,
-    ratio: clampPaneRatio(typeof value.ratio === "number" ? value.ratio : 0.5),
-    first,
-    second,
-  };
-}
-
-function sanitizePaneTabs(node: PaneNode, sourceTabs: Tab[]): PaneNode {
-  const availableTabIds = new Set(sourceTabs.map((tab) => tab.id));
-  const assignedTabIds = new Set<string>();
-
-  const sanitize = (current: PaneNode): PaneNode => {
-    if (current.kind === "leaf") {
-      const nextTabId = current.tabId && availableTabIds.has(current.tabId) && !assignedTabIds.has(current.tabId)
-        ? current.tabId
-        : null;
-
-      if (nextTabId) {
-        assignedTabIds.add(nextTabId);
-      }
-
-      return {
-        ...current,
-        tabId: nextTabId,
-      };
-    }
-
-    return {
-      ...current,
-      ratio: clampPaneRatio(current.ratio),
-      first: sanitize(current.first),
-      second: sanitize(current.second),
-    };
-  };
-
-  return sanitize(node);
-}
-
-function restorePaneLayoutState(value: unknown, sourceTabs: Tab[]): PersistedPaneLayoutState {
-  if (!isRecord(value)) {
-    const fallbackState = createDefaultPaneLayoutState(sourceTabs);
-    syncPaneIdCounters(fallbackState.root);
-    return fallbackState;
-  }
-
-  const restoredRoot = restorePaneNode(value.root);
-  if (!restoredRoot) {
-    const fallbackState = createDefaultPaneLayoutState(sourceTabs);
-    syncPaneIdCounters(fallbackState.root);
-    return fallbackState;
-  }
-
-  const sanitizedRoot = fillEmptyPanes(sanitizePaneTabs(restoredRoot, sourceTabs), sourceTabs);
-  syncPaneIdCounters(sanitizedRoot);
-  const preferredFocusedPaneId = typeof value.focusedPaneId === "string" ? value.focusedPaneId : null;
-  const focusedPane = preferredFocusedPaneId ? findPaneById(sanitizedRoot, preferredFocusedPaneId) : null;
-
-  return {
-    root: sanitizedRoot,
-    focusedPaneId: focusedPane?.paneId ?? getFirstLeafPane(sanitizedRoot).paneId,
-  };
-}
-
-function restoreWorkspaceState(value: unknown): PersistedWorkspaceState | null {
-  if (!isRecord(value) || !Array.isArray(value.tabs) || value.version !== 1) {
-    return null;
-  }
-
-  const restoredTabs: Tab[] = [];
-  const usedIds = new Set<string>();
-  for (const item of value.tabs) {
-    const restoredTab = restorePersistedTabSnapshot(item);
-    if (!restoredTab || usedIds.has(restoredTab.id)) {
-      continue;
-    }
-    usedIds.add(restoredTab.id);
-    restoredTabs.push(restoredTab);
-  }
-
-  if (restoredTabs.length === 0) {
-    return null;
-  }
-
-  const paneState = restorePaneLayoutState({
-    root: value.paneLayout,
-    focusedPaneId: value.focusedPaneId,
-  }, restoredTabs);
-  const activeTabId = typeof value.activeTabId === "string" && restoredTabs.some((tab) => tab.id === value.activeTabId)
-    ? value.activeTabId
-    : null;
-
-  return {
-    version: 1,
-    tabs: restoredTabs,
-    paneLayout: paneState.root,
-    focusedPaneId: paneState.focusedPaneId,
-    activeTabId,
-  };
-}
-
-function createPersistedPaneLayoutState(): PersistedPaneLayoutState {
-  return {
-    root: paneLayout.value,
-    focusedPaneId: focusedPaneId.value || null,
-  };
-}
-
-function createPersistedWorkspaceState(restoreEnabled = settingsRef.value.restoreTabsOnStartup): PersistedWorkspaceState | null {
-  if (!restoreEnabled || tabs.value.length === 0) {
-    return null;
-  }
-
-  return {
-    version: 1,
-    tabs: tabs.value.map((tab) => ({
-      id: tab.id,
-      title: tab.title,
-      session: tab.session,
-      logPath: tab.logPath,
-    })),
-    paneLayout: paneLayout.value,
-    focusedPaneId: focusedPaneId.value || null,
-    activeTabId: activeTabId.value || null,
-  };
 }
 
 function prepareSettingsForSave(baseSettings: AppSettings, restoreEnabled = baseSettings.restoreTabsOnStartup) {
@@ -599,28 +242,6 @@ function prepareSettingsForSave(baseSettings: AppSettings, restoreEnabled = base
     paneLayout: createPersistedPaneLayoutState(),
     workspaceState: createPersistedWorkspaceState(restoreEnabled),
   });
-}
-
-function applyRestoredWorkspaceState(restoredWorkspaceState: PersistedWorkspaceState) {
-  tabs.value = restoredWorkspaceState.tabs;
-  syncTabIdCounter(restoredWorkspaceState.tabs);
-  paneLayout.value = restoredWorkspaceState.paneLayout;
-  syncPaneIdCounters(restoredWorkspaceState.paneLayout);
-
-  const activeTabPane = restoredWorkspaceState.activeTabId
-    ? findPaneByTabId(restoredWorkspaceState.paneLayout, restoredWorkspaceState.activeTabId)
-    : null;
-  syncFocusedPaneState(activeTabPane?.paneId ?? restoredWorkspaceState.focusedPaneId ?? undefined);
-}
-
-function applyDefaultStartupWorkspace(persistedPaneLayout: unknown) {
-  const defaultTabs = [createDefaultLocalShellTab()];
-  tabs.value = defaultTabs;
-  syncTabIdCounter(defaultTabs);
-  const restoredPaneState = restorePaneLayoutState(persistedPaneLayout, defaultTabs);
-  paneLayout.value = restoredPaneState.root;
-  syncPaneIdCounters(restoredPaneState.root);
-  syncFocusedPaneState(restoredPaneState.focusedPaneId ?? undefined);
 }
 
 function scheduleWorkspaceStatePersistence() {
@@ -651,384 +272,6 @@ function updateTabSession(tabId: string, session: SessionConfig) {
       ? { ...tab, session }
       : tab
   ));
-}
-
-function findPaneById(node: PaneNode, paneId: string): PaneLeafNode | null {
-  if (node.kind === "leaf") {
-    return node.paneId === paneId ? node : null;
-  }
-
-  return findPaneById(node.first, paneId) ?? findPaneById(node.second, paneId);
-}
-
-function findPaneByTabId(node: PaneNode, tabId: string): PaneLeafNode | null {
-  if (node.kind === "leaf") {
-    return node.tabId === tabId ? node : null;
-  }
-
-  return findPaneByTabId(node.first, tabId) ?? findPaneByTabId(node.second, tabId);
-}
-
-function assignTabToPane(node: PaneNode, paneId: string, tabId: string | null): PaneNode {
-  if (node.kind === "leaf") {
-    return node.paneId === paneId ? { ...node, tabId } : node;
-  }
-
-  return {
-    ...node,
-    first: assignTabToPane(node.first, paneId, tabId),
-    second: assignTabToPane(node.second, paneId, tabId),
-  };
-}
-
-function clearTabFromLayout(node: PaneNode, tabId: string): PaneNode {
-  if (node.kind === "leaf") {
-    return node.tabId === tabId ? { ...node, tabId: null } : node;
-  }
-
-  return {
-    ...node,
-    first: clearTabFromLayout(node.first, tabId),
-    second: clearTabFromLayout(node.second, tabId),
-  };
-}
-
-function splitPane(node: PaneNode, paneId: string, axis: PaneAxis, newPane: PaneLeafNode): PaneNode {
-  if (node.kind === "leaf") {
-    if (node.paneId !== paneId) {
-      return node;
-    }
-
-    return {
-      kind: "split",
-      splitId: createSplitId(),
-      axis,
-      ratio: 0.5,
-      first: node,
-      second: newPane,
-    };
-  }
-
-  return {
-    ...node,
-    first: splitPane(node.first, paneId, axis, newPane),
-    second: splitPane(node.second, paneId, axis, newPane),
-  };
-}
-
-function removePaneWithFallback(node: PaneNode, paneId: string): RemovePaneResult {
-  if (node.kind === "leaf") {
-    return {
-      node: node.paneId === paneId ? null : node,
-      removed: node.paneId === paneId,
-      fallbackPaneId: null,
-    };
-  }
-
-  const firstResult = removePaneWithFallback(node.first, paneId);
-  if (firstResult.removed) {
-    if (!firstResult.node) {
-      return {
-        node: node.second,
-        removed: true,
-        fallbackPaneId: getFirstLeafPane(node.second).paneId,
-      };
-    }
-
-    return {
-      node: { ...node, first: firstResult.node, second: node.second },
-      removed: true,
-      fallbackPaneId: firstResult.fallbackPaneId,
-    };
-  }
-
-  const secondResult = removePaneWithFallback(node.second, paneId);
-  if (secondResult.removed) {
-    if (!secondResult.node) {
-      return {
-        node: node.first,
-        removed: true,
-        fallbackPaneId: getFirstLeafPane(node.first).paneId,
-      };
-    }
-
-    return {
-      node: { ...node, first: node.first, second: secondResult.node },
-      removed: true,
-      fallbackPaneId: secondResult.fallbackPaneId,
-    };
-  }
-
-  return {
-    node,
-    removed: false,
-    fallbackPaneId: null,
-  };
-}
-
-function clampPaneRatio(ratio: number) {
-  return Math.max(MIN_PANE_RATIO, Math.min(MAX_PANE_RATIO, ratio));
-}
-
-function updateSplitRatio(node: PaneNode, splitId: string, ratio: number): PaneNode {
-  if (node.kind === "leaf") {
-    return node;
-  }
-
-  if (node.splitId === splitId) {
-    return {
-      ...node,
-      ratio: clampPaneRatio(ratio),
-    };
-  }
-
-  return {
-    ...node,
-    first: updateSplitRatio(node.first, splitId, ratio),
-    second: updateSplitRatio(node.second, splitId, ratio),
-  };
-}
-
-function collectPaneLeaves(node: PaneNode, rect: PaneRect = { left: 0, top: 0, width: 100, height: 100 }): PaneLeafLayout[] {
-  if (node.kind === "leaf") {
-    return [{ paneId: node.paneId, tabId: node.tabId, rect }];
-  }
-
-  if (node.axis === "vertical") {
-    const firstWidth = rect.width * node.ratio;
-    return [
-      ...collectPaneLeaves(node.first, { ...rect, width: firstWidth }),
-      ...collectPaneLeaves(node.second, {
-        left: rect.left + firstWidth,
-        top: rect.top,
-        width: rect.width - firstWidth,
-        height: rect.height,
-      }),
-    ];
-  }
-
-  const firstHeight = rect.height * node.ratio;
-  return [
-    ...collectPaneLeaves(node.first, { ...rect, height: firstHeight }),
-    ...collectPaneLeaves(node.second, {
-      left: rect.left,
-      top: rect.top + firstHeight,
-      width: rect.width,
-      height: rect.height - firstHeight,
-    }),
-  ];
-}
-
-function collectSplitHandles(node: PaneNode, rect: PaneRect = { left: 0, top: 0, width: 100, height: 100 }): PaneSplitHandleLayout[] {
-  if (node.kind === "leaf") {
-    return [];
-  }
-
-  const position = node.axis === "vertical"
-    ? rect.left + rect.width * node.ratio
-    : rect.top + rect.height * node.ratio;
-  const firstRect = node.axis === "vertical"
-    ? { ...rect, width: rect.width * node.ratio }
-    : { ...rect, height: rect.height * node.ratio };
-  const secondRect = node.axis === "vertical"
-    ? {
-        left: rect.left + rect.width * node.ratio,
-        top: rect.top,
-        width: rect.width - rect.width * node.ratio,
-        height: rect.height,
-      }
-    : {
-        left: rect.left,
-        top: rect.top + rect.height * node.ratio,
-        width: rect.width,
-        height: rect.height - rect.height * node.ratio,
-      };
-
-  return [
-    {
-      splitId: node.splitId,
-      axis: node.axis,
-      parentRect: rect,
-      position,
-    },
-    ...collectSplitHandles(node.first, firstRect),
-    ...collectSplitHandles(node.second, secondRect),
-  ];
-}
-
-function fillEmptyPanes(node: PaneNode, sourceTabs: Tab[]): PaneNode {
-  let nextLayout = node;
-  const visibleTabIds = new Set(
-    collectPaneLeaves(nextLayout)
-      .map((pane) => pane.tabId)
-      .filter((tabId): tabId is string => Boolean(tabId)),
-  );
-
-  for (const pane of collectPaneLeaves(nextLayout)) {
-    if (pane.tabId) {
-      continue;
-    }
-
-    const nextTab = sourceTabs.find((tab) => !visibleTabIds.has(tab.id));
-    if (!nextTab) {
-      break;
-    }
-
-    nextLayout = assignTabToPane(nextLayout, pane.paneId, nextTab.id);
-    visibleTabIds.add(nextTab.id);
-  }
-
-  return nextLayout;
-}
-
-function getTabTitle(tabId: string | null) {
-  return tabs.value.find((tab) => tab.id === tabId)?.title ?? "Empty Pane";
-}
-
-function getTabById(tabId: string | null) {
-  return tabs.value.find((tab) => tab.id === tabId) ?? null;
-}
-
-function getTabProtocolLabel(tabId: string | null) {
-  const tab = getTabById(tabId);
-  if (!tab) {
-    return "No Session";
-  }
-
-  switch (tab.session.protocol) {
-    case "local":
-      return "Local";
-    case "ssh":
-      return "SSH";
-    case "telnet":
-      return "Telnet";
-    case "serial":
-      return "Serial";
-  }
-}
-
-function getFirstLeafPane(node: PaneNode): PaneLeafNode {
-  if (node.kind === "leaf") {
-    return node;
-  }
-
-  return getFirstLeafPane(node.first);
-}
-
-function syncFocusedPaneState(preferredPaneId?: string) {
-  const nextFocusedPane = preferredPaneId
-    ? findPaneById(paneLayout.value, preferredPaneId)
-    : null;
-  const fallbackPane = nextFocusedPane ?? (paneLayout.value ? getFirstLeafPane(paneLayout.value) : null);
-
-  if (!fallbackPane) {
-    focusedPaneId.value = "";
-    activeTabId.value = "";
-    return;
-  }
-
-  focusedPaneId.value = fallbackPane.paneId;
-  activeTabId.value = fallbackPane.tabId ?? "";
-}
-
-function focusPane(paneId: string) {
-  const pane = findPaneById(paneLayout.value, paneId);
-  if (!pane) {
-    return;
-  }
-
-  focusedPaneId.value = paneId;
-  activeTabId.value = pane.tabId ?? "";
-}
-
-function assignTabToFocusedPane(tabId: string) {
-  const targetPane = findPaneById(paneLayout.value, focusedPaneId.value) ?? getFirstLeafPane(paneLayout.value);
-  paneLayout.value = clearTabFromLayout(paneLayout.value, tabId);
-  paneLayout.value = assignTabToPane(paneLayout.value, targetPane.paneId, tabId);
-  focusedPaneId.value = targetPane.paneId;
-  activeTabId.value = tabId;
-}
-
-function moveTabToPane(tabId: string, paneId: string) {
-  const targetPane = findPaneById(paneLayout.value, paneId);
-  if (!targetPane) {
-    return;
-  }
-
-  paneLayout.value = clearTabFromLayout(paneLayout.value, tabId);
-  paneLayout.value = assignTabToPane(paneLayout.value, paneId, tabId);
-  focusedPaneId.value = paneId;
-  activeTabId.value = tabId;
-}
-
-function findFirstHiddenTabId() {
-  const visibleTabIds = new Set(
-    collectPaneLeaves(paneLayout.value)
-      .map((pane) => pane.tabId)
-      .filter((tabId): tabId is string => Boolean(tabId)),
-  );
-  return tabs.value.find((tab) => !visibleTabIds.has(tab.id))?.id ?? null;
-}
-
-function handleSplitPane(axis: PaneAxis, paneId = focusedPaneId.value) {
-  const targetPane = findPaneById(paneLayout.value, paneId);
-  if (!targetPane) {
-    return;
-  }
-
-  const nextPaneId = createPaneId();
-  const hiddenTabId = findFirstHiddenTabId();
-  paneLayout.value = splitPane(paneLayout.value, paneId, axis, {
-    kind: "leaf",
-    paneId: nextPaneId,
-    tabId: hiddenTabId,
-  });
-  focusedPaneId.value = nextPaneId;
-  activeTabId.value = hiddenTabId ?? "";
-}
-
-function handleClosePane(paneId = focusedPaneId.value) {
-  const leafPanes = collectPaneLeaves(paneLayout.value);
-  if (leafPanes.length <= 1) {
-    return;
-  }
-
-  const result = removePaneWithFallback(paneLayout.value, paneId);
-  if (!result.node) {
-    return;
-  }
-
-  paneLayout.value = fillEmptyPanes(result.node, tabs.value);
-  const nextFocusedPaneId = paneId === focusedPaneId.value
-    ? result.fallbackPaneId ?? focusedPaneId.value
-    : focusedPaneId.value;
-  syncFocusedPaneState(nextFocusedPaneId);
-  void nextTick(() => {
-    fitVisibleTerminals();
-  });
-}
-
-function getPaneShellStyle(rect: PaneRect) {
-  return {
-    left: `calc(${rect.left}% + ${PANE_INSET}px)`,
-    top: `calc(${rect.top}% + ${PANE_INSET}px)`,
-    width: `calc(${rect.width}% - ${PANE_INSET * 2}px)`,
-    height: `calc(${rect.height}% - ${PANE_INSET * 2}px)`,
-  };
-}
-
-function getTerminalViewportStyle(rect: PaneRect, isVisible: boolean) {
-  return {
-    display: isVisible ? "block" : "none",
-    left: `calc(${rect.left}% + ${PANE_INSET + 1}px)`,
-    top: `calc(${rect.top}% + ${PANE_INSET + PANE_HEADER_HEIGHT + 1}px)`,
-    width: `calc(${rect.width}% - ${(PANE_INSET + 1) * 2}px)`,
-    height: `calc(${rect.height}% - ${PANE_INSET * 2 + PANE_HEADER_HEIGHT + 2}px)`,
-  };
-}
-
-function isPaneFocused(paneId: string) {
-  return isWindowFocused.value && focusedPaneId.value === paneId;
 }
 
 function closeOpenMenus() {
@@ -1207,14 +450,19 @@ onMounted(async () => {
 
     if (restoredWorkspaceState) {
       applyRestoredWorkspaceState(restoredWorkspaceState);
+      syncTabIdCounter(restoredWorkspaceState.tabs);
     } else {
-      applyDefaultStartupWorkspace(normalizedSettings.paneLayout);
+      const defaultTabs = [createDefaultLocalShellTab()];
+      applyPaneLayoutFromTabs(defaultTabs, normalizedSettings.paneLayout);
+      syncTabIdCounter(defaultTabs);
     }
   } catch {
     const fallbackSettings = normalizeAppSettings();
     settings.value = fallbackSettings;
     settingsRef.value = fallbackSettings;
-    applyDefaultStartupWorkspace(fallbackSettings.paneLayout);
+    const defaultTabs = [createDefaultLocalShellTab()];
+    applyPaneLayoutFromTabs(defaultTabs, fallbackSettings.paneLayout);
+    syncTabIdCounter(defaultTabs);
   }
 
   hasLoadedSettings.value = true;
@@ -1296,32 +544,18 @@ onBeforeUnmount(() => {
     window.clearTimeout(persistWorkspaceStateTimer);
     persistWorkspaceStateTimer = null;
   }
-  cleanupPaneResizeTracking?.();
-  cleanupPaneResizeTracking = null;
   if (pendingFitFrame !== null) {
     window.cancelAnimationFrame(pendingFitFrame);
     pendingFitFrame = null;
   }
   paneResizeObserver?.disconnect();
   paneResizeObserver = null;
-  cleanupTabPointerTracking();
   while (cleanupFns.length > 0) {
     const cleanup = cleanupFns.pop();
     cleanup?.();
   }
 });
 
-const paneLeaves = computed(() => collectPaneLeaves(paneLayout.value));
-const paneSplitHandles = computed(() => collectSplitHandles(paneLayout.value));
-const paneByTabId = computed<Record<string, PaneLeafLayout>>(() => {
-  const result: Record<string, PaneLeafLayout> = {};
-  for (const pane of paneLeaves.value) {
-    if (pane.tabId) {
-      result[pane.tabId] = pane;
-    }
-  }
-  return result;
-});
 const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value));
 const activeSshConfig = computed<SshConfig | null>(() => (
   activeTab.value?.session.protocol === "ssh" ? activeTab.value.session.sshConfig : null
@@ -1403,69 +637,6 @@ function setPaneViewportRef(tabId: string, instance: Element | null) {
   if (paneByTabId.value[tabId]) {
     queueTerminalFit(tabId);
   }
-}
-
-function getSplitHandleStyle(handle: PaneSplitHandleLayout) {
-  if (handle.axis === "vertical") {
-    return {
-      left: `calc(${handle.position}% - 5px)`,
-      top: `${handle.parentRect.top}%`,
-      width: "10px",
-      height: `${handle.parentRect.height}%`,
-    };
-  }
-
-  return {
-    left: `${handle.parentRect.left}%`,
-    top: `calc(${handle.position}% - 5px)`,
-    width: `${handle.parentRect.width}%`,
-    height: "10px",
-  };
-}
-
-function handlePaneResizePointerDown(event: PointerEvent, handle: PaneSplitHandleLayout) {
-  if (event.button !== 0 || !terminalContainerRef.value) {
-    return;
-  }
-
-  event.preventDefault();
-  event.stopPropagation();
-  cleanupPaneResizeTracking?.();
-
-  const applyRatioFromPointer = (pointerEvent: PointerEvent) => {
-    const containerRect = terminalContainerRef.value?.getBoundingClientRect();
-    if (!containerRect || containerRect.width <= 0 || containerRect.height <= 0) {
-      return;
-    }
-
-    const pointerPercentX = ((pointerEvent.clientX - containerRect.left) / containerRect.width) * 100;
-    const pointerPercentY = ((pointerEvent.clientY - containerRect.top) / containerRect.height) * 100;
-    const ratio = handle.axis === "vertical"
-      ? (pointerPercentX - handle.parentRect.left) / handle.parentRect.width
-      : (pointerPercentY - handle.parentRect.top) / handle.parentRect.height;
-
-    paneLayout.value = updateSplitRatio(paneLayout.value, handle.splitId, ratio);
-  };
-
-  const handlePointerMove = (pointerEvent: PointerEvent) => {
-    applyRatioFromPointer(pointerEvent);
-  };
-
-  const stopTracking = () => {
-    window.removeEventListener("pointermove", handlePointerMove);
-    window.removeEventListener("pointerup", stopTracking);
-    window.removeEventListener("pointercancel", stopTracking);
-    cleanupPaneResizeTracking = null;
-    void nextTick(() => {
-      fitVisibleTerminals();
-    });
-  };
-
-  cleanupPaneResizeTracking = stopTracking;
-  window.addEventListener("pointermove", handlePointerMove);
-  window.addEventListener("pointerup", stopTracking);
-  window.addEventListener("pointercancel", stopTracking);
-  applyRatioFromPointer(event);
 }
 
 async function handleSaveSettings(newSettings: AppSettings) {
@@ -1602,36 +773,6 @@ watch(activeSshConfig, (value) => {
   }
 });
 
-function selectTab(tabId: string) {
-  const visiblePane = findPaneByTabId(paneLayout.value, tabId);
-  if (visiblePane) {
-    focusPane(visiblePane.paneId);
-    return;
-  }
-
-  assignTabToFocusedPane(tabId);
-}
-
-function splitTabToPane(tabId: string, axis: PaneAxis) {
-  const visiblePane = findPaneByTabId(paneLayout.value, tabId);
-  if (visiblePane) {
-    focusPane(visiblePane.paneId);
-    handleSplitPane(axis, visiblePane.paneId);
-    return;
-  }
-
-  const targetPane = findPaneById(paneLayout.value, focusedPaneId.value) ?? getFirstLeafPane(paneLayout.value);
-  const nextPaneId = createPaneId();
-  paneLayout.value = clearTabFromLayout(paneLayout.value, tabId);
-  paneLayout.value = splitPane(paneLayout.value, targetPane.paneId, axis, {
-    kind: "leaf",
-    paneId: nextPaneId,
-    tabId,
-  });
-  focusedPaneId.value = nextPaneId;
-  activeTabId.value = tabId;
-}
-
 function handleTabClick(tabId: string) {
   if (suppressTabClick.value) {
     suppressTabClick.value = false;
@@ -1754,166 +895,6 @@ function handleClosePaneFromContextMenu() {
 
   focusPane(pane.paneId);
   handleClosePane(pane.paneId);
-}
-
-function moveTabToIndex(tabId: string, targetIndex: number) {
-  const currentIndex = tabs.value.findIndex((tab) => tab.id === tabId);
-  if (currentIndex < 0) {
-    return;
-  }
-
-  const normalizedTargetIndex = Math.max(0, Math.min(targetIndex, tabs.value.length));
-  let insertIndex = normalizedTargetIndex;
-  if (currentIndex < normalizedTargetIndex) {
-    insertIndex -= 1;
-  }
-
-  if (insertIndex === currentIndex) {
-    return;
-  }
-
-  const nextTabs = [...tabs.value];
-  const [movedTab] = nextTabs.splice(currentIndex, 1);
-  nextTabs.splice(insertIndex, 0, movedTab);
-  tabs.value = nextTabs;
-}
-
-function cleanupTabPointerTracking() {
-  // No-op: pointer tracking is now via setPointerCapture on tab elements,
-  // so there are no window-level listeners to remove.
-}
-
-function beginTabDrag(tabId: string) {
-  draggedTabId.value = tabId;
-  dragPreviewTabId.value = tabId;
-  hoveredEmptyPaneId.value = null;
-  activeTabId.value = tabId;
-  tabDragMoved = true;
-  suppressTabClick.value = true;
-}
-
-function updateDraggedEmptyPaneTarget(clientX: number, clientY: number) {
-  if (!draggedTabId.value) {
-    hoveredEmptyPaneId.value = null;
-    return;
-  }
-
-  const hoveredElement = document.elementFromPoint(clientX, clientY);
-  const target = hoveredElement instanceof HTMLElement
-    ? hoveredElement.closest<HTMLElement>(".terminal-pane-empty[data-pane-id]")
-    : null;
-  hoveredEmptyPaneId.value = target?.dataset.paneId ?? null;
-}
-
-function finishTabDrag() {
-  const moved = tabDragMoved;
-  hoveredEmptyPaneId.value = null;
-  cleanupTabPointerTracking();
-  pendingTabDrag = null;
-  tabDragMoved = false;
-  draggedTabId.value = null;
-  dragPreviewTabId.value = null;
-  suppressTabClick.value = moved;
-
-  if (moved) {
-    window.setTimeout(() => {
-      suppressTabClick.value = false;
-    }, 0);
-  }
-}
-
-function handleTabPointerDown(event: PointerEvent, tabId: string) {
-  if (event.button !== 0) {
-    return;
-  }
-
-  const target = event.target as HTMLElement | null;
-  if (target?.closest(".tab-close-btn")) {
-    return;
-  }
-
-  event.preventDefault();
-  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-
-  pendingTabDrag = {
-    tabId,
-    startX: event.clientX,
-    startY: event.clientY,
-  };
-  tabDragMoved = false;
-}
-
-function handleTabPointerMove(event: PointerEvent, tabId: string) {
-  if (!pendingTabDrag || pendingTabDrag.tabId !== tabId) {
-    return;
-  }
-
-  if (!draggedTabId.value) {
-    const deltaX = event.clientX - pendingTabDrag.startX;
-    const deltaY = event.clientY - pendingTabDrag.startY;
-    if (Math.hypot(deltaX, deltaY) < 6) {
-      return;
-    }
-
-    beginTabDrag(pendingTabDrag.tabId);
-  }
-
-  updateDraggedEmptyPaneTarget(event.clientX, event.clientY);
-
-  // Use bounding rects of all tabs to find the drop target while pointer is captured
-  const allTabEls = document.querySelectorAll<HTMLElement>(".tab-item[data-tab-id]");
-  let targetTabEl: HTMLElement | null = null;
-  for (const el of allTabEls) {
-    const r = el.getBoundingClientRect();
-    if (event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom) {
-      targetTabEl = el;
-      break;
-    }
-  }
-
-  if (!targetTabEl || !draggedTabId.value) {
-    return;
-  }
-
-  const hoveredTabId = targetTabEl.dataset.tabId;
-  if (!hoveredTabId) {
-    return;
-  }
-
-  const targetIndex = tabs.value.findIndex((tab) => tab.id === hoveredTabId);
-  if (targetIndex < 0) {
-    return;
-  }
-
-  const bounds = targetTabEl.getBoundingClientRect();
-  const insertAfter = event.clientX > bounds.left + bounds.width / 2;
-  moveTabToIndex(draggedTabId.value, targetIndex + (insertAfter ? 1 : 0));
-  dragPreviewTabId.value = hoveredTabId;
-}
-
-function handleTabPointerUp(_event: PointerEvent, tabId: string) {
-  if (!pendingTabDrag || pendingTabDrag.tabId !== tabId) {
-    return;
-  }
-
-  const dropPaneId = draggedTabId.value ? hoveredEmptyPaneId.value : null;
-  if (draggedTabId.value && dropPaneId) {
-    moveTabToPane(draggedTabId.value, dropPaneId);
-  }
-
-  finishTabDrag();
-}
-
-function handleTabPointerCancel(tabId: string) {
-  if (!pendingTabDrag || pendingTabDrag.tabId !== tabId) {
-    return;
-  }
-  pendingTabDrag = null;
-  tabDragMoved = false;
-  draggedTabId.value = null;
-  dragPreviewTabId.value = null;
-  hoveredEmptyPaneId.value = null;
-  suppressTabClick.value = false;
 }
 
 function handleTitlebarMouseDown(event: MouseEvent) {
@@ -2113,10 +1094,7 @@ function handleCloseTab(id: string) {
     cancelTabRename();
   }
 
-  tabs.value = nextTabs;
-  paneLayout.value = clearTabFromLayout(paneLayout.value, id);
-  paneLayout.value = fillEmptyPanes(paneLayout.value, nextTabs);
-  syncFocusedPaneState(focusedPaneId.value);
+  handleTabRemoved(id, nextTabs);
 
   if (id in serialConnectionStates.value) {
     const nextStates = { ...serialConnectionStates.value };
@@ -2565,8 +1543,15 @@ function handleBookmarkConnect(connection: SavedConnection) {
               class="terminal-pane-frame"
               :class="{ focused: isPaneFocused(pane.paneId), empty: !pane.tabId }"
               :style="getPaneShellStyle(pane.rect)"
+              :data-pane-id="pane.paneId"
             >
-              <div class="terminal-pane-header">
+              <div
+                class="terminal-pane-header"
+                @pointerdown="handlePaneHeaderPointerDown($event, pane.paneId)"
+                @pointermove="handlePaneHeaderPointerMove($event, pane.paneId)"
+                @pointerup="handlePaneHeaderPointerUp($event, pane.paneId)"
+                @pointercancel="handlePaneHeaderPointerCancel(pane.paneId)"
+              >
                 <div class="terminal-pane-header-meta" @mousedown="focusPane(pane.paneId)">
                   <span class="terminal-pane-title">{{ getTabTitle(pane.tabId) }}</span>
                   <span class="terminal-pane-protocol">{{ getTabProtocolLabel(pane.tabId) }}</span>
@@ -2590,6 +1575,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
                   {{ draggedTabId ? 'Release to move this tab into the empty pane.' : 'Drag a tab here, or select a tab above to show it here.' }}
                 </div>
               </div>
+              <div
+                v-if="dropTargetPaneId === pane.paneId && dropTargetPosition"
+                class="terminal-pane-drop-preview"
+                :class="dropTargetPosition"
+              />
             </div>
           </div>
 
