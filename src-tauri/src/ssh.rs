@@ -215,9 +215,9 @@ fn build_screen_attach_command(session_name: &str) -> String {
     format!(
         concat!(
             "tmp_rc=$(mktemp /tmp/auraterm-screenrc.XXXXXX 2>/dev/null || mktemp -t auraterm-screenrc.XXXXXX) || exit 1; ",
-            "printf '%s\\n%s\\n' 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' > \"$tmp_rc\"; ",
-            "printf '\\033[32m[AuraTerm] Screen mode: wheel scroll and 10000 lines scrollback enabled.\\033[0m\\n'; ",
-            "screen -S {sess} -X eval 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' >/dev/null 2>&1 || true; ",
+            "printf '%s\\n%s\\n%s\\n' 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' 'escape ^Bb' > \"$tmp_rc\"; ",
+            "printf '\\033[32m[AuraTerm] Screen mode: wheel scroll and 10000 lines scrollback enabled. Escape key is Ctrl+B.\\033[0m\\n'; ",
+            "screen -S {sess} -X eval 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' 'escape ^Bb' >/dev/null 2>&1 || true; ",
             "screen -dr {sess} 2>/dev/null || screen -c \"$tmp_rc\" -S {sess}; ",
             "status=$?; rm -f \"$tmp_rc\"; exit $status"
         ),
