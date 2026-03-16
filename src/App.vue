@@ -1251,7 +1251,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
 
 <template>
   <div :class="appClassName">
-    <div class="titlebar" @mousedown="handleTitlebarMouseDown" @dblclick="handleToggleMaximize">
+    <div v-if="isMainWindow" class="titlebar" @mousedown="handleTitlebarMouseDown" @dblclick="handleToggleMaximize">
       <div v-if="isMainWindow && osType !== 'windows'" class="titlebar-controls" aria-label="Window controls" data-no-drag="true">
         <button
           class="titlebar-control-btn titlebar-control-close"
@@ -1443,7 +1443,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
       </div>
     </div>
 
-    <div class="tab-bar">
+    <div v-if="isMainWindow" class="tab-bar">
       <TransitionGroup
         name="tab-sort"
         tag="div"
@@ -1569,6 +1569,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
               :data-pane-id="pane.paneId"
             >
               <div
+                v-if="isMainWindow && paneLeaves.length > 1"
                 class="terminal-pane-header"
                 @pointerdown="handlePaneHeaderPointerDown($event, pane.paneId)"
                 @pointermove="handlePaneHeaderPointerMove($event, pane.paneId)"

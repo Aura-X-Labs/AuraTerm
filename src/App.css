@@ -324,6 +324,10 @@
   z-index: 2;
 }
 
+.tab-bar.no-titlebar {
+  margin-top: 0;
+}
+
 .tab-strip {
   flex: 1;
   min-width: 0;
@@ -627,7 +631,7 @@
 }
 
 .terminal-pane-header {
-  height: 30px;
+  height: 25px;
   display: flex;
   align-items: center;
   justify-content: space-between;

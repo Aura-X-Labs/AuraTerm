@@ -975,12 +975,16 @@ export function usePaneLayout({ tabs, isWindowFocused, terminalContainerRef }: U
   }
 
   function getTerminalViewportStyle(rect: PaneRect, isVisible: boolean) {
+    const isSplit = paneLeaves.value.length > 1;
+    const headerHeight = isSplit ? PANE_HEADER_HEIGHT : 0;
+    const borderCorrection = isSplit ? 2 : 0;
+    
     return {
       display: isVisible ? "block" : "none",
       left: `calc(${rect.left}% + ${PANE_INSET + 1}px)`,
-      top: `calc(${rect.top}% + ${PANE_INSET + PANE_HEADER_HEIGHT + 1}px)`,
+      top: `calc(${rect.top}% + ${PANE_INSET + headerHeight + 1}px)`,
       width: `calc(${rect.width}% - ${(PANE_INSET + 1) * 2}px)`,
-      height: `calc(${rect.height}% - ${PANE_INSET * 2 + PANE_HEADER_HEIGHT + 2}px)`,
+      height: `calc(${rect.height}% - ${PANE_INSET * 2 + headerHeight + borderCorrection}px)`,
     };
   }
 
