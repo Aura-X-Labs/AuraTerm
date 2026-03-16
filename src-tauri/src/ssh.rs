@@ -1050,6 +1050,53 @@ pub async fn answer_ssh_reconnect_choice(
 }
 
 #[tauri::command]
+pub async fn rename_ssh_session(
+    state: State<'_, SshState>,
+    id: String,
+    new_name: String,
+) -> Result<(), String> {
+    let new_name = new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err("New session name cannot be empty".to_string());
+    }
+
+    let (old_name, reconnect_type) = {
+        let configs = state.reconnect_configs.lock().await;
+        let config = configs
+            .get(&id)
+            .ok_or_else(|| "SSH session not found or not in reconnect mode".to_string())?;
+        (config.session_name.clone(), config.reconnect_type)
+    };
+
+    if old_name == new_name {
+        return Ok(());
+    }
+
+    let rename_cmd = match reconnect_type {
+        ReconnectType::Tmux => format!(
+            "tmux rename-session -t {} {} 2>/dev/null || true",
+            shell_escape(&old_name),
+            shell_escape(&new_name),
+        ),
+        ReconnectType::Screen => format!(
+            "screen -S {} -X sessionname {} 2>/dev/null; true",
+            shell_escape(&old_name),
+            shell_escape(&new_name),
+        ),
+        _ => return Err("Session is not in screen/tmux mode".to_string()),
+    };
+
+    let handle = get_ssh_handle(&state, &id).await?;
+    run_remote_command_capture(&handle, rename_cmd).await?;
+
+    if let Some(config) = state.reconnect_configs.lock().await.get_mut(&id) {
+        config.session_name = new_name;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn write_ssh_pty_input(
     app: AppHandle,
     state: State<'_, SshState>,

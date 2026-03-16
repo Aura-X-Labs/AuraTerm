@@ -145,6 +145,8 @@ function formatSerialFrame(serialConfig: SerialConfig) {
 
 const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
+const appWindow = getCurrentWindow();
+const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
 const showConnectDialog = ref(false);
 const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
 const settings = ref<AppSettings>(DEFAULT_SETTINGS);
@@ -351,7 +353,7 @@ watch(tabContextMenu, (value, _previous, onCleanup) => {
 });
 
 async function syncFullscreenState() {
-  isFullscreen.value = await getCurrentWindow().isFullscreen().catch((error) => {
+  isFullscreen.value = await appWindow.isFullscreen().catch((error) => {
     console.error("isFullscreen failed", error);
     return false;
   });
@@ -804,16 +806,39 @@ function cancelTabRename() {
   renamingTabTitle.value = "";
 }
 
+function sanitizeSessionName(title: string): string {
+  return (
+    title
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "")
+    || "session"
+  );
+}
+
 function commitTabRename() {
   if (!renamingTabId.value) {
     return;
   }
 
+  const tabId = renamingTabId.value;
   const nextTitle = renamingTabTitle.value.trim();
   if (nextTitle) {
-    tabs.value = tabs.value.map((tab) => (
-      tab.id === renamingTabId.value ? { ...tab, title: nextTitle } : tab
+    const tab = tabs.value.find((t) => t.id === tabId);
+    tabs.value = tabs.value.map((t) => (
+      t.id === tabId ? { ...t, title: nextTitle } : t
     ));
+
+    if (tab?.session.protocol === "ssh") {
+      const reconnectType = tab.session.sshConfig.reconnectType;
+      if (reconnectType === "screen" || reconnectType === "tmux") {
+        const newSessionName = `at-${sanitizeSessionName(nextTitle)}`;
+        void invoke("rename_ssh_session", { id: tabId, newName: newSessionName }).catch((error) => {
+          console.warn("Failed to rename remote session:", error);
+        });
+      }
+    }
   }
 
   cancelTabRename();
@@ -904,19 +929,18 @@ function handleTitlebarMouseDown(event: MouseEvent) {
   if ((event.target as HTMLElement).closest("[data-no-drag='true']")) {
     return;
   }
-  void getCurrentWindow().startDragging().catch((error) => {
+  void appWindow.startDragging().catch((error) => {
     console.error("startDragging failed", error);
   });
 }
 
 async function handleMinimize() {
-  await getCurrentWindow().minimize().catch((error) => {
+  await appWindow.minimize().catch((error) => {
     console.error("minimize failed", error);
   });
 }
 
 async function handleToggleMaximize() {
-  const appWindow = getCurrentWindow();
   const isMaximized = await appWindow.isMaximized().catch((error) => {
     console.error("isMaximized failed", error);
     return false;
@@ -933,14 +957,14 @@ async function handleToggleMaximize() {
 }
 
 async function handleClose() {
-  await getCurrentWindow().close().catch((error) => {
+  await appWindow.close().catch((error) => {
     console.error("close failed", error);
   });
 }
 
 async function handleExitApp() {
   closeOpenMenus();
-  await getCurrentWindow().close().catch((error) => {
+  await appWindow.close().catch((error) => {
     console.error("exit failed", error);
   });
 }
@@ -993,7 +1017,6 @@ function handleResetTerminalFontSize() {
 
 async function handleToggleFullScreen() {
   closeOpenMenus();
-  const appWindow = getCurrentWindow();
   const nextFullscreen = !(await appWindow.isFullscreen().catch((error) => {
     console.error("isFullscreen failed", error);
     return false;
@@ -1229,7 +1252,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
 <template>
   <div :class="appClassName">
     <div class="titlebar" @mousedown="handleTitlebarMouseDown" @dblclick="handleToggleMaximize">
-      <div v-if="osType !== 'windows'" class="titlebar-controls" aria-label="Window controls" data-no-drag="true">
+      <div v-if="isMainWindow && osType !== 'windows'" class="titlebar-controls" aria-label="Window controls" data-no-drag="true">
         <button
           class="titlebar-control-btn titlebar-control-close"
           type="button"
@@ -1389,7 +1412,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
 
       <div v-else class="titlebar-title">AuraTerm</div>
 
-      <div v-if="osType === 'windows'" class="titlebar-controls-win" aria-label="Window controls" data-no-drag="true">
+      <div v-if="isMainWindow && osType === 'windows'" class="titlebar-controls-win" aria-label="Window controls" data-no-drag="true">
         <button
           class="titlebar-control-win-btn"
           type="button"

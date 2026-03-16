@@ -717,7 +717,7 @@ fn main() {
                     let _ = tauri::WebviewWindowBuilder::new(
                         app,
                         format!("window-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()),
-                        tauri::WebviewUrl::App("index.html".into())
+                        tauri::WebviewUrl::App("index.html?role=child".into())
                     )
                     .title("AuraTerm")
                     .inner_size(1000.0, 800.0)
@@ -791,6 +791,7 @@ fn main() {
             ssh::close_ssh_pty,
             ssh::answer_ssh_mfa,
             ssh::answer_ssh_reconnect_choice,
+            ssh::rename_ssh_session,
             ssh::ssh_list_remote_dir,
             ssh::ssh_create_remote_dir,
             ssh::ssh_remove_remote_entry,
