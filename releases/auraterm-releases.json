@@ -1,7 +1,23 @@
 {
   "product": "AuraTerm",
-  "latest": "0.2.1",
+  "latest": "0.2.3",
   "releases": [
+    {
+      "version": "0.2.3",
+      "filename": "AuraTerm_0.2.3_x64-setup.exe",
+      "platform": "windows-x64",
+      "sha256": "7e7de246fdb6dfb20afca1c4f8d36872c0376b9bee1a4d4e6e047e60abf90ad1",
+      "notes": "automated release",
+      "published_at": "2026-03-19"
+    },
+    {
+      "version": "0.2.2",
+      "filename": "AuraTerm_0.2.2_x64-setup.exe",
+      "platform": "windows-x64",
+      "sha256": "1415feff0f1e65a65a3aecbdd462f0568a0731df8889162146c6255b25002cf9",
+      "notes": "automated release",
+      "published_at": "2026-03-17"
+    },
     {
       "version": "0.2.1",
       "filename": "AuraTerm_0.2.1_x64-setup.exe",
