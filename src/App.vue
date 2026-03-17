@@ -1480,6 +1480,9 @@ function handleBookmarkConnect(connection: SavedConnection) {
             class="tab-title-input"
             type="text"
             maxlength="120"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
             @blur="commitTabRename"
             @click.stop
             @keydown="handleTabRenameKeyDown"

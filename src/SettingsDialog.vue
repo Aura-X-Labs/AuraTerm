@@ -130,7 +130,14 @@ function inputChecked(event: Event) {
 
           <label class="settings-field">
             <span>Font Family</span>
-            <input type="text" :value="settings.fontFamily" @input="update('fontFamily', inputValue($event))">
+            <input
+              type="text"
+              :value="settings.fontFamily"
+              @input="update('fontFamily', inputValue($event))"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+            >
           </label>
 
           <label class="settings-field">
@@ -161,6 +168,9 @@ function inputChecked(event: Event) {
               placeholder="e.g., C:\Program Files\Git\bin\bash.exe"
               :value="settings.shellPath ?? ''"
               @input="update('shellPath', inputValue($event) || null)"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
             >
           </label>
 
@@ -171,6 +181,9 @@ function inputChecked(event: Event) {
               placeholder="e.g., ~/AuraTerm/logs"
               :value="settings.logSavePath"
               @input="update('logSavePath', inputValue($event))"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
             >
           </label>
 
@@ -181,6 +194,9 @@ function inputChecked(event: Event) {
               placeholder="e.g., {timestamp}_{session}"
               :value="settings.logFileNameTemplate"
               @input="update('logFileNameTemplate', inputValue($event))"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
             >
           </label>
           <div class="settings-field-full-hint">Available placeholders: {timestamp}, {datetime}, {date}, {time}, {yyyy}, {MM}, {dd}, {HH}, {mm}, {ss}, {unix}, {session}, {protocol}, {host}, {user}, {port}, {serialPort}, {baudRate}</div>
@@ -262,7 +278,14 @@ function inputChecked(event: Event) {
             <span>Background</span>
             <div class="settings-color-row">
               <input type="color" :value="settings.theme.background" @input="updateTheme('background', inputValue($event))">
-              <input type="text" :value="settings.theme.background" @input="updateTheme('background', inputValue($event))">
+              <input
+                type="text"
+                :value="settings.theme.background"
+                @input="updateTheme('background', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
             </div>
           </label>
 
@@ -270,7 +293,14 @@ function inputChecked(event: Event) {
             <span>Foreground</span>
             <div class="settings-color-row">
               <input type="color" :value="settings.theme.foreground" @input="updateTheme('foreground', inputValue($event))">
-              <input type="text" :value="settings.theme.foreground" @input="updateTheme('foreground', inputValue($event))">
+              <input
+                type="text"
+                :value="settings.theme.foreground"
+                @input="updateTheme('foreground', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
             </div>
           </label>
 
@@ -278,7 +308,14 @@ function inputChecked(event: Event) {
             <span>Cursor</span>
             <div class="settings-color-row">
               <input type="color" :value="settings.theme.cursor" @input="updateTheme('cursor', inputValue($event))">
-              <input type="text" :value="settings.theme.cursor" @input="updateTheme('cursor', inputValue($event))">
+              <input
+                type="text"
+                :value="settings.theme.cursor"
+                @input="updateTheme('cursor', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
             </div>
           </label>
         </div>

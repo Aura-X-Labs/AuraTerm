@@ -162,7 +162,15 @@ function handleSave() {
           </div>
           <div class="form-group">
             <label>Group</label>
-            <input type="text" :value="editDraft.group ?? ''" placeholder="Ungrouped" @input="updateDraft('group', inputValue($event))">
+            <input
+              type="text"
+              :value="editDraft.group ?? ''"
+              placeholder="Ungrouped"
+              @input="updateDraft('group', inputValue($event))"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+            >
           </div>
         </div>
 
@@ -175,6 +183,9 @@ function handleSave() {
                 :value="editDraft.portName ?? ''"
                 placeholder="/dev/cu.usbserial-1410"
                 @input="updateDraft('portName', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
               >
             </div>
             <div class="form-group">
@@ -224,7 +235,14 @@ function handleSave() {
           <div class="bookmark-editor-grid">
             <div class="form-group bookmark-editor-span-2">
               <label>Host</label>
-              <input type="text" :value="editDraft.host" @input="updateDraft('host', inputValue($event))">
+              <input
+                type="text"
+                :value="editDraft.host"
+                @input="updateDraft('host', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
             </div>
             <div class="form-group">
               <label>Port</label>
@@ -232,7 +250,14 @@ function handleSave() {
             </div>
             <div v-if="(editDraft.protocol ?? 'ssh') === 'ssh'" class="form-group">
               <label>User</label>
-              <input type="text" :value="editDraft.user" @input="updateDraft('user', inputValue($event))">
+              <input
+                type="text"
+                :value="editDraft.user"
+                @input="updateDraft('user', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
             </div>
             <div v-else class="form-group">
               <label>Protocol</label>
@@ -253,12 +278,26 @@ function handleSave() {
 
             <div v-if="editDraft.authType === 'password'" class="form-group">
               <label>Password</label>
-              <input type="password" :value="editDraft.password ?? ''" @input="updateDraft('password', inputValue($event))">
+              <input
+                type="password"
+                :value="editDraft.password ?? ''"
+                @input="updateDraft('password', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
             </div>
 
             <div v-else class="form-group">
               <label>Private Key (PEM)</label>
-              <textarea rows="5" :value="editDraft.privateKey ?? ''" @input="updateDraft('privateKey', inputValue($event))" />
+              <textarea
+                rows="5"
+                :value="editDraft.privateKey ?? ''"
+                @input="updateDraft('privateKey', inputValue($event))"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              />
             </div>
 
             <div class="bookmark-editor-grid">
@@ -293,6 +332,9 @@ function handleSave() {
             :value="editDraft.logPath"
             :placeholder="editDraftDefaultLogPath"
             @input="updateDraft('logPath', inputValue($event))"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
           >
           <div v-if="editDraft.logPath !== undefined" class="form-hint">
             Leave blank to use the default log path template.

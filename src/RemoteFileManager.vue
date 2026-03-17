@@ -545,7 +545,14 @@ onBeforeUnmount(() => {
 
       <label class="remote-file-manager-download-dir">
         <span>Download to</span>
-        <input v-model="downloadDirectory" type="text" placeholder="~/AuraTerm/downloads">
+        <input
+          v-model="downloadDirectory"
+          type="text"
+          placeholder="~/AuraTerm/downloads"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+        >
       </label>
 
       <div v-if="statusMessage" class="remote-file-manager-status success">{{ statusMessage }}</div>

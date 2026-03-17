@@ -290,6 +290,8 @@ function closeEditor() {
                     class="quick-btn-editor-input quick-btn-editor-input--command"
                     placeholder="Command to send (e.g. ls -la)"
                     :value="button.command"
+                    autocapitalize="none"
+                    autocorrect="off"
                     spellcheck="false"
                     @input="updateButton(button.id, 'command', inputValue($event))"
                   />

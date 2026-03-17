@@ -224,6 +224,8 @@ async function handleSaveConnection(normalized: SavedConnection) {
         type="text"
         class="bookmark-search-input"
         placeholder="Search bookmarks..."
+        autocapitalize="none"
+        autocorrect="off"
         spellcheck="false"
       >
       <button v-if="searchQuery" class="bookmark-search-clear" @click="searchQuery = ''">×</button>

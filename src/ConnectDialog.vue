@@ -485,8 +485,24 @@ function handleSubmit(event: Event) {
             <span>Save this connection</span>
           </label>
           <div v-if="saveConnection" class="two-column-grid">
-            <input v-model="connectionName" type="text" class="save-connection-name" :placeholder="defaultName || 'Connection name (optional)'">
-            <input v-model="connectionGroup" type="text" class="save-connection-name" placeholder="Group (optional)">
+            <input
+              v-model="connectionName"
+              type="text"
+              class="save-connection-name"
+              :placeholder="defaultName || 'Connection name (optional)'"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+            >
+            <input
+              v-model="connectionGroup"
+              type="text"
+              class="save-connection-name"
+              placeholder="Group (optional)"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+            >
           </div>
         </div>
 
@@ -501,6 +517,9 @@ function handleSubmit(event: Event) {
             type="text"
             class="save-connection-name"
             :placeholder="defaultLogPath"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
           >
         </div>
 

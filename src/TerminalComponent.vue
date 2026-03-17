@@ -886,6 +886,9 @@ function handleSkipReconnectSession() {
             class="password-retry-input"
             placeholder="Enter password"
             autofocus
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
             @keydown.stop
           >
           <div class="password-retry-actions">
@@ -910,6 +913,9 @@ function handleSkipReconnectSession() {
               :value="mfaResponses[index] || ''"
               :autofocus="index === 0"
               :placeholder="prompt.text.replace(/[:：]\s*$/, '')"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
               @input="updateMfaResponse(index, inputValue($event))"
               @keydown.stop
             >
