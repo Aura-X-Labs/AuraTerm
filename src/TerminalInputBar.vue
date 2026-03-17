@@ -74,10 +74,8 @@ function doSend(payload: string) {
   emit("send", payload.endsWith("\n") ? payload : `${payload}\n`);
 }
 
-function handleKeyDown(event: KeyboardEvent) {
-  // PageUp: navigate to older history (index increases)
-  if (event.key === "PageUp") {
-    event.preventDefault();
+function navigateHistory(direction: 1 | -1) {
+  if (direction === 1) { // Older
     if (props.inputHistory.length === 0) return;
     if (historyIndex.value < 0) {
       savedTextBeforeNav.value = text.value;
@@ -87,12 +85,7 @@ function handleKeyDown(event: KeyboardEvent) {
       historyIndex.value = nextIndex;
       text.value = props.inputHistory[nextIndex] ?? "";
     }
-    return;
-  }
-
-  // PageDown: navigate to newer history (index decreases)
-  if (event.key === "PageDown") {
-    event.preventDefault();
+  } else { // Newer
     if (historyIndex.value < 0) return;
     const nextIndex = historyIndex.value - 1;
     if (nextIndex < 0) {
@@ -102,6 +95,54 @@ function handleKeyDown(event: KeyboardEvent) {
     } else {
       historyIndex.value = nextIndex;
       text.value = props.inputHistory[nextIndex] ?? "";
+    }
+  }
+
+  // Move cursor to end
+  setTimeout(() => {
+    if (textareaRef.value) {
+      textareaRef.value.selectionStart = textareaRef.value.selectionEnd = text.value.length;
+    }
+  }, 0);
+}
+
+function handleKeyDown(event: KeyboardEvent) {
+  // PageUp: navigate to older history (index increases)
+  if (event.key === "PageUp") {
+    event.preventDefault();
+    navigateHistory(1);
+    return;
+  }
+
+  // PageDown: navigate to newer history (index decreases)
+  if (event.key === "PageDown") {
+    event.preventDefault();
+    navigateHistory(-1);
+    return;
+  }
+
+  // ArrowUp: navigate older history if cursor is on the first line
+  if (event.key === "ArrowUp") {
+    const textarea = textareaRef.value;
+    if (textarea) {
+      const before = text.value.substring(0, textarea.selectionStart ?? 0);
+      if (!before.includes("\n")) {
+        event.preventDefault();
+        navigateHistory(1);
+      }
+    }
+    return;
+  }
+
+  // ArrowDown: navigate newer history if cursor is on the last line
+  if (event.key === "ArrowDown") {
+    const textarea = textareaRef.value;
+    if (textarea) {
+      const after = text.value.substring(textarea.selectionStart ?? text.value.length);
+      if (!after.includes("\n") && historyIndex.value >= 0) {
+        event.preventDefault();
+        navigateHistory(-1);
+      }
     }
     return;
   }
@@ -220,7 +261,7 @@ function closeEditor() {
         class="terminal-input-textarea"
         :style="{ height: `${textareaH}px` }"
         :value="text"
-        placeholder="Type here…  Ctrl+Enter to send  ·  PgUp/PgDn for history"
+        placeholder="Type here…  Ctrl+Enter to send  ·  PgUp/↑ for history"
         spellcheck="false"
         autocorrect="off"
         autocapitalize="off"
