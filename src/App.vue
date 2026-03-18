@@ -14,6 +14,8 @@ import RemoteFileManager from "./RemoteFileManager.vue";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
 import {
   DEFAULT_SETTINGS,
+  deriveUiTheme,
+  getTerminalThemeAppearance,
   MAX_INPUT_HISTORY,
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
@@ -165,6 +167,7 @@ const renamingTabTitle = ref("");
 const tabContextMenu = ref<TabContextMenuState | null>(null);
 const suppressTabClick = ref(false);
 const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
+const uiTheme = computed(() => deriveUiTheme(settings.value.theme));
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const terminalContainerRef = ref<HTMLDivElement | null>(null);
@@ -284,6 +287,16 @@ function closeOpenMenus() {
 
 watch(settings, (value) => {
   settingsRef.value = value;
+}, { deep: true, immediate: true });
+
+watch(uiTheme, (value) => {
+  const root = document.documentElement;
+  Object.entries(value.variables).forEach(([key, cssValue]) => {
+    root.style.setProperty(key, String(cssValue));
+  });
+  root.style.colorScheme = value.appearance;
+  document.body.style.backgroundColor = value.variables["--app-bg"];
+  document.body.style.color = value.variables["--app-text"];
 }, { deep: true, immediate: true });
 
 watch(openMenuId, (menuId, _previous, onCleanup) => {
@@ -575,6 +588,7 @@ const primaryShortcutLabel = computed(() => (osType.value === "macos" ? "Cmd" : 
 const appClassName = computed(() => [
   "app-container",
   osType.value,
+  `theme-${getTerminalThemeAppearance(settings.value.theme)}`,
   isWindowFocused.value ? "focused" : "blurred",
   draggedTabId.value ? "tab-dragging" : "",
 ]);

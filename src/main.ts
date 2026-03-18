@@ -11,8 +11,8 @@ style.textContent = `
     width: 100%;
     height: 100%;
     overflow: hidden;
-    background-color: #1e1e1e;
-    color: #ffffff;
+    background-color: var(--app-bg, #1e1e1e);
+    color: var(--app-text, #ffffff);
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   }
 `;

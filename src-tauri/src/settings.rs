@@ -3,10 +3,28 @@ use std::fs;
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalTheme {
     pub background: String,
     pub foreground: String,
     pub cursor: String,
+    pub selection_background: String,
+    pub black: String,
+    pub red: String,
+    pub green: String,
+    pub yellow: String,
+    pub blue: String,
+    pub magenta: String,
+    pub cyan: String,
+    pub white: String,
+    pub bright_black: String,
+    pub bright_red: String,
+    pub bright_green: String,
+    pub bright_yellow: String,
+    pub bright_blue: String,
+    pub bright_magenta: String,
+    pub bright_cyan: String,
+    pub bright_white: String,
 }
 
 impl Default for TerminalTheme {
@@ -15,6 +33,23 @@ impl Default for TerminalTheme {
             background: "#000000".to_string(),
             foreground: "#dcdcdc".to_string(),
             cursor: "#ffffff".to_string(),
+            selection_background: "#264f78".to_string(),
+            black: "#1f252d".to_string(),
+            red: "#c35b65".to_string(),
+            green: "#7fb069".to_string(),
+            yellow: "#d0b26f".to_string(),
+            blue: "#6ca0d8".to_string(),
+            magenta: "#a889d8".to_string(),
+            cyan: "#5fb3b3".to_string(),
+            white: "#dcdcdc".to_string(),
+            bright_black: "#5c6370".to_string(),
+            bright_red: "#e06c75".to_string(),
+            bright_green: "#98c379".to_string(),
+            bright_yellow: "#e5c07b".to_string(),
+            bright_blue: "#61afef".to_string(),
+            bright_magenta: "#c678dd".to_string(),
+            bright_cyan: "#56b6c2".to_string(),
+            bright_white: "#ffffff".to_string(),
         }
     }
 }

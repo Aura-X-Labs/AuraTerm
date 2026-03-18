@@ -7,7 +7,9 @@ BUNDLE = nsis
 # For Windows, we use powershell to time the commands.
 # Use $(1) as a placeholder for the command to be executed.
 # We use [int] to ensure integer division/truncation for seconds.
-TIME_CMD = powershell -ExecutionPolicy Bypass -Command "$$s=Get-Date; $(1); $$e=Get-Date; $$t=$$e-$$s; $$h=[Math]::Floor($$t.TotalHours); $$m=$$t.Minutes; $$sec=$$t.Seconds; $$ts=[int]$$t.TotalSeconds; Write-Host (\"`nElapsed: {0:D2}:{1:D2}:{2:D2} ({3}s)\" -f [int]$$h, [int]$$m, [int]$$sec, $$ts)"
+# Wrap the -Command argument in single quotes so MSYS/sh doesn't expand
+# PowerShell variables like $h/$m/$sec before PowerShell receives them.
+TIME_CMD = powershell -ExecutionPolicy Bypass -Command '$$s=Get-Date; $(1); $$e=Get-Date; $$t=$$e-$$s; $$h=[Math]::Floor($$t.TotalHours); $$m=$$t.Minutes; $$sec=$$t.Seconds; $$ts=[int]$$t.TotalSeconds; Write-Host ("`nElapsed: {0:D2}:{1:D2}:{2:D2} ({3}s)" -f [int]$$h, [int]$$m, [int]$$sec, $$ts)'
 else
 UNAME_S := $(shell uname -s)
 # For Unix, we use a shell-based timing to ensure consistent format across BSD/macOS and GNU/Linux

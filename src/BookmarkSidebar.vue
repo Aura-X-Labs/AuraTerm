@@ -300,8 +300,8 @@ async function handleSaveConnection(normalized: SavedConnection) {
 <style>
 .bookmark-sidebar {
   width: 260px;
-  background: #252526;
-  border-right: 1px solid #333;
+  background: var(--app-sidebar-bg);
+  border-right: 1px solid var(--app-border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -318,7 +318,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
 .bookmark-sidebar-title {
   font-size: 0.85rem;
   font-weight: 600;
-  color: #ccc;
+  color: var(--app-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -326,7 +326,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
 .bookmark-refresh-btn {
   background: none;
   border: none;
-  color: #888;
+  color: var(--app-text-muted);
   cursor: pointer;
   font-size: 1.1rem;
   padding: 4px;
@@ -335,30 +335,30 @@ async function handleSaveConnection(normalized: SavedConnection) {
 }
 
 .bookmark-refresh-btn:hover {
-  background: #333;
-  color: #fff;
+  background: var(--app-hover);
+  color: var(--app-text);
 }
 
 .bookmark-search-container {
   padding: 6px 12px 12px 12px;
   position: relative;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .bookmark-search-input {
   width: 100%;
   box-sizing: border-box;
-  background: #1e1e1e;
-  border: 1px solid #3c3c3c;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
   border-radius: 4px;
   padding: 4px 24px 4px 8px;
-  color: #ccc;
+  color: var(--app-text-secondary);
   font-size: 0.8rem;
   outline: none;
 }
 
 .bookmark-search-input:focus {
-  border-color: #0078d4;
+  border-color: var(--app-border-accent);
 }
 
 .bookmark-search-clear {
@@ -367,7 +367,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
   top: 4px;
   background: none;
   border: none;
-  color: #888;
+  color: var(--app-text-muted);
   cursor: pointer;
   font-size: 1rem;
   padding: 0;
@@ -375,13 +375,13 @@ async function handleSaveConnection(normalized: SavedConnection) {
 }
 
 .bookmark-search-clear:hover {
-  color: #fff;
+  color: var(--app-text);
 }
 
 .bookmark-empty {
   padding: 40px 20px;
   text-align: center;
-  color: #666;
+  color: var(--app-text-dim);
   font-size: 0.85rem;
   line-height: 1.6;
 }
@@ -401,13 +401,13 @@ async function handleSaveConnection(normalized: SavedConnection) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: #2d2d2d;
+  background: var(--app-surface-2);
   margin-bottom: 4px;
   cursor: pointer;
 }
 
 .bookmark-group-header:hover {
-  background: #333;
+  background: var(--app-hover);
 }
 
 .bookmark-group-header-left {
@@ -418,7 +418,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
 
 .bookmark-group-arrow {
   font-size: 1.1rem;
-  color: #666;
+  color: var(--app-text-dim);
   transition: transform 0.2s;
   width: 16px;
   text-align: center;
@@ -433,22 +433,22 @@ async function handleSaveConnection(normalized: SavedConnection) {
 .bookmark-group-name {
   font-size: 0.75rem;
   font-weight: 600;
-  color: #888;
+  color: var(--app-text-muted);
 }
 
 .bookmark-group[data-group="Recently Used"] .bookmark-group-header {
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--app-border);
 }
 
 .bookmark-group[data-group="Recently Used"] .bookmark-group-name {
-  color: #0078d4;
+  color: var(--app-accent);
   font-style: italic;
 }
 
 .bookmark-group-count {
   font-size: 0.7rem;
-  color: #555;
-  background: #383838;
+  color: var(--app-text-muted);
+  background: var(--app-surface-3);
   padding: 1px 6px;
   border-radius: 10px;
 }
@@ -469,7 +469,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
 }
 
 .bookmark-item:hover {
-  background: #2a2d2e;
+  background: var(--app-hover-soft);
 }
 
 .bookmark-icon {
@@ -485,7 +485,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
 
 .bookmark-name {
   font-size: 0.9rem;
-  color: #ccc;
+  color: var(--app-text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -493,7 +493,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
 
 .bookmark-host {
   font-size: 0.75rem;
-  color: #666;
+  color: var(--app-text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -501,9 +501,9 @@ async function handleSaveConnection(normalized: SavedConnection) {
 
 .bookmark-context-menu {
   position: fixed;
-  background: #252526;
-  border: 1px solid #454545;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  background: var(--app-menu-bg);
+  border: 1px solid var(--app-border);
+  box-shadow: 0 4px 12px var(--app-shadow);
   border-radius: 4px;
   padding: 4px;
   z-index: 1000;
@@ -517,18 +517,18 @@ async function handleSaveConnection(normalized: SavedConnection) {
   text-align: left;
   background: none;
   border: none;
-  color: #ccc;
+  color: var(--app-text-secondary);
   font-size: 0.85rem;
   cursor: pointer;
   border-radius: 2px;
 }
 
 .bookmark-context-item:hover {
-  background: #0078d4;
-  color: #fff;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 .bookmark-context-item.danger:hover {
-  background: #e81123;
+  background: var(--app-danger);
 }
 </style>

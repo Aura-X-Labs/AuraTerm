@@ -121,6 +121,10 @@ function resolveLogPathPlaceholders(path: string) {
     .replace(/\{unix\}/g, parts.unix);
 }
 
+function buildTerminalTheme(settings: AppSettings) {
+  return { ...settings.theme };
+}
+
 
 function writeSessionInput(id: string, data: string, session: SessionConfig) {
   switch (session.protocol) {
@@ -254,11 +258,7 @@ watch(effectiveSettings, (value) => {
   terminal.options.fontSize = value.fontSize;
   terminal.options.fontFamily = value.fontFamily;
   terminal.options.scrollback = value.scrollback;
-  terminal.options.theme = {
-    background: value.theme.background,
-    foreground: value.theme.foreground,
-    cursor: value.theme.cursor,
-  };
+  terminal.options.theme = buildTerminalTheme(value);
   fitAddon?.fit();
 }, { deep: true });
 
@@ -415,11 +415,7 @@ onMounted(() => {
     fontFamily: effectiveSettings.value.fontFamily,
     fontSize: effectiveSettings.value.fontSize,
     scrollback: effectiveSettings.value.scrollback,
-    theme: {
-      background: effectiveSettings.value.theme.background,
-      foreground: effectiveSettings.value.theme.foreground,
-      cursor: effectiveSettings.value.theme.cursor,
-    },
+    theme: buildTerminalTheme(effectiveSettings.value),
     convertEol: false,
     allowProposedApi: true,
     macOptionIsMeta: true,

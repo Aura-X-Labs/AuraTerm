@@ -4,9 +4,9 @@
   min-width: 340px;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, #181d24 0%, #11161c 100%);
-  border-left: 1px solid #2a323c;
-  color: #d8e2ee;
+  background: var(--app-terminal-gradient);
+  border-left: 1px solid var(--app-border);
+  color: var(--app-text);
 }
 
 .remote-file-manager-header {
@@ -15,19 +15,19 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px 12px;
-  border-bottom: 1px solid #2a323c;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .remote-file-manager-title {
   font-size: 14px;
   font-weight: 700;
-  color: #f4f8fc;
+  color: var(--app-text);
 }
 
 .remote-file-manager-subtitle {
   margin-top: 4px;
   font-size: 11px;
-  color: #8fa1b5;
+  color: var(--app-text-muted);
   word-break: break-all;
 }
 
@@ -37,14 +37,14 @@
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #8fa1b5;
+  color: var(--app-text-muted);
   font-size: 18px;
   cursor: pointer;
 }
 
 .remote-file-manager-close:hover {
-  background: #26313d;
-  color: #ffffff;
+  background: var(--app-hover);
+  color: var(--app-text);
 }
 
 .remote-file-manager-toolbar {
@@ -52,14 +52,14 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  border-bottom: 1px solid #2a323c;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .remote-file-manager-mode-switch {
   display: inline-flex;
   align-self: flex-start;
-  background: #0f1419;
-  border: 1px solid #2f3944;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
   border-radius: 999px;
   padding: 2px;
 }
@@ -68,7 +68,7 @@
   min-width: 64px;
   border: none;
   background: transparent;
-  color: #93a4b6;
+  color: var(--app-text-muted);
   border-radius: 999px;
   padding: 6px 12px;
   font-size: 12px;
@@ -76,8 +76,8 @@
 }
 
 .remote-file-manager-mode-btn.active {
-  background: #1d5f8c;
-  color: #ffffff;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 .remote-file-manager-actions {
@@ -87,9 +87,9 @@
 }
 
 .remote-file-manager-actions button {
-  border: 1px solid #324150;
-  background: #1d2630;
-  color: #d8e2ee;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface-2);
+  color: var(--app-text);
   border-radius: 8px;
   padding: 8px;
   font-size: 12px;
@@ -101,7 +101,7 @@
 }
 
 .remote-file-manager-actions button:hover:not(:disabled) {
-  background: #253241;
+  background: var(--app-surface-3);
 }
 
 .remote-file-manager-actions button:disabled,
@@ -111,9 +111,9 @@
 }
 
 .remote-file-manager-actions button.danger {
-  border-color: #62333b;
-  color: #ffb5bf;
-  background: #2a171c;
+  border-color: var(--app-danger);
+  color: var(--app-danger);
+  background: var(--app-danger-soft);
 }
 
 .remote-file-manager-pathbar {
@@ -121,14 +121,14 @@
   flex-wrap: wrap;
   gap: 6px;
   padding: 12px 16px;
-  border-bottom: 1px solid #202832;
-  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-hover-soft);
 }
 
 .remote-file-manager-path-segment {
   border: none;
-  background: #141b22;
-  color: #8dc8f0;
+  background: var(--app-surface-0);
+  color: var(--app-accent);
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 12px;
@@ -136,8 +136,8 @@
 }
 
 .remote-file-manager-path-segment:hover {
-  background: #1d2731;
-  color: #b5e3ff;
+  background: var(--app-accent-soft);
+  color: var(--app-text);
 }
 
 .remote-file-manager-list {
@@ -157,7 +157,7 @@
 
 .remote-file-manager-list-head {
   padding: 0 10px 8px;
-  color: #7e90a3;
+  color: var(--app-text-muted);
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -175,13 +175,13 @@
 }
 
 .remote-file-manager-row:hover {
-  background: rgba(98, 172, 226, 0.08);
-  border-color: rgba(98, 172, 226, 0.14);
+  background: var(--app-accent-soft);
+  border-color: var(--app-accent-soft-strong);
 }
 
 .remote-file-manager-row.selected {
-  background: rgba(61, 137, 194, 0.18);
-  border-color: rgba(122, 195, 255, 0.28);
+  background: var(--app-accent-soft-strong);
+  border-color: var(--app-border-accent);
 }
 
 .remote-file-manager-name {
@@ -205,12 +205,12 @@
 
 .remote-file-manager-permissions {
   flex-shrink: 0;
-  color: #708196;
+  color: var(--app-text-dim);
   font-size: 10px;
 }
 
 .remote-file-manager-meta {
-  color: #8fa1b5;
+  color: var(--app-text-muted);
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
@@ -219,13 +219,13 @@
 
 .remote-file-manager-empty {
   padding: 28px 12px;
-  color: #6e8093;
+  color: var(--app-text-dim);
   text-align: center;
   font-size: 12px;
 }
 
 .remote-file-manager-footer {
-  border-top: 1px solid #2a323c;
+  border-top: 1px solid var(--app-border);
   padding: 12px 16px 14px;
   display: flex;
   flex-direction: column;
@@ -238,18 +238,18 @@
   gap: 10px;
   padding: 12px;
   border-radius: 12px;
-  border: 1px solid rgba(80, 156, 212, 0.22);
-  background: linear-gradient(180deg, rgba(26, 47, 68, 0.82) 0%, rgba(17, 26, 35, 0.92) 100%);
+  border: 1px solid var(--app-accent-soft-strong);
+  background: linear-gradient(180deg, var(--app-accent-soft) 0%, var(--app-panel-bg-subtle) 100%);
 }
 
 .remote-file-manager-transfer.completed {
-  border-color: rgba(34, 197, 94, 0.24);
-  background: linear-gradient(180deg, rgba(16, 53, 34, 0.86) 0%, rgba(13, 26, 19, 0.94) 100%);
+  border-color: var(--app-success);
+  background: linear-gradient(180deg, var(--app-success-soft) 0%, var(--app-panel-bg-subtle) 100%);
 }
 
 .remote-file-manager-transfer.failed {
-  border-color: rgba(239, 68, 68, 0.24);
-  background: linear-gradient(180deg, rgba(60, 23, 23, 0.9) 0%, rgba(30, 15, 15, 0.96) 100%);
+  border-color: var(--app-danger);
+  background: linear-gradient(180deg, var(--app-danger-soft) 0%, var(--app-panel-bg-subtle) 100%);
 }
 
 .remote-file-manager-transfer-header {
@@ -262,12 +262,12 @@
 .remote-file-manager-transfer-title {
   font-size: 13px;
   font-weight: 700;
-  color: #f7fbff;
+  color: var(--app-text);
 }
 
 .remote-file-manager-transfer-subtitle {
   margin-top: 4px;
-  color: #9eb7ca;
+  color: var(--app-text-muted);
   font-size: 11px;
 }
 
@@ -275,7 +275,7 @@
   flex-shrink: 0;
   font-size: 18px;
   font-weight: 700;
-  color: #c7ecff;
+  color: var(--app-accent);
 }
 
 .remote-file-manager-progress-track {
@@ -283,27 +283,27 @@
   height: 10px;
   overflow: hidden;
   border-radius: 999px;
-  background: rgba(12, 18, 24, 0.78);
-  border: 1px solid rgba(71, 92, 111, 0.5);
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
 }
 
 .remote-file-manager-progress-fill {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #5dc7ff 0%, #7cf5d3 100%);
+  background: linear-gradient(90deg, var(--app-accent) 0%, var(--app-alt-accent) 100%);
   transition: width 140ms ease-out;
 }
 
 .remote-file-manager-transfer.completed .remote-file-manager-progress-fill {
-  background: linear-gradient(90deg, #22c55e 0%, #86efac 100%);
+  background: linear-gradient(90deg, var(--app-success) 0%, var(--app-success-hover) 100%);
 }
 
 .remote-file-manager-transfer.failed .remote-file-manager-progress-fill {
-  background: linear-gradient(90deg, #ef4444 0%, #fca5a5 100%);
+  background: linear-gradient(90deg, var(--app-danger) 0%, var(--app-danger-hover) 100%);
 }
 
 .remote-file-manager-transfer-bytes {
-  color: #9db2c4;
+  color: var(--app-text-muted);
   font-size: 11px;
 }
 
@@ -320,23 +320,23 @@
 }
 
 .remote-file-manager-transfer-path span {
-  color: #7f95a8;
+  color: var(--app-text-dim);
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .remote-file-manager-transfer-path strong {
-  color: #edf7ff;
+  color: var(--app-text);
   font-size: 12px;
   line-height: 1.45;
   word-break: break-all;
 }
 
 .remote-file-manager-transfer-note {
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--app-border);
   padding-top: 8px;
-  color: #ffd4d4;
+  color: var(--app-danger);
   font-size: 12px;
   line-height: 1.5;
   word-break: break-word;
@@ -347,15 +347,15 @@
   flex-direction: column;
   gap: 6px;
   font-size: 11px;
-  color: #8fa1b5;
+  color: var(--app-text-muted);
 }
 
 .remote-file-manager-download-dir input {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #33414f;
-  background: #0f1419;
-  color: #e6edf5;
+  border: 1px solid var(--app-border);
+  background: var(--app-input-bg);
+  color: var(--app-text);
   border-radius: 8px;
   padding: 8px 10px;
   font-size: 12px;
@@ -370,15 +370,15 @@
 }
 
 .remote-file-manager-status.success {
-  background: rgba(34, 197, 94, 0.14);
-  color: #a7f3c5;
-  border: 1px solid rgba(34, 197, 94, 0.24);
+  background: var(--app-success-soft);
+  color: var(--app-success);
+  border: 1px solid var(--app-success);
 }
 
 .remote-file-manager-status.error {
-  background: rgba(239, 68, 68, 0.12);
-  color: #ffb7b7;
-  border: 1px solid rgba(239, 68, 68, 0.18);
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+  border: 1px solid var(--app-danger);
 }
 
 @media (max-width: 1200px) {

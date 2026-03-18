@@ -1,7 +1,70 @@
+/* ── Theme Defaults ───────────────────────────────────────────────────────── */
+:root {
+  --app-bg: #111418;
+  --app-surface-0: #171b20;
+  --app-surface-1: #1d232a;
+  --app-surface-2: #252c35;
+  --app-surface-3: #2d3640;
+  --app-surface-4: #38434f;
+  --app-panel-bg: #1d232a;
+  --app-panel-bg-strong: #252c35;
+  --app-panel-bg-subtle: #171b20;
+  --app-input-bg: #171b20;
+  --app-input-bg-focus: #1d232a;
+  --app-overlay: rgba(0, 0, 0, 0.56);
+  --app-overlay-soft: rgba(0, 0, 0, 0.32);
+  --app-shadow: rgba(0, 0, 0, 0.38);
+  --app-shadow-strong: rgba(0, 0, 0, 0.58);
+  --app-border: #39414b;
+  --app-border-strong: #515a67;
+  --app-border-accent: #61afef;
+  --app-text: #dcdcdc;
+  --app-text-secondary: #b5bcc4;
+  --app-text-muted: #8d97a1;
+  --app-text-dim: #6e7984;
+  --app-accent: #61afef;
+  --app-accent-hover: #7dbcf2;
+  --app-accent-soft: rgba(97, 175, 239, 0.16);
+  --app-accent-soft-strong: rgba(97, 175, 239, 0.24);
+  --app-accent-contrast: #0f1419;
+  --app-alt-accent: #56b6c2;
+  --app-success: #98c379;
+  --app-success-hover: #add290;
+  --app-success-soft: rgba(152, 195, 121, 0.18);
+  --app-warning: #e5c07b;
+  --app-warning-soft: rgba(229, 192, 123, 0.18);
+  --app-danger: #e06c75;
+  --app-danger-hover: #e6838a;
+  --app-danger-soft: rgba(224, 108, 117, 0.16);
+  --app-danger-soft-strong: rgba(224, 108, 117, 0.24);
+  --app-selection: rgba(38, 79, 120, 0.24);
+  --app-hover: rgba(255, 255, 255, 0.08);
+  --app-hover-soft: rgba(255, 255, 255, 0.05);
+  --app-scrollbar-track: #171b20;
+  --app-scrollbar-thumb: #39414b;
+  --app-scrollbar-thumb-hover: #515a67;
+  --app-titlebar-bg: #1d232a;
+  --app-titlebar-subtle: #171b20;
+  --app-tabbar-bg: #171b20;
+  --app-tab-bg: #252c35;
+  --app-tab-bg-hover: #2d3640;
+  --app-tab-bg-active: #171b20;
+  --app-sidebar-bg: #1d232a;
+  --app-menu-bg: #1d232a;
+  --app-menu-hover: rgba(97, 175, 239, 0.22);
+  --app-menu-separator: #39414b;
+  --app-terminal-panel: #101419;
+  --app-terminal-panel-alt: #090c10;
+  --app-terminal-gradient: linear-gradient(180deg, #1d232a 0%, #171b20 100%);
+  --app-terminal-glow: radial-gradient(circle at top left, rgba(97, 175, 239, 0.18) 0%, transparent 26%);
+  --app-status-pill-bg: rgba(97, 175, 239, 0.16);
+  --app-status-pill-fg: #61afef;
+}
+
 /* ── Global Scrollbar Styles ───────────────────────────────────────────────── */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #444 #1e1e1e;
+  scrollbar-color: var(--app-scrollbar-thumb) var(--app-scrollbar-track);
 }
 
 *::-webkit-scrollbar {
@@ -10,22 +73,22 @@
 }
 
 *::-webkit-scrollbar-track {
-  background: #1e1e1e;
+  background: var(--app-scrollbar-track);
   border-radius: 5px;
 }
 
 *::-webkit-scrollbar-thumb {
-  background: #444;
+  background: var(--app-scrollbar-thumb);
   border-radius: 5px;
-  border: 2px solid #1e1e1e;
+  border: 2px solid var(--app-scrollbar-track);
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: var(--app-scrollbar-thumb-hover);
 }
 
 *::-webkit-scrollbar-corner {
-  background: #1e1e1e;
+  background: var(--app-scrollbar-track);
 }
 
 .app-container {
@@ -33,11 +96,13 @@
   flex-direction: column;
   height: 100vh;
   width: 100vw;
+  background: var(--app-bg);
+  color: var(--app-text);
 }
 
 .titlebar {
   height: 35px;
-  background: #181818;
+  background: var(--app-titlebar-bg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -50,7 +115,7 @@
   left: 0;
   right: 0;
   z-index: 1000;
-  border-bottom: 1px solid #2b2b2b;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .titlebar-windows-main {
@@ -87,7 +152,7 @@
   top: 50%;
   transform: translate(-50%, -50%);
   pointer-events: none;
-  color: #969696;
+  color: var(--app-text-muted);
   font-size: 12px;
   font-weight: 400;
 }
@@ -110,15 +175,15 @@
   border: none;
   border-radius: 0;
   background: transparent;
-  color: #cccccc;
+  color: var(--app-text-secondary);
   font-size: 13px;
   cursor: default;
 }
 
 .titlebar-menu-btn:hover,
 .titlebar-menu-btn.open {
-  background: rgba(255, 255, 255, 0.1);
-  color: #ffffff;
+  background: var(--app-hover);
+  color: var(--app-text);
 }
 
 .titlebar-menu-dropdown {
@@ -127,10 +192,10 @@
   left: 0;
   min-width: 220px;
   padding: 6px;
-  border: 1px solid #2f2f2f;
+  border: 1px solid var(--app-border);
   border-radius: 8px;
-  background: #252526;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  background: var(--app-menu-bg);
+  box-shadow: 0 12px 32px var(--app-shadow);
 }
 
 .titlebar-menu-submenu-group {
@@ -144,7 +209,7 @@
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #d4d4d4;
+  color: var(--app-text);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -158,24 +223,24 @@
 }
 
 .titlebar-menu-item:hover {
-  background: #04395e;
-  color: #ffffff;
+  background: var(--app-menu-hover);
+  color: var(--app-text);
 }
 
 .titlebar-menu-item:disabled {
-  color: #6f6f6f;
+  color: var(--app-text-dim);
   background: transparent;
   cursor: not-allowed;
 }
 
 .titlebar-menu-item:disabled:hover {
-  color: #6f6f6f;
+  color: var(--app-text-dim);
   background: transparent;
 }
 
 .titlebar-menu-item-arrow {
   margin-left: 18px;
-  color: #8e8e8e;
+  color: var(--app-text-muted);
 }
 
 .titlebar-menu-submenu {
@@ -184,20 +249,20 @@
   left: calc(100% - 2px);
   min-width: 180px;
   padding: 6px;
-  border: 1px solid #2f2f2f;
+  border: 1px solid var(--app-border);
   border-radius: 8px;
-  background: #252526;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  background: var(--app-menu-bg);
+  box-shadow: 0 12px 32px var(--app-shadow);
 }
 
 .titlebar-menu-separator {
   height: 1px;
   margin: 6px 4px;
-  background: #343434;
+  background: var(--app-menu-separator);
 }
 
 .titlebar-menu-item-hint {
-  color: #8e8e8e;
+  color: var(--app-text-muted);
   margin-left: 18px;
   font-size: 11px;
 }
@@ -267,7 +332,7 @@
 
 /* ── Blur state: Gray out buttons when window is not focused ───── */
 .app-container.blurred .titlebar-control-btn {
-  background: #4a4a4a !important;
+  background: var(--app-border-strong) !important;
 }
 
 .titlebar-control-btn:hover {
@@ -288,7 +353,7 @@
   width: 46px;
   background: transparent;
   border: none;
-  color: #ffffff;
+  color: var(--app-text);
   font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
   font-size: 10px;
   cursor: default;
@@ -299,7 +364,7 @@
 }
 
 .titlebar-control-win-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--app-hover);
 }
 
 .titlebar-control-win-btn.close:hover {
@@ -309,12 +374,12 @@
 
 .app-container.windows .titlebar {
   justify-content: flex-start;
-  background: #181818;
+  background: var(--app-titlebar-bg);
 }
 
 .tab-bar {
   height: 36px;
-  background: #1e1e1e;
+  background: var(--app-tabbar-bg);
   display: flex;
   align-items: stretch;
   padding: 0;
@@ -343,23 +408,23 @@
   display: flex;
   align-items: stretch;
   padding: 0;
-  border-left: 1px solid #252525;
-  background: #1e1e1e;
+  border-left: 1px solid var(--app-border);
+  background: var(--app-tabbar-bg);
 }
 
 .tab-item {
   height: 100%;
   min-width: 120px;
   max-width: 200px;
-  background: #2d2d2d;
+  background: var(--app-tab-bg);
   border-radius: 0;
-  border-right: 1px solid #252525;
+  border-right: 1px solid var(--app-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 10px;
   cursor: pointer;
-  color: #969696;
+  color: var(--app-text-muted);
   font-size: 13px;
   flex: 0 0 auto;
   transition: background 0.1s, color 0.1s, opacity 0.1s;
@@ -369,21 +434,21 @@
 }
 
 .tab-item:hover {
-  background: #2b2b2b;
-  color: #cccccc;
+  background: var(--app-tab-bg-hover);
+  color: var(--app-text-secondary);
 }
 
 .tab-item.active {
-  background: #1e1e1e;
-  color: #ffffff;
-  border-top-color: #007acc;
+  background: var(--app-tab-bg-active);
+  color: var(--app-text);
+  border-top-color: var(--app-border-accent);
 }
 
 .tab-item.dragging {
-  background: #404040;
-  color: #ffffff;
-  border-top-color: #007acc;
-  outline: 1px solid rgba(0, 122, 204, 0.45);
+  background: var(--app-surface-4);
+  color: var(--app-text);
+  border-top-color: var(--app-border-accent);
+  outline: 1px solid var(--app-accent-soft-strong);
   outline-offset: -1px;
   cursor: grabbing;
   opacity: 1;
@@ -418,10 +483,10 @@
 .tab-title-input {
   flex: 1 1 auto;
   min-width: 0;
-  background: #111111;
-  border: 1px solid #007acc;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border-accent);
   border-radius: 4px;
-  color: #ffffff;
+  color: var(--app-text);
   font: inherit;
   margin: 0;
   outline: none;
@@ -433,10 +498,10 @@
   z-index: 40;
   min-width: 148px;
   padding: 6px;
-  border: 1px solid #3a3a3a;
+  border: 1px solid var(--app-border);
   border-radius: 8px;
-  background: #252526;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  background: var(--app-menu-bg);
+  box-shadow: 0 12px 28px var(--app-shadow);
 }
 
 .tab-context-item {
@@ -444,7 +509,7 @@
   background: transparent;
   border: none;
   border-radius: 6px;
-  color: #f0f0f0;
+  color: var(--app-text);
   cursor: pointer;
   font: inherit;
   margin: 0;
@@ -453,18 +518,18 @@
 }
 
 .tab-context-item:hover {
-  background: #094771;
-  color: #ffffff;
+  background: var(--app-menu-hover);
+  color: var(--app-text);
 }
 
 .tab-context-item:disabled {
-  color: #737373;
+  color: var(--app-text-dim);
   cursor: default;
 }
 
 .tab-context-item:disabled:hover {
   background: transparent;
-  color: #737373;
+  color: var(--app-text-dim);
 }
 
 .tab-close-btn {
@@ -486,8 +551,8 @@
 }
 
 .tab-close-btn:hover {
-  background: #555;
-  color: #fff;
+  background: var(--app-hover);
+  color: var(--app-text);
 }
 
 .tab-new-btn {
@@ -495,7 +560,7 @@
   width: 30px;
   background: transparent;
   border: none;
-  color: #aaa;
+  color: var(--app-text-muted);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
@@ -509,8 +574,8 @@
 }
 
 .tab-new-btn:hover {
-  background: #2b2b2b;
-  color: #fff;
+  background: var(--app-tab-bg-hover);
+  color: var(--app-text);
 }
 
 .tab-new-btn:disabled {
@@ -520,7 +585,7 @@
 
 .tab-new-btn:disabled:hover {
   background: transparent;
-  color: #aaa;
+  color: var(--app-text-muted);
 }
 
 /* grabbing cursor across the entire window while dragging a tab */
@@ -544,8 +609,8 @@
 }
 
 .tab-files-btn.active {
-  background: #243746;
-  color: #9ad7ff;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
 }
 
 /* ── Workspace (Sidebar + Terminal area horizontal layout) ─────────────── */
@@ -567,7 +632,7 @@
 
 .terminal-container {
   flex: 1;
-  background: #000000;
+  background: var(--app-terminal-panel);
   padding: 5px;
   overflow: hidden;
   position: relative;
@@ -575,9 +640,7 @@
 }
 
 .split-terminal-container {
-  background:
-    radial-gradient(circle at top left, rgba(0, 122, 204, 0.12), transparent 24%),
-    linear-gradient(180deg, #06080a 0%, #030405 100%);
+  background: var(--app-terminal-glow), var(--app-terminal-gradient);
 }
 
 .terminal-empty-state {
@@ -585,7 +648,7 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #666;
+  color: var(--app-text-dim);
 }
 
 .pane-frame-layer,
@@ -613,21 +676,21 @@
   position: absolute;
   display: flex;
   flex-direction: column;
-  border: 1px solid #1c252d;
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   overflow: hidden;
-  background: rgba(4, 9, 14, 0.5);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  background: var(--app-overlay-soft);
+  box-shadow: inset 0 0 0 1px var(--app-hover-soft);
   transition: left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out;
 }
 
 .terminal-pane-frame.focused {
-  border-color: #007acc;
-  box-shadow: 0 0 0 1px rgba(0, 122, 204, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  border-color: var(--app-border-accent);
+  box-shadow: 0 0 0 1px var(--app-accent-soft-strong), inset 0 0 0 1px var(--app-hover-soft);
 }
 
 .terminal-pane-frame.empty {
-  background: rgba(12, 15, 20, 0.92);
+  background: var(--app-terminal-panel-alt);
 }
 
 .terminal-pane-header {
@@ -637,8 +700,8 @@
   justify-content: space-between;
   gap: 10px;
   padding: 0 8px 0 10px;
-  border-bottom: 1px solid #182028;
-  background: linear-gradient(180deg, rgba(20, 28, 36, 0.96), rgba(11, 16, 21, 0.96));
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-terminal-gradient);
   pointer-events: auto;
   cursor: grab;
   user-select: none;
@@ -659,7 +722,7 @@
 
 .terminal-pane-title {
   min-width: 0;
-  color: #f0f3f6;
+  color: var(--app-text);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -670,8 +733,8 @@
   flex-shrink: 0;
   padding: 2px 6px;
   border-radius: 999px;
-  background: rgba(0, 122, 204, 0.14);
-  color: #89cbff;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -689,15 +752,15 @@
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: #a3adb7;
+  color: var(--app-text-muted);
   cursor: pointer;
   font-size: 11px;
   line-height: 1;
 }
 
 .terminal-pane-actions button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1);
-  color: #ffffff;
+  background: var(--app-hover);
+  color: var(--app-text);
 }
 
 .terminal-pane-actions button:disabled {
@@ -712,7 +775,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: #7d8793;
+  color: var(--app-text-muted);
   pointer-events: auto;
   text-align: center;
   padding: 20px;
@@ -722,14 +785,14 @@
 }
 
 .terminal-pane-empty.drag-target {
-  border-color: rgba(124, 202, 255, 0.9);
-  background: rgba(10, 40, 66, 0.32);
-  color: #d7ecff;
-  box-shadow: inset 0 0 0 1px rgba(124, 202, 255, 0.18), 0 0 0 1px rgba(124, 202, 255, 0.18);
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+  box-shadow: inset 0 0 0 1px var(--app-accent-soft-strong), 0 0 0 1px var(--app-accent-soft-strong);
 }
 
 .terminal-pane-empty-title {
-  color: #dbe4ec;
+  color: var(--app-text);
   font-size: 14px;
 }
 
@@ -749,8 +812,8 @@
 .terminal-pane-drop-preview {
   position: absolute;
   inset: 0;
-  background: rgba(0, 122, 204, 0.25);
-  border: 2px solid #007acc;
+  background: var(--app-accent-soft-strong);
+  border: 2px solid var(--app-border-accent);
   z-index: 100;
   pointer-events: none;
   transition: all 0.15s ease;
@@ -774,7 +837,7 @@
 
 .terminal-pane-drop-preview.center {
   inset: 4px;
-  background: rgba(0, 122, 204, 0.15);
+  background: var(--app-accent-soft);
 }
 
 .terminal-instance-shell.visible {
@@ -810,8 +873,8 @@
 
 .pane-split-handle-grip {
   border-radius: 999px;
-  background: rgba(126, 190, 232, 0.26);
-  box-shadow: 0 0 0 1px rgba(5, 11, 16, 0.55);
+  background: var(--app-accent-soft-strong);
+  box-shadow: 0 0 0 1px var(--app-overlay);
   transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
 }
 
@@ -827,8 +890,8 @@
 
 .pane-split-handle:hover .pane-split-handle-grip,
 .pane-split-handle:active .pane-split-handle-grip {
-  background: rgba(124, 202, 255, 0.92);
-  box-shadow: 0 0 0 1px rgba(124, 202, 255, 0.22), 0 0 18px rgba(124, 202, 255, 0.28);
+  background: var(--app-accent);
+  box-shadow: 0 0 0 1px var(--app-accent-soft-strong), 0 0 18px var(--app-accent-soft-strong);
 }
 
 .pane-split-handle.vertical:hover .pane-split-handle-grip {
@@ -844,7 +907,7 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: #1a1a1a;
+  background: var(--app-panel-bg);
 }
 
 /* Resize handle */
@@ -864,7 +927,7 @@
 
 .terminal-input-resize-handle:hover,
 .terminal-input-resize-handle:active {
-  background: rgba(0, 120, 212, 0.4);
+  background: var(--app-accent-soft-strong);
   height: 6px;
 }
 
@@ -879,7 +942,7 @@
 
 .terminal-input-resize-handle:hover .terminal-input-resize-grip,
 .terminal-input-resize-handle:active .terminal-input-resize-grip {
-  background: #0078d4;
+  background: var(--app-accent);
 }
 
 /* Collapsed state: kept invisible, only shows on hover */
@@ -892,13 +955,13 @@
 }
 
 .terminal-input-resize-handle.collapsed:hover {
-  background: rgba(0, 120, 212, 0.4);
+  background: var(--app-accent-soft-strong);
   height: 8px;
 }
 
 .terminal-input-collapsed-hint {
   font-size: 10px;
-  color: #444;
+  color: var(--app-text-dim);
   text-transform: uppercase;
   letter-spacing: 1px;
   pointer-events: none;
@@ -907,7 +970,7 @@
 }
 
 .terminal-input-resize-handle.collapsed:hover .terminal-input-collapsed-hint {
-  color: #6ab0e0;
+  color: var(--app-accent);
 }
 
 /* Quick buttons row */
@@ -917,9 +980,9 @@
   overflow-x: auto;
   gap: 4px;
   padding: 5px 8px 4px;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--app-border);
   scrollbar-width: thin;
-  scrollbar-color: #444 transparent;
+  scrollbar-color: var(--app-scrollbar-thumb) transparent;
   align-items: center;
   min-height: 32px;
 }
@@ -928,13 +991,13 @@
   height: 4px;
 }
 .quick-buttons-bar::-webkit-scrollbar-thumb {
-  background: #444;
+  background: var(--app-scrollbar-thumb);
   border-radius: 2px;
 }
 
 .quick-buttons-hint {
   font-size: 11px;
-  color: #555;
+  color: var(--app-text-dim);
   margin-right: 8px;
   font-style: italic;
 }
@@ -943,9 +1006,9 @@
   flex-shrink: 0;
   padding: 2px 10px;
   height: 22px;
-  background: #2d2d2d;
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--app-surface-2);
+  border: 1px solid var(--app-border);
+  color: var(--app-text-secondary);
   border-radius: 4px;
   font-size: 12px;
   cursor: pointer;
@@ -955,22 +1018,22 @@
 }
 
 .quick-btn:hover {
-  background: #3a3a3a;
-  color: #fff;
-  border-color: #555;
+  background: var(--app-surface-3);
+  color: var(--app-text);
+  border-color: var(--app-border-strong);
 }
 
 .quick-btn--edit {
   background: transparent;
-  border-color: #3a3a3a;
-  color: #666;
+  border-color: var(--app-border);
+  color: var(--app-text-dim);
   margin-left: auto;
 }
 
 .quick-btn--edit:hover {
-  color: #aaa;
-  background: #252525;
-  border-color: #555;
+  color: var(--app-text-secondary);
+  background: var(--app-surface-1);
+  border-color: var(--app-border-strong);
 }
 
 /* Textarea + send row */
@@ -984,47 +1047,47 @@
   flex: 1;
   resize: none;
   min-height: 0;
-  background: #111;
-  color: #e0e0e0;
+  background: var(--app-input-bg);
+  color: var(--app-text);
   border: none;
-  border-right: 1px solid #2a2a2a;
+  border-right: 1px solid var(--app-border);
   padding: 6px 8px;
   font-family: Consolas, "Courier New", monospace;
   font-size: 13px;
   line-height: 1.5;
   outline: none;
-  caret-color: #fff;
+  caret-color: var(--app-text);
 }
 
 .terminal-input-textarea::placeholder {
-  color: #444;
+  color: var(--app-text-dim);
 }
 
 .terminal-input-textarea:focus {
-  background: #141414;
+  background: var(--app-input-bg-focus);
 }
 
 .terminal-input-send-btn {
   width: 38px;
   flex-shrink: 0;
-  background: #1d3a52;
+  background: var(--app-accent-soft);
   border: none;
-  color: #6ab0e0;
+  color: var(--app-accent);
   font-size: 16px;
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .terminal-input-send-btn:hover {
-  background: #0078d4;
-  color: #fff;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 /* Quick-button editor dialog */
 .quick-btn-editor-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--app-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1033,8 +1096,8 @@
 }
 
 .quick-btn-editor {
-  background: #252525;
-  border: 1px solid #3a3a3a;
+  background: var(--app-panel-bg);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   width: 720px;
   max-width: 92vw;
@@ -1042,8 +1105,8 @@
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
-  color: #e0e0e0;
+  box-shadow: 0 12px 40px var(--app-shadow-strong);
+  color: var(--app-text);
 }
 
 .quick-btn-editor-header {
@@ -1051,7 +1114,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--app-border);
   font-size: 14px;
   font-weight: 600;
 }
@@ -1059,7 +1122,7 @@
 .quick-btn-editor-close {
   background: none;
   border: none;
-  color: #888;
+  color: var(--app-text-muted);
   font-size: 18px;
   cursor: pointer;
   line-height: 1;
@@ -1068,8 +1131,8 @@
 }
 
 .quick-btn-editor-close:hover {
-  color: #fff;
-  background: #3a3a3a;
+  color: var(--app-text);
+  background: var(--app-hover);
 }
 
 .quick-btn-editor-body {
@@ -1081,11 +1144,11 @@
 
 .quick-btn-editor-sidebar {
   width: 240px;
-  border-right: 1px solid #333;
+  border-right: 1px solid var(--app-border);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  background: #2a2a2a;
+  background: var(--app-panel-bg-strong);
 }
 
 .quick-btn-editor-sidebar-item {
@@ -1094,17 +1157,17 @@
   justify-content: space-between;
   padding: 10px 12px;
   cursor: pointer;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--app-border);
   transition: background 0.2s;
 }
 
 .quick-btn-editor-sidebar-item:hover {
-  background: #333;
+  background: var(--app-hover);
 }
 
 .quick-btn-editor-sidebar-item.active {
-  background: #0078d4;
-  color: #fff;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 .quick-btn-editor-sidebar-label {
@@ -1129,8 +1192,8 @@
 }
 
 .quick-btn-editor-sidebar-actions button {
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--app-hover);
+  border: 1px solid var(--app-hover-soft);
   color: inherit;
   font-size: 10px;
   padding: 2px 4px;
@@ -1140,7 +1203,7 @@
 }
 
 .quick-btn-editor-sidebar-actions button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--app-hover);
 }
 
 .quick-btn-editor-sidebar-actions button:disabled {
@@ -1149,7 +1212,7 @@
 }
 
 .quick-btn-editor-sidebar-delete {
-  color: #ff8888 !important;
+  color: var(--app-danger) !important;
 }
 
 .quick-btn-editor-sidebar-item.active .quick-btn-editor-sidebar-delete {
@@ -1183,7 +1246,7 @@
 
 .quick-btn-editor-field label {
   font-size: 12px;
-  color: #aaa;
+  color: var(--app-text-muted);
   font-weight: 600;
   text-transform: uppercase;
 }
@@ -1193,22 +1256,22 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #666;
+  color: var(--app-text-dim);
   font-size: 14px;
   text-align: center;
 }
 
 .quick-btn-editor-empty {
-  color: #666;
+  color: var(--app-text-dim);
   font-size: 13px;
   text-align: center;
   padding: 20px 0;
 }
 
 .quick-btn-editor-input {
-  background: #1e1e1e;
-  border: 1px solid #424242;
-  color: #e0e0e0;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 13px;
@@ -1216,7 +1279,7 @@
 }
 
 .quick-btn-editor-input:focus {
-  border-color: #0078d4;
+  border-color: var(--app-border-accent);
 }
 
 .quick-btn-editor-input--label {
@@ -1236,13 +1299,13 @@
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--app-border);
 }
 
 .quick-btn-editor-add {
-  background: #1e3a1e;
-  border: 1px solid #2a5a2a;
-  color: #7dc97d;
+  background: var(--app-success-soft);
+  border: 1px solid var(--app-success);
+  color: var(--app-success);
   padding: 4px 12px;
   border-radius: 4px;
   cursor: pointer;
@@ -1250,14 +1313,14 @@
 }
 
 .quick-btn-editor-add:hover {
-  background: #2a5a2a;
-  color: #9fe29f;
+  background: var(--app-success);
+  color: var(--app-accent-contrast);
 }
 
 .quick-btn-editor-cancel {
-  background: #333;
+  background: var(--app-surface-3);
   border: none;
-  color: #ccc;
+  color: var(--app-text-secondary);
   padding: 5px 14px;
   border-radius: 4px;
   cursor: pointer;
@@ -1265,13 +1328,13 @@
 }
 
 .quick-btn-editor-cancel:hover {
-  background: #444;
+  background: var(--app-surface-4);
 }
 
 .quick-btn-editor-save {
-  background: #0078d4;
+  background: var(--app-accent);
   border: none;
-  color: #fff;
+  color: var(--app-accent-contrast);
   padding: 5px 14px;
   border-radius: 4px;
   cursor: pointer;
@@ -1279,7 +1342,7 @@
 }
 
 .quick-btn-editor-save:hover {
-  background: #106ebe;
+  background: var(--app-accent-hover);
 }
 
 
@@ -1288,14 +1351,14 @@
 
 /* Bookmark Sidebar Button Active State */
 .bookmark-toggle-btn.active {
-  background: #333;
-  color: #7ac3ff;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
 }
 
 .bookmark-editor-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.56);
+  background: var(--app-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1309,10 +1372,10 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: #232323;
-  border: 1px solid #444;
+  background: var(--app-dialog-bg);
+  border: 1px solid var(--app-border);
   border-radius: 10px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 20px 60px var(--app-shadow);
 }
 
 .bookmark-editor-header,
@@ -1321,32 +1384,32 @@
   align-items: center;
   justify-content: space-between;
   padding: 14px 16px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .bookmark-editor-footer {
   border-bottom: none;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--app-border);
   justify-content: flex-end;
   gap: 10px;
 }
 
 .bookmark-editor-title {
   font-size: 16px;
-  color: #f3f3f3;
+  color: var(--app-text);
   font-weight: 600;
 }
 
 .bookmark-editor-subtitle {
   margin-top: 4px;
   font-size: 12px;
-  color: #8a93a0;
+  color: var(--app-text-muted);
 }
 
 .bookmark-editor-close {
   background: transparent;
   border: none;
-  color: #aaa;
+  color: var(--app-text-muted);
   font-size: 22px;
   cursor: pointer;
 }
@@ -1370,8 +1433,8 @@
   margin-top: 12px;
   padding: 10px 12px;
   border-radius: 6px;
-  background: rgba(220, 38, 38, 0.16);
-  color: #ffb4b4;
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
   font-size: 12px;
 }
 
@@ -1383,17 +1446,17 @@
 }
 
 .bookmark-editor-btn.secondary {
-  background: #353535;
-  color: #ddd;
+  background: var(--app-surface-3);
+  color: var(--app-text-secondary);
 }
 
 .bookmark-editor-btn.primary {
-  background: #0078d4;
-  color: #fff;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 .bookmark-editor-btn.primary:hover {
-  background: #106ebe;
+  background: var(--app-accent-hover);
 }
 
 .terminal-statusbar {
@@ -1403,9 +1466,9 @@
   justify-content: space-between;
   gap: 12px;
   padding: 6px 10px;
-  border-top: 1px solid #1d1d1d;
-  background: #111214;
-  color: #9ba3ad;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-panel-bg-subtle);
+  color: var(--app-text-muted);
   font-size: 11px;
 }
 
@@ -1421,21 +1484,21 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #666;
-  box-shadow: 0 0 8px rgba(255, 255, 255, 0.12);
+  background: var(--app-text-dim);
+  box-shadow: 0 0 8px var(--app-hover);
 }
 
 .terminal-status-indicator.connecting {
-  background: #f5c542;
+  background: var(--app-warning);
 }
 
 .terminal-status-indicator.connected {
-  background: #3fb950;
+  background: var(--app-success);
 }
 
 .terminal-status-indicator.error,
 .terminal-status-indicator.closed {
-  background: #f87171;
+  background: var(--app-danger);
 }
 
 .terminal-status-pill {
@@ -1443,15 +1506,15 @@
   align-items: center;
   padding: 2px 6px;
   border-radius: 999px;
-  background: #1d2731;
-  color: #84c6ff;
+  background: var(--app-status-pill-bg);
+  color: var(--app-status-pill-fg);
 }
 
 /* ── Settings dialog ──────────────────────────────────── */
 .settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--app-overlay);
   z-index: 2000;
   display: flex;
   align-items: center;
@@ -1459,15 +1522,15 @@
 }
 
 .settings-dialog {
-  background: #2d2d2d;
+  background: var(--app-dialog-bg);
   border-radius: 8px;
-  width: 480px;
+  width: min(720px, 92vw);
   max-height: 80vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  color: #fff;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  color: var(--app-dialog-fg);
+  box-shadow: 0 8px 32px var(--app-shadow-strong);
 }
 
 .settings-header {
@@ -1475,7 +1538,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .settings-header h2 {
@@ -1487,7 +1550,7 @@
 .settings-close-btn {
   background: none;
   border: none;
-  color: #aaa;
+  color: var(--app-text-muted);
   font-size: 20px;
   cursor: pointer;
   line-height: 1;
@@ -1495,12 +1558,12 @@
 }
 
 .settings-close-btn:hover {
-  color: #fff;
+  color: var(--app-text);
 }
 
 .settings-tabs {
   display: flex;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--app-border);
   padding: 0 20px;
   gap: 4px;
 }
@@ -1508,7 +1571,7 @@
 .settings-tab {
   background: none;
   border: none;
-  color: #888;
+  color: var(--app-text-muted);
   padding: 10px 16px;
   font-size: 13px;
   cursor: pointer;
@@ -1518,12 +1581,12 @@
 }
 
 .settings-tab:hover {
-  color: #ccc;
+  color: var(--app-text-secondary);
 }
 
 .settings-tab--active {
-  color: #fff;
-  border-bottom-color: #0078d4;
+  color: var(--app-text);
+  border-bottom-color: var(--app-border-accent);
 }
 
 .settings-body {
@@ -1547,14 +1610,23 @@
 }
 
 .settings-field span {
-  color: #ccc;
+  color: var(--app-text-secondary);
   min-width: 130px;
+}
+
+.settings-field--stacked {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.settings-field--stacked > span {
+  padding-top: 6px;
 }
 
 .settings-field-full-hint {
   margin-top: -12px;
   margin-bottom: 8px;
-  color: #888;
+  color: var(--app-text-muted);
   font-size: 11px;
   line-height: 1.35;
 }
@@ -1565,9 +1637,9 @@
 
 .settings-field input[type="number"],
 .settings-field select {
-  background: #1e1e1e;
-  border: 1px solid #555;
-  color: #fff;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
   border-radius: 4px;
   padding: 4px 8px;
   width: 220px;
@@ -1579,14 +1651,14 @@
 .settings-field input[type="text"]:focus,
 .settings-field input[type="number"]:focus,
 .settings-field select:focus {
-  border-color: #0078d4;
+  border-color: var(--app-border-accent);
 }
 
 .settings-field select {
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ccc' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238d97a1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 8px center;
   padding-right: 28px;
@@ -1609,11 +1681,130 @@
   border-radius: 4px;
   cursor: pointer;
   padding: 2px;
-  background: #1e1e1e;
+  background: var(--app-input-bg);
 }
 
 .settings-color-row input[type="text"] {
   width: 174px;
+}
+
+.settings-theme-preset-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
+.settings-theme-preset-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-btn-secondary {
+  background: var(--app-surface-3);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.settings-btn-secondary:hover {
+  background: var(--app-surface-4);
+}
+
+.settings-theme-preview {
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.settings-theme-preview-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 12px;
+}
+
+.settings-theme-preview-title-row strong {
+  color: inherit;
+}
+
+.settings-theme-preview-title-row span {
+  color: inherit;
+  opacity: 0.72;
+}
+
+.settings-theme-preview-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-theme-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-theme-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--app-hover);
+  box-shadow: inset 0 0 0 1px var(--app-overlay-soft);
+}
+
+.settings-theme-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-theme-subtitle {
+  color: var(--app-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.settings-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px 14px;
+}
+
+.settings-theme-grid-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-theme-grid-item > span {
+  min-width: 96px;
+  color: var(--app-text-secondary);
+}
+
+.settings-theme-grid-item .settings-color-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-theme-grid-item .settings-color-row input[type="text"] {
+  width: 100%;
+  min-width: 0;
 }
 
 /* ── Toggle switch ── */
@@ -1631,12 +1822,12 @@
 }
 
 .settings-field--toggle span strong {
-  color: #e0e0e0;
+  color: var(--app-text);
   font-size: 13px;
 }
 
 .settings-field--toggle span small {
-  color: #888;
+  color: var(--app-text-muted);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -1649,7 +1840,7 @@
   height: 20px;
   min-width: 36px;
   border-radius: 10px;
-  background: #555;
+  background: var(--app-border-strong);
   cursor: pointer;
   transition: background 0.2s;
   outline: none;
@@ -1669,7 +1860,7 @@
 }
 
 .settings-toggle:checked {
-  background: #0078d4;
+  background: var(--app-accent);
 }
 
 .settings-toggle:checked::after {
@@ -1681,13 +1872,13 @@
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 20px;
-  border-top: 1px solid #444;
+  border-top: 1px solid var(--app-border);
 }
 
 .settings-btn-cancel {
-  background: #444;
+  background: var(--app-surface-3);
   border: none;
-  color: #fff;
+  color: var(--app-text);
   padding: 6px 16px;
   border-radius: 4px;
   cursor: pointer;
@@ -1695,13 +1886,13 @@
 }
 
 .settings-btn-cancel:hover {
-  background: #555;
+  background: var(--app-surface-4);
 }
 
 .settings-btn-save {
-  background: #0078d4;
+  background: var(--app-accent);
   border: none;
-  color: #fff;
+  color: var(--app-accent-contrast);
   padding: 6px 16px;
   border-radius: 4px;
   cursor: pointer;
@@ -1709,7 +1900,36 @@
 }
 
 .settings-btn-save:hover {
-  background: #106ebe;
+  background: var(--app-accent-hover);
+}
+
+@media (max-width: 760px) {
+  .settings-field,
+  .settings-theme-grid-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings-field span,
+  .settings-theme-grid-item > span {
+    min-width: 0;
+  }
+
+  .settings-field input[type="text"],
+  .settings-field input[type="number"],
+  .settings-field select,
+  .settings-theme-grid {
+    width: 100%;
+  }
+
+  .settings-color-row input[type="text"] {
+    width: 100%;
+  }
+
+  .settings-theme-preset-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 
@@ -1717,7 +1937,7 @@
 .password-retry-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.72);
+  background: var(--app-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1726,13 +1946,13 @@
 }
 
 .password-retry-dialog {
-  background: #2d2d2d;
-  border: 1px solid #444;
+  background: var(--app-dialog-bg);
+  border: 1px solid var(--app-border);
   border-radius: 10px;
   padding: 28px 32px;
   width: 340px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
-  color: #fff;
+  box-shadow: 0 8px 32px var(--app-shadow-strong);
+  color: var(--app-text);
   text-align: center;
   display: flex;
   flex-direction: column;
@@ -1750,18 +1970,18 @@
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: #fff;
+  color: var(--app-text);
 }
 
 .password-retry-desc {
   margin: 0;
   font-size: 13px;
-  color: #aaa;
+  color: var(--app-text-muted);
   line-height: 1.5;
 }
 
 .password-retry-desc strong {
-  color: #ccc;
+  color: var(--app-text-secondary);
 }
 
 .password-retry-form {
@@ -1774,10 +1994,10 @@
 
 .password-retry-input {
   width: 100%;
-  background: #1e1e1e;
-  border: 1px solid #555;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
   border-radius: 6px;
-  color: #fff;
+  color: var(--app-text);
   padding: 8px 12px;
   font-size: 14px;
   outline: none;
@@ -1785,8 +2005,8 @@
 }
 
 .password-retry-input:focus {
-  border-color: #0078d4;
-  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.25);
+  border-color: var(--app-border-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-soft-strong);
 }
 
 .reconnect-option-prefix {
@@ -1814,22 +2034,22 @@
 }
 
 .password-retry-btn.cancel {
-  background: #444;
-  color: #ccc;
+  background: var(--app-surface-3);
+  color: var(--app-text-secondary);
 }
 
 .password-retry-btn.cancel:hover {
-  background: #555;
-  color: #fff;
+  background: var(--app-surface-4);
+  color: var(--app-text);
 }
 
 .password-retry-btn.retry {
-  background: #0078d4;
-  color: #fff;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 .password-retry-btn.retry:hover {
-  background: #106ebe;
+  background: var(--app-accent-hover);
 }
 
 /* ─── Toast notification ──────────────────────────────────────────────────── */
@@ -1838,15 +2058,15 @@
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(30, 30, 30, 0.92);
-  color: #e8e8e8;
+  background: var(--app-panel-bg-strong);
+  color: var(--app-text);
   padding: 10px 20px;
   border-radius: 6px;
   font-size: 13px;
   max-width: 480px;
   white-space: pre-wrap;
   word-break: break-all;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 16px var(--app-shadow);
   z-index: 9999;
   animation: toastFadeIn 0.2s ease-out;
   pointer-events: none;
@@ -1861,7 +2081,7 @@
 .newtab-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--app-overlay-soft);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1873,7 +2093,7 @@
   background: var(--bg-dialog, #1e1e1e);
   color: var(--fg-dialog, #e0e0e0);
   border-radius: 10px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px var(--app-shadow);
   padding: 24px 20px 20px;
   width: 320px;
   animation: slieInUp 0.2s ease-out;

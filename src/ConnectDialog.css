@@ -4,7 +4,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--app-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -12,13 +12,13 @@
 }
 
 .dialog-content {
-  background: #2d2d2d;
-  border: 1px solid #444;
+  background: var(--app-dialog-bg);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   padding: 20px;
   width: 400px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-  color: #eee;
+  box-shadow: 0 4px 20px var(--app-shadow);
+  color: var(--app-text);
 }
 
 .dialog-content--wide {
@@ -46,8 +46,8 @@
   justify-content: center;
   gap: 8px;
   padding: 8px 10px;
-  background: #1f1f1f;
-  border: 1px solid #444;
+  background: var(--app-surface-0);
+  border: 1px solid var(--app-border);
   border-radius: 6px;
   cursor: pointer;
   user-select: none;
@@ -55,9 +55,9 @@
 }
 
 .protocol-selector label.active {
-  border-color: #0078d4;
-  background: rgba(0, 120, 212, 0.14);
-  color: #fff;
+  border-color: var(--app-border-accent);
+  background: var(--app-accent-soft);
+  color: var(--app-text);
 }
 
 .protocol-selector input {
@@ -72,7 +72,7 @@
   display: block;
   margin-bottom: 5px;
   font-size: 13px;
-  color: #ccc;
+  color: var(--app-text-secondary);
 }
 
 .form-group input[type="text"],
@@ -82,10 +82,10 @@
 .form-group textarea {
   width: 100%;
   padding: 8px;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
   border-radius: 4px;
-  color: #fff;
+  color: var(--app-text);
   font-size: 14px;
   box-sizing: border-box;
 }
@@ -94,7 +94,7 @@
 .form-group select:focus,
 .form-group textarea:focus {
   outline: none;
-  border-color: #0078d4;
+  border-color: var(--app-border-accent);
 }
 
 .form-group textarea {
@@ -116,17 +116,17 @@
 .serial-port-select {
   flex: 1;
   padding: 8px;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
   border-radius: 4px;
-  color: #fff;
+  color: var(--app-text);
   font-size: 14px;
   cursor: pointer;
 }
 
 .serial-port-select:focus {
   outline: none;
-  border-color: #0078d4;
+  border-color: var(--app-border-accent);
 }
 
 .private-key-file-input {
@@ -144,10 +144,10 @@
 
 .private-key-picker-btn,
 .private-key-clear-btn {
-  border: 1px solid #444;
+  border: 1px solid var(--app-border);
   border-radius: 4px;
-  background: #1a1a1a;
-  color: #ddd;
+  background: var(--app-input-bg);
+  color: var(--app-text-secondary);
   cursor: pointer;
   padding: 0 12px;
   flex-shrink: 0;
@@ -155,21 +155,21 @@
 
 .private-key-picker-btn:hover,
 .private-key-clear-btn:hover {
-  background: #333;
+  background: var(--app-hover);
 }
 
 .serial-refresh-btn {
   width: 40px;
   flex-shrink: 0;
-  border: 1px solid #444;
+  border: 1px solid var(--app-border);
   border-radius: 4px;
-  background: #1a1a1a;
-  color: #ddd;
+  background: var(--app-input-bg);
+  color: var(--app-text-secondary);
   cursor: pointer;
 }
 
 .serial-refresh-btn:hover:not(:disabled) {
-  background: #333;
+  background: var(--app-hover);
 }
 
 .serial-refresh-btn:disabled {
@@ -194,12 +194,12 @@
 .form-hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #9aa0a6;
+  color: var(--app-text-muted);
   line-height: 1.4;
 }
 
 .form-hint.error {
-  color: #ff8f8f;
+  color: var(--app-danger);
 }
 
 .dialog-actions {
@@ -219,32 +219,32 @@
 
 .btn-cancel {
   background: transparent;
-  color: #ccc;
-  border: 1px solid #444 !important;
+  color: var(--app-text-secondary);
+  border: 1px solid var(--app-border) !important;
 }
 
 .btn-cancel:hover {
-  background: #444;
+  background: var(--app-hover);
 }
 
 .btn-connect {
-  background: #0078d4;
-  color: white;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 .btn-connect:hover {
-  background: #106ebe;
+  background: var(--app-accent-hover);
 }
 
 .btn-connect:disabled {
-  background: #555;
-  color: #888;
+  background: var(--app-surface-3);
+  color: var(--app-text-dim);
   cursor: not-allowed;
 }
 
 /* ── Save connection options ─────────────────────────────────────── */
 .save-connection-group {
-  border-top: 1px solid #3a3a3a;
+  border-top: 1px solid var(--app-border);
   padding-top: 12px;
   margin-top: 4px;
 }
@@ -261,30 +261,30 @@
 .save-connection-label input[type="checkbox"] {
   width: 14px;
   height: 14px;
-  accent-color: #0078d4;
+  accent-color: var(--app-accent);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .save-connection-label span {
   font-size: 13px;
-  color: #bbb;
+  color: var(--app-text-secondary);
 }
 
 .save-connection-name {
   width: 100%;
   padding: 6px 8px;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
   border-radius: 4px;
-  color: #fff;
+  color: var(--app-text);
   font-size: 13px;
   box-sizing: border-box;
   outline: none;
 }
 
 .save-connection-name:focus {
-  border-color: #0078d4;
+  border-color: var(--app-border-accent);
 }
 
 @media (max-width: 560px) {

@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { normalizeAppSettings, type AppSettings } from "./settings";
+import {
+  cloneTerminalTheme,
+  getMatchingTerminalThemePreset,
+  getTerminalThemePreset,
+  normalizeAppSettings,
+  TERMINAL_THEME_PRESETS,
+  type AppSettings,
+  type TerminalTheme,
+} from "./settings";
 
 const props = defineProps<{
   initial: AppSettings;
@@ -16,6 +24,7 @@ const settings = ref<AppSettings>(normalizeAppSettings(props.initial));
 const activeTab = ref<"terminal" | "keyboard" | "theme">("terminal");
 
 type ShellPresetValue = "auto" | "git-bash" | "powershell" | "cmd" | "custom";
+type ThemeColorKey = keyof TerminalTheme;
 
 // Shell preset options
 const shellPresets: Array<{ value: ShellPresetValue; label: string }> = [
@@ -24,6 +33,34 @@ const shellPresets: Array<{ value: ShellPresetValue; label: string }> = [
   { value: "powershell", label: "PowerShell" },
   { value: "cmd", label: "Command Prompt (cmd.exe)" },
   { value: "custom", label: "Custom Path" },
+];
+
+const themePresets = TERMINAL_THEME_PRESETS;
+const basicThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
+  { key: "background", label: "Background" },
+  { key: "foreground", label: "Foreground" },
+  { key: "cursor", label: "Cursor" },
+  { key: "selectionBackground", label: "Selection" },
+];
+const ansiThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
+  { key: "black", label: "Black" },
+  { key: "red", label: "Red" },
+  { key: "green", label: "Green" },
+  { key: "yellow", label: "Yellow" },
+  { key: "blue", label: "Blue" },
+  { key: "magenta", label: "Magenta" },
+  { key: "cyan", label: "Cyan" },
+  { key: "white", label: "White" },
+];
+const brightAnsiThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
+  { key: "brightBlack", label: "Bright Black" },
+  { key: "brightRed", label: "Bright Red" },
+  { key: "brightGreen", label: "Bright Green" },
+  { key: "brightYellow", label: "Bright Yellow" },
+  { key: "brightBlue", label: "Bright Blue" },
+  { key: "brightMagenta", label: "Bright Magenta" },
+  { key: "brightCyan", label: "Bright Cyan" },
+  { key: "brightWhite", label: "Bright White" },
 ];
 
 // Determine which preset is selected based on shellPath
@@ -64,6 +101,11 @@ const selectedShellPreset = computed<ShellPresetValue>({
 });
 
 const showCustomPath = computed(() => selectedShellPreset.value === "custom");
+const selectedThemePresetId = computed(() => getMatchingTerminalThemePreset(settings.value.theme)?.id ?? "custom");
+const selectedThemePresetDescription = computed(() => {
+  const matchedPreset = getMatchingTerminalThemePreset(settings.value.theme);
+  return matchedPreset?.description ?? "Custom palette based on the colors below.";
+});
 
 function update<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
   settings.value = { ...settings.value, [key]: value };
@@ -85,6 +127,33 @@ function inputValue(event: Event) {
 
 function inputChecked(event: Event) {
   return (event.target as HTMLInputElement).checked;
+}
+
+function handleShellPresetChange(event: Event) {
+  selectedShellPreset.value = inputValue(event) as ShellPresetValue;
+}
+
+function handleThemePresetChange(event: Event) {
+  const presetId = inputValue(event);
+  if (presetId === "custom") {
+    return;
+  }
+
+  const preset = getTerminalThemePreset(presetId);
+  if (!preset) {
+    return;
+  }
+
+  update("theme", cloneTerminalTheme(preset.theme));
+}
+
+function resetThemeToDefault() {
+  const defaultPreset = getTerminalThemePreset("aura-dark");
+  if (!defaultPreset) {
+    return;
+  }
+
+  update("theme", cloneTerminalTheme(defaultPreset.theme));
 }
 </script>
 
@@ -154,7 +223,7 @@ function inputChecked(event: Event) {
 
           <label class="settings-field">
             <span>Shell</span>
-            <select :value="selectedShellPreset" @change="selectedShellPreset = inputValue($event) as ShellPresetValue">
+            <select :value="selectedShellPreset" @change="handleShellPresetChange">
               <option v-for="preset in shellPresets" :key="preset.value" :value="preset.value">
                 {{ preset.label }}
               </option>
@@ -274,50 +343,115 @@ function inputChecked(event: Event) {
 
         <!-- Theme Tab -->
         <div v-show="activeTab === 'theme'" class="settings-section">
-          <label class="settings-field">
-            <span>Background</span>
-            <div class="settings-color-row">
-              <input type="color" :value="settings.theme.background" @input="updateTheme('background', inputValue($event))">
-              <input
-                type="text"
-                :value="settings.theme.background"
-                @input="updateTheme('background', inputValue($event))"
-                autocapitalize="none"
-                autocorrect="off"
-                spellcheck="false"
-              >
+          <label class="settings-field settings-field--stacked">
+            <span>Preset</span>
+            <div class="settings-theme-preset-row">
+              <select :value="selectedThemePresetId" @change="handleThemePresetChange">
+                <option v-for="preset in themePresets" :key="preset.id" :value="preset.id">
+                  {{ preset.label }}
+                </option>
+                <option value="custom">Custom</option>
+              </select>
+              <button class="settings-btn-secondary" type="button" @click="resetThemeToDefault">Reset</button>
             </div>
           </label>
 
-          <label class="settings-field">
-            <span>Foreground</span>
-            <div class="settings-color-row">
-              <input type="color" :value="settings.theme.foreground" @input="updateTheme('foreground', inputValue($event))">
-              <input
-                type="text"
-                :value="settings.theme.foreground"
-                @input="updateTheme('foreground', inputValue($event))"
-                autocapitalize="none"
-                autocorrect="off"
-                spellcheck="false"
-              >
-            </div>
-          </label>
+          <div class="settings-field-full-hint">{{ selectedThemePresetDescription }}</div>
 
-          <label class="settings-field">
-            <span>Cursor</span>
-            <div class="settings-color-row">
-              <input type="color" :value="settings.theme.cursor" @input="updateTheme('cursor', inputValue($event))">
-              <input
-                type="text"
-                :value="settings.theme.cursor"
-                @input="updateTheme('cursor', inputValue($event))"
-                autocapitalize="none"
-                autocorrect="off"
-                spellcheck="false"
-              >
+          <div
+            class="settings-theme-preview"
+            :style="{
+              background: settings.theme.background,
+              color: settings.theme.foreground,
+              borderColor: settings.theme.brightBlack,
+            }"
+          >
+            <div class="settings-theme-preview-title-row">
+              <strong>Preview</strong>
+              <span>{{ selectedThemePresetId === 'custom' ? 'Custom palette' : 'Preset palette' }}</span>
             </div>
-          </label>
+            <div class="settings-theme-preview-line">
+              <span :style="{ color: settings.theme.green }">user@auraterm</span>
+              <span :style="{ color: settings.theme.foreground }">:</span>
+              <span :style="{ color: settings.theme.blue }">~/workspace</span>
+              <span :style="{ color: settings.theme.foreground }">$ git status</span>
+            </div>
+            <div class="settings-theme-preview-line">
+              <span :style="{ color: settings.theme.red }">error:</span>
+              <span :style="{ color: settings.theme.yellow }">modified file</span>
+              <span :style="{ color: settings.theme.cyan }">src/TerminalComponent.vue</span>
+            </div>
+            <div class="settings-theme-swatches">
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.red }" title="Red"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.green }" title="Green"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.yellow }" title="Yellow"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.blue }" title="Blue"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.magenta }" title="Magenta"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.cyan }" title="Cyan"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.brightRed }" title="Bright Red"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.brightBlue }" title="Bright Blue"></span>
+            </div>
+          </div>
+
+          <div class="settings-theme-subsection">
+            <div class="settings-theme-subtitle">Core colors</div>
+            <div class="settings-theme-grid">
+              <label v-for="field in basicThemeFields" :key="field.key" class="settings-theme-grid-item">
+                <span>{{ field.label }}</span>
+                <div class="settings-color-row">
+                  <input type="color" :value="settings.theme[field.key]" @input="updateTheme(field.key, inputValue($event))">
+                  <input
+                    type="text"
+                    :value="settings.theme[field.key]"
+                    @input="updateTheme(field.key, inputValue($event))"
+                    autocapitalize="none"
+                    autocorrect="off"
+                    spellcheck="false"
+                  >
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-theme-subsection">
+            <div class="settings-theme-subtitle">ANSI colors</div>
+            <div class="settings-theme-grid">
+              <label v-for="field in ansiThemeFields" :key="field.key" class="settings-theme-grid-item">
+                <span>{{ field.label }}</span>
+                <div class="settings-color-row">
+                  <input type="color" :value="settings.theme[field.key]" @input="updateTheme(field.key, inputValue($event))">
+                  <input
+                    type="text"
+                    :value="settings.theme[field.key]"
+                    @input="updateTheme(field.key, inputValue($event))"
+                    autocapitalize="none"
+                    autocorrect="off"
+                    spellcheck="false"
+                  >
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-theme-subsection">
+            <div class="settings-theme-subtitle">Bright ANSI colors</div>
+            <div class="settings-theme-grid">
+              <label v-for="field in brightAnsiThemeFields" :key="field.key" class="settings-theme-grid-item">
+                <span>{{ field.label }}</span>
+                <div class="settings-color-row">
+                  <input type="color" :value="settings.theme[field.key]" @input="updateTheme(field.key, inputValue($event))">
+                  <input
+                    type="text"
+                    :value="settings.theme[field.key]"
+                    @input="updateTheme(field.key, inputValue($event))"
+                    autocapitalize="none"
+                    autocorrect="off"
+                    spellcheck="false"
+                  >
+                </div>
+              </label>
+            </div>
+          </div>
         </div>
       </div>
 

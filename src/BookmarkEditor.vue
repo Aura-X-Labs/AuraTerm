@@ -359,29 +359,29 @@ function handleSave() {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--app-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  color: #ccc;
+  color: var(--app-text-secondary);
 }
 
 .bookmark-editor-dialog {
-  background: #1e1e1e;
-  border: 1px solid #333;
+  background: var(--app-dialog-bg);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   width: 480px;
   max-width: 90vw;
   max-height: 90vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px var(--app-shadow);
 }
 
 .bookmark-editor-header {
   padding: 16px 20px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--app-border);
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -390,19 +390,19 @@ function handleSave() {
 .bookmark-editor-title {
   font-size: 1.1rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--app-text);
 }
 
 .bookmark-editor-subtitle {
   font-size: 0.8rem;
-  color: #888;
+  color: var(--app-text-muted);
   margin-top: 2px;
 }
 
 .bookmark-editor-close {
   background: none;
   border: none;
-  color: #888;
+  color: var(--app-text-muted);
   font-size: 1.5rem;
   cursor: pointer;
   padding: 0;
@@ -410,7 +410,7 @@ function handleSave() {
 }
 
 .bookmark-editor-close:hover {
-  color: #fff;
+  color: var(--app-text);
 }
 
 .bookmark-editor-body {
@@ -438,7 +438,7 @@ function handleSave() {
 
 .form-group label {
   font-size: 0.85rem;
-  color: #aaa;
+  color: var(--app-text-muted);
 }
 
 .form-group input[type="text"],
@@ -446,11 +446,11 @@ function handleSave() {
 .form-group input[type="password"],
 .form-group select,
 .form-group textarea {
-  background: #2d2d2d;
-  border: 1px solid #444;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
   border-radius: 4px;
   padding: 8px 10px;
-  color: #fff;
+  color: var(--app-text);
   font-size: 0.9rem;
   outline: none;
 }
@@ -458,7 +458,7 @@ function handleSave() {
 .form-group input:focus,
 .form-group select:focus,
 .form-group textarea:focus {
-  border-color: #0078d4;
+  border-color: var(--app-border-accent);
 }
 
 .form-group input:disabled {
@@ -476,18 +476,18 @@ function handleSave() {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  color: #ccc;
+  color: var(--app-text-secondary);
 }
 
 .form-hint {
   font-size: 0.75rem;
-  color: #777;
+  color: var(--app-text-dim);
   margin-top: -4px;
 }
 
 .bookmark-editor-error {
-  color: #f14c4c;
-  background: rgba(241, 76, 76, 0.1);
+  color: var(--app-danger);
+  background: var(--app-danger-soft);
   padding: 10px;
   border-radius: 4px;
   font-size: 0.85rem;
@@ -496,7 +496,7 @@ function handleSave() {
 
 .bookmark-editor-footer {
   padding: 16px 20px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--app-border);
   display: flex;
   justify-content: flex-end;
   gap: 12px;
@@ -512,20 +512,20 @@ function handleSave() {
 }
 
 .bookmark-editor-btn.primary {
-  background: #0078d4;
-  color: #fff;
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
 }
 
 .bookmark-editor-btn.primary:hover {
-  background: #0086f0;
+  background: var(--app-accent-hover);
 }
 
 .bookmark-editor-btn.secondary {
-  background: #333;
-  color: #ccc;
+  background: var(--app-surface-3);
+  color: var(--app-text-secondary);
 }
 
 .bookmark-editor-btn.secondary:hover {
-  background: #444;
+  background: var(--app-surface-4);
 }
 </style>
