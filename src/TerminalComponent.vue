@@ -863,6 +863,7 @@ function handleSkipReconnectSession() {
       height: '100%',
       display: isVisible ? 'flex' : 'none',
       flexDirection: 'column',
+      backgroundColor: effectiveSettings.theme.background,
     }"
   >
     <div ref="terminalRootRef" :style="{ flex: 1, minHeight: 0 }" />
