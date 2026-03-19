@@ -8,6 +8,7 @@ import {
   TERMINAL_THEME_PRESETS,
   type AppSettings,
   type TerminalTheme,
+  type UiThemeMode,
 } from "./settings";
 
 const props = defineProps<{
@@ -36,6 +37,11 @@ const shellPresets: Array<{ value: ShellPresetValue; label: string }> = [
 ];
 
 const themePresets = TERMINAL_THEME_PRESETS;
+const uiThemeModeOptions: Array<{ value: UiThemeMode; label: string }> = [
+  { value: "follow-terminal", label: "Follow Terminal Theme" },
+  { value: "light", label: "Light UI" },
+  { value: "dark", label: "Dark UI" },
+];
 const basicThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
   { key: "background", label: "Background" },
   { key: "foreground", label: "Foreground" },
@@ -106,6 +112,16 @@ const selectedThemePresetDescription = computed(() => {
   const matchedPreset = getMatchingTerminalThemePreset(settings.value.theme);
   return matchedPreset?.description ?? "Custom palette based on the colors below.";
 });
+const selectedUiThemeModeDescription = computed(() => {
+  switch (settings.value.uiThemeMode) {
+    case "light":
+      return "Use a dedicated light office UI, independent from the terminal preset.";
+    case "dark":
+      return "Use a dedicated dark UI, independent from the terminal preset.";
+    default:
+      return "Let the app UI follow the terminal theme appearance and accent direction.";
+  }
+});
 
 function update<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
   settings.value = { ...settings.value, [key]: value };
@@ -145,6 +161,10 @@ function handleThemePresetChange(event: Event) {
   }
 
   update("theme", cloneTerminalTheme(preset.theme));
+}
+
+function handleUiThemeModeChange(event: Event) {
+  update("uiThemeMode", inputValue(event) as UiThemeMode);
 }
 
 function resetThemeToDefault() {
@@ -344,7 +364,20 @@ function resetThemeToDefault() {
         <!-- Theme Tab -->
         <div v-show="activeTab === 'theme'" class="settings-section">
           <label class="settings-field settings-field--stacked">
-            <span>Preset</span>
+            <span>UI Style</span>
+            <div class="settings-theme-preset-row">
+              <select :value="settings.uiThemeMode" @change="handleUiThemeModeChange">
+                <option v-for="option in uiThemeModeOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
+          </label>
+
+          <div class="settings-field-full-hint">{{ selectedUiThemeModeDescription }}</div>
+
+          <label class="settings-field settings-field--stacked">
+            <span>Terminal Preset</span>
             <div class="settings-theme-preset-row">
               <select :value="selectedThemePresetId" @change="handleThemePresetChange">
                 <option v-for="preset in themePresets" :key="preset.id" :value="preset.id">

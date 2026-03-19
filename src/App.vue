@@ -15,7 +15,6 @@ import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayou
 import {
   DEFAULT_SETTINGS,
   deriveUiTheme,
-  getTerminalThemeAppearance,
   MAX_INPUT_HISTORY,
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
@@ -167,7 +166,7 @@ const renamingTabTitle = ref("");
 const tabContextMenu = ref<TabContextMenuState | null>(null);
 const suppressTabClick = ref(false);
 const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
-const uiTheme = computed(() => deriveUiTheme(settings.value.theme));
+const uiTheme = computed(() => deriveUiTheme(settings.value.theme, settings.value.uiThemeMode));
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const terminalContainerRef = ref<HTMLDivElement | null>(null);
@@ -588,7 +587,7 @@ const primaryShortcutLabel = computed(() => (osType.value === "macos" ? "Cmd" : 
 const appClassName = computed(() => [
   "app-container",
   osType.value,
-  `theme-${getTerminalThemeAppearance(settings.value.theme)}`,
+  `theme-${uiTheme.value.appearance}`,
   isWindowFocused.value ? "focused" : "blurred",
   draggedTabId.value ? "tab-dragging" : "",
 ]);
