@@ -1,8 +1,0 @@
-{
-    "makefile.configureOnOpen": false,
-    "chat.tools.terminal.autoApprove": {
-        "cargo check": true,
-        "^C": true,
-        "rustc": true
-    }
-}
