@@ -1,104 +1,106 @@
-# AuraTerm 光环终端
+# AuraTerm
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tauri](https://img.shields.io/badge/built%20with-Tauri-blue)](https://tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.x-brightgreen)](https://vuejs.org/)
 
-**AuraTerm** 是一款基于 [Tauri](https://tauri.app/) 开发的现代化、跨平台终端模拟器。它旨在提供类似 TeraTerm 的强大连接能力（SSH, Serial, Telnet, Local Shell），同时拥有现代化的 UI/UX 体验、标签页管理、分屏支持以及高性能的渲染引擎。
+**[中文文档](README_CN.md)**
+
+**AuraTerm** is a modern, cross-platform terminal emulator built with [Tauri](https://tauri.app/). It aims to provide powerful connection capabilities (SSH, Serial, Telnet, Local Shell) similar to TeraTerm, while offering a modern UI/UX experience, tab management, split pane support, and a high-performance rendering engine.
 
 ---
 
-## ✨ 核心特性
+## ✨ Features
 
-- **🚀 跨平台支持**: 完美支持 macOS (Apple Silicon/Intel), Windows 和 Linux。
-- **🛡️ 强大的连接协议**:
-  - **SSH2**: 支持密码、私钥认证，集成 MFA 多因素认证，内置 SFTP 文件管理器。
-  - **Serial (串口)**: 自动枚举设备，支持自定义波特率、数据位、停止位、流控等完整配置。
-  - **Telnet**: 完整的 Telnet 协议支持。
-  - **Local Shell**: 可自定义本地 Shell (PowerShell, Git Bash, zsh 等)。
-- **🎭 现代化的 UI/UX**:
-  - **Tab 标签页管理**: 支持拖拽排序、自定义重命名、自动生成北约字母表后缀。
-  - **书签管理**: 分组管理常用连接，支持快速搜索与一键直连。
-  - **分屏支持 (Split Panes)**: 在同一窗口内灵活排列多个终端。
-- **📈 高性能渲染**: 基于 Xterm.js 配合 WebGL 插件实现极致的渲染速度与低资源占用。
-- **📋 会话日志**: 灵活的日志保存机制，支持高度自定义的文件名占位符模版。
-- **🔄 增强重连**: 支持 SSH 自动重连及 tmux/screen 会话持久化管理。
+- **🚀 Cross-Platform**: Full support for macOS (Apple Silicon/Intel), Windows, and Linux.
+- **🛡️ Powerful Connection Protocols**:
+  - **SSH2**: Password and key-based authentication, MFA support, built-in SFTP file manager.
+  - **Serial Port**: Auto device enumeration, customizable baud rate, data bits, stop bits, flow control.
+  - **Telnet**: Full Telnet protocol support.
+  - **Local Shell**: Customizable local shell (PowerShell, Git Bash, zsh, etc.).
+- **🎭 Modern UI/UX**:
+  - **Tab Management**: Drag-and-drop reordering, custom renaming, auto-generated NATO alphabet suffixes.
+  - **Bookmark Management**: Grouped connections with quick search and one-click connect.
+  - **Split Panes**: Flexible terminal layout within a single window.
+- **📈 High Performance**: Powered by Xterm.js with WebGL plugin for smooth rendering and low resource usage.
+- **📋 Session Logging**: Flexible log saving with customizable filename templates.
+- **🔄 Enhanced Reconnection**: SSH auto-reconnect and tmux/screen session persistence.
 
 ---
 
-## 🛠️ 技术栈
+## 🛠️ Tech Stack
 
 - **Frontend**: Vue 3, TypeScript, Xterm.js
 - **Backend**: Rust, Tauri v2
-- **Key Libraries**: `portable-pty`, `serialport-rs`, `russh` (SSH implementation)
+- **Key Libraries**: `portable-pty`, `serialport-rs`, `russh`
 
 ---
 
-## 🚀 快速上手
+## 🚀 Getting Started
 
-### 开发环境配置
+### Prerequisites
 
-1. 确保已安装 [Rust](https://www.rust-lang.org/tools/install) 环境。
-2. 安装 Node.js (推荐 v18+)。
+1. Install [Rust](https://www.rust-lang.org/tools/install).
+2. Install Node.js (v18+ recommended).
 
-### 运行开发版本
+### Development
 
 ```bash
-# 克隆仓库
+# Clone the repository
 git clone https://github.com/Aura-X-Labs/AuraTerm.git
 cd AuraTerm
 
-# 安装前端依赖
+# Install dependencies
 npm install
 
-# 启动开发环境
+# Start development server
 npm run tauri dev
 ```
 
-### 编译检查
+### Build
 
 ```bash
-# Vue 类型检查
-npm run build # 包含 vue-tsc 检查
+# Vue type check
+npm run build
 
-# Rust 后端检查
+# Rust backend check
 cd src-tauri
 cargo check
 ```
 
 ---
 
-## 📦 构建与发布
+## 📦 Build & Release
 
-针对不同平台生成安装包：
+Generate installers for different platforms:
 
 ```bash
 npm run tauri build
 ```
 
-构建结果将位于 `src-tauri/target/release/bundle/` 目录下。
+Build artifacts will be located in `src-tauri/target/release/bundle/`.
 
 ---
 
-## 📄 许可证
+## 📄 License
 
-本项目采用 **MIT** 许可证，详情请参阅 [LICENSE](LICENSE) 文件。
-
----
-
-## 🤝 贡献规范
-
-我们欢迎所有形式的贡献！无论是提交 Bug 报告、功能建议还是直接提交 Pull Request。
-
-1. **Fork** 本仓库。
-2. 创建您的特性分支 (`git checkout -b feature/AmazingFeature`)。
-3. 提交您的修改 (`git commit -m 'Add some AmazingFeature'`)。
-4. 推送到分支 (`git push origin feature/AmazingFeature`)。
-5. 开启一个 **Pull Request**。
+This project is licensed under the **MIT** License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 💡 灵感来源
+## 🤝 Contributing
 
-- **TeraTerm**: 提供核心功能目标与 TTL 脚本兼容愿景。
-- **Tauri**: 强力支持的跨平台底座。
+We welcome all forms of contribution! Whether it's bug reports, feature suggestions, or pull requests.
+
+1. **Fork** the repository.
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`).
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`).
+4. Push to the branch (`git push origin feature/AmazingFeature`).
+5. Open a **Pull Request**.
+
+---
+
+## 💡 Inspiration
+
+- **TeraTerm**: Core functionality goals and TTL script compatibility vision.
+- **Tauri**: Powerful cross-platform foundation.
