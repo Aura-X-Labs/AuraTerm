@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Terminal } from "xterm";
-import { FitAddon } from "xterm-addon-fit";
-import { SearchAddon, type ISearchOptions } from "xterm-addon-search";
-import { Unicode11Addon } from "xterm-addon-unicode11";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
@@ -19,7 +19,7 @@ import type {
   TerminalSearchOptions,
   TerminalSearchResults,
 } from "./types";
-import "xterm/css/xterm.css";
+import "@xterm/xterm/css/xterm.css";
 
 interface PtyOutputEvent {
   id: string;
