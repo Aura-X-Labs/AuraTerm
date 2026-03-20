@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint
@@ -71,13 +74,4 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'AuraTerm ${{ github.ref_name }}'
-          releaseBody: 'See Changelog.md for details'
-          releaseDraft: true
-          prerelease: false
-          args: --target ${{ matrix.target }}
+        run: npm run tauri build -- --target ${{ matrix.target }}
