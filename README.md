@@ -1,4 +1,4 @@
-# AuraTerm (灵光终端)
+# AuraTerm 光环终端
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tauri](https://img.shields.io/badge/built%20with-Tauri-blue)](https://tauri.app/)
