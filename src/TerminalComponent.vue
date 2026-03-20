@@ -2,12 +2,22 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
+import { SearchAddon, type ISearchOptions } from "xterm-addon-search";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { isReconnectEnabled, normalizeReconnectType } from "./types";
-import type { ReconnectType, SavedConnection, SerialConnectionState, SessionConfig, SshConfig, TerminalHandle } from "./types";
+import type {
+  ReconnectType,
+  SavedConnection,
+  SerialConnectionState,
+  SessionConfig,
+  SshConfig,
+  TerminalHandle,
+  TerminalSearchOptions,
+  TerminalSearchResults,
+} from "./types";
 import "xterm/css/xterm.css";
 
 interface PtyOutputEvent {
@@ -44,6 +54,18 @@ interface ReconnectSessionPromptState {
   sessions: string[];
 }
 
+// Only highlight the active (currently navigated) match.
+// We do NOT highlight all matches because xterm-addon-search's
+// _highlightAllMatches() does a full synchronous buffer scan and
+// creates up to highlightLimit decoration DOM objects — this freezes
+// WebKit (Tauri/macOS) when there are many matches.
+const SEARCH_DECORATIONS = {
+  matchOverviewRuler: "transparent",   // required field, unused (highlightLimit:0)
+  activeMatchBackground: "#FFB347",
+  activeMatchBorder: "#FFD38A",
+  activeMatchColorOverviewRuler: "#FFB347",
+};
+
 const props = defineProps<{
   sessionId: string;
   isVisible: boolean;
@@ -57,6 +79,7 @@ const emit = defineEmits<{
   serialConnectionStateChange: [state: SerialConnectionState];
   sessionUpdate: [session: SessionConfig];
   sshPasswordUpdated: [];
+  searchResultsChange: [results: TerminalSearchResults];
 }>();
 
 function stripAnsi(value: string): string {
@@ -188,10 +211,73 @@ const activeSshConfig = computed(() => (
 
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
+let searchAddon: SearchAddon | null = null;
 let terminalCleanup: (() => void) | null = null;
 let stopSessionWatch: (() => void) | null = null;
 let pendingInputBuffer = "";
 let pendingInputTimer: number | null = null;
+const activeSearchQuery = ref("");
+
+function emitSearchResults(results: TerminalSearchResults) {
+  emit("searchResultsChange", results);
+}
+
+function clearSearch() {
+  activeSearchQuery.value = "";
+  searchAddon?.clearDecorations();
+  emitSearchResults({
+    query: "",
+    resultIndex: -1,
+    resultCount: 0,
+    limitExceeded: false,
+  });
+}
+
+function clearSearchActiveDecoration() {
+  searchAddon?.clearActiveDecoration();
+}
+
+function runSearch(direction: "next" | "previous", term: string, options: TerminalSearchOptions = {}) {
+  if (!searchAddon || !terminal) {
+    return false;
+  }
+
+  activeSearchQuery.value = term;
+  if (!term) {
+    clearSearch();
+    return false;
+  }
+
+  const searchOptions: ISearchOptions = {
+    caseSensitive: options.caseSensitive,
+    wholeWord: options.wholeWord,
+    regex: options.regex,
+    incremental: direction === "next" ? options.incremental : false,
+    decorations: SEARCH_DECORATIONS,
+  };
+
+  try {
+    const matched = direction === "previous"
+      ? searchAddon.findPrevious(term, searchOptions)
+      : searchAddon.findNext(term, searchOptions);
+
+    // Emit result directly from the boolean return value.
+    // We no longer use onDidChangeResults because it requires _highlightAllMatches
+    // to count all matches, which is the source of the synchronous freeze.
+    emitSearchResults({
+      query: term,
+      resultIndex: matched ? 0 : -1,
+      resultCount: matched ? 1 : 0,
+      limitExceeded: false,
+    });
+
+    return matched;
+  } catch (e) {
+    console.warn("Search failed (possibly invalid regex):", e);
+    emitSearchResults({ query: term, resultIndex: -1, resultCount: 0, limitExceeded: false });
+    return false;
+  }
+}
 
 function clearPendingInputFlush() {
   if (pendingInputTimer !== null) {
@@ -396,6 +482,10 @@ defineExpose<TerminalHandle>({
   sendData,
   fit,
   focus,
+  findNext: (text, options) => runSearch("next", text, options),
+  findPrevious: (text, options) => runSearch("previous", text, options),
+  clearSearch,
+  clearSearchActiveDecoration,
 });
 
 onMounted(() => {
@@ -422,7 +512,13 @@ onMounted(() => {
   });
 
   fitAddon = new FitAddon();
+  // highlightLimit:0 means _highlightAllMatches() exits immediately (0 >= 0 → break).
+  // This eliminates the O(n_matches) buffer scan + decoration-object creation that
+  // froze WebKit. The active match is still highlighted via _selectResult() using
+  // the activeMatch* colors in SEARCH_DECORATIONS.
+  searchAddon = new SearchAddon({ highlightLimit: 0 });
   terminal.loadAddon(fitAddon);
+  terminal.loadAddon(searchAddon);
   terminal.open(terminalRootRef.value);
   fitAddon.fit();
   if (props.isFocused) {
@@ -565,6 +661,7 @@ onMounted(() => {
     terminal?.dispose();
     terminal = null;
     fitAddon = null;
+    searchAddon = null;
   };
 
   const sessionKey = computed(() => {

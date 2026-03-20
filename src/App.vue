@@ -33,6 +33,8 @@ import type {
   SessionConfig,
   SshConfig,
   TerminalHandle,
+  TerminalSearchOptions,
+  TerminalSearchResults,
 } from "./types";
 import logoUrl from "./logo.png";
 import "./App.css";
@@ -47,6 +49,14 @@ interface TabContextMenuState {
 
 type AppMenuId = "file" | "view" | "help";
 type FileSubmenuId = "new-session" | "preferences";
+type TerminalSearchToggleKey = "caseSensitive" | "wholeWord" | "regex";
+
+const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
+  query: "",
+  resultIndex: -1,
+  resultCount: 0,
+  limitExceeded: false,
+};
 
 let nextTabId = 1;
 
@@ -170,7 +180,17 @@ const uiTheme = computed(() => deriveUiTheme(settings.value.theme, settings.valu
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const terminalContainerRef = ref<HTMLDivElement | null>(null);
+const terminalSearchInputRef = ref<HTMLInputElement | null>(null);
 const isFullscreen = ref(false);
+const terminalSearchVisible = ref(false);
+const terminalSearchQuery = ref("");
+const terminalSearchOptions = ref<Required<Pick<TerminalSearchOptions, TerminalSearchToggleKey>>>({
+  caseSensitive: false,
+  wholeWord: false,
+  regex: false,
+});
+const terminalSearchResults = ref<Record<string, TerminalSearchResults>>({});
+let searchDebounceTimer: number | null = null;
 const {
   paneLayout,
   focusedPaneId,
@@ -373,7 +393,15 @@ async function syncFullscreenState() {
 
 function handleGlobalKeyDown(event: KeyboardEvent) {
   const hasPrimaryModifier = event.ctrlKey || event.metaKey;
+  const normalizedKey = event.key.toLowerCase();
+
   if (hasPrimaryModifier && !event.altKey) {
+    if (normalizedKey === "f") {
+      event.preventDefault();
+      handleOpenTerminalSearch();
+      return;
+    }
+
     const key = event.key;
     const isIncreaseShortcut = key === "+" || key === "=" || event.code === "NumpadAdd";
     const isDecreaseShortcut = key === "-" || key === "_" || event.code === "NumpadSubtract";
@@ -396,6 +424,22 @@ function handleGlobalKeyDown(event: KeyboardEvent) {
       handleResetTerminalFontSize();
       return;
     }
+  }
+
+  if (terminalSearchVisible.value && event.key === "F3") {
+    event.preventDefault();
+    if (event.shiftKey) {
+      handleFindPreviousInTerminal();
+    } else {
+      handleFindNextInTerminal();
+    }
+    return;
+  }
+
+  if (terminalSearchVisible.value && event.key === "Escape" && !isEditableTarget(event.target)) {
+    event.preventDefault();
+    handleCloseTerminalSearch();
+    return;
   }
 
   const isFullscreenShortcut = event.key === "F11";
@@ -584,6 +628,26 @@ const activeSerialConnectionState = computed<SerialConnectionState | null>(() =>
   return serialConnectionStates.value[activeTab.value.id] ?? "connecting";
 });
 const primaryShortcutLabel = computed(() => (osType.value === "macos" ? "Cmd" : "Ctrl"));
+const activeTerminalSearchResults = computed(() => {
+  if (!activeTabId.value) {
+    return EMPTY_TERMINAL_SEARCH_RESULTS;
+  }
+  return terminalSearchResults.value[activeTabId.value] ?? EMPTY_TERMINAL_SEARCH_RESULTS;
+});
+const terminalSearchSummary = computed(() => {
+  if (!terminalSearchQuery.value) {
+    return "Search the active terminal";
+  }
+
+  const results = activeTerminalSearchResults.value;
+  if (results.query !== terminalSearchQuery.value) {
+    return "Searching...";
+  }
+  if (results.resultIndex < 0) {
+    return "No matches";
+  }
+  return "Found";
+});
 const appClassName = computed(() => [
   "app-container",
   osType.value,
@@ -631,6 +695,154 @@ function focusActiveTerminal() {
     return;
   }
   termRefs.get(activeTabId.value)?.focus();
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  const tagName = target.tagName;
+  return target.isContentEditable || tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
+}
+
+function focusTerminalSearchInput(selectText = false) {
+  const input = terminalSearchInputRef.value;
+  if (!input) {
+    return;
+  }
+
+  input.focus();
+  if (selectText) {
+    input.select();
+  }
+}
+
+function updateTerminalSearchResults(tabId: string, results: TerminalSearchResults) {
+  terminalSearchResults.value = {
+    ...terminalSearchResults.value,
+    [tabId]: results,
+  };
+}
+
+function removeTerminalSearchResults(tabId: string) {
+  if (!(tabId in terminalSearchResults.value)) {
+    return;
+  }
+
+  const nextResults = { ...terminalSearchResults.value };
+  delete nextResults[tabId];
+  terminalSearchResults.value = nextResults;
+}
+
+function getActiveTerminalHandle() {
+  return termRefs.get(activeTabId.value);
+}
+
+function syncSearchToActiveTerminal(direction: "next" | "previous" = "next", incremental = true) {
+  const tabId = activeTabId.value;
+  const handle = getActiveTerminalHandle();
+  if (!tabId || !handle) {
+    return false;
+  }
+
+  if (!terminalSearchQuery.value) {
+    handle.clearSearch();
+    updateTerminalSearchResults(tabId, EMPTY_TERMINAL_SEARCH_RESULTS);
+    return false;
+  }
+
+  const searchOptions: TerminalSearchOptions = {
+    ...terminalSearchOptions.value,
+    incremental,
+  };
+  const matched = direction === "previous"
+    ? handle.findPrevious(terminalSearchQuery.value, searchOptions)
+    : handle.findNext(terminalSearchQuery.value, searchOptions);
+
+  if (!matched) {
+    updateTerminalSearchResults(tabId, {
+      query: terminalSearchQuery.value,
+      resultIndex: -1,
+      resultCount: 0,
+      limitExceeded: false,
+    });
+  }
+
+  return matched;
+}
+
+function handleOpenTerminalSearch() {
+  closeOpenMenus();
+  if (!activeTab.value) {
+    return;
+  }
+
+  terminalSearchVisible.value = true;
+  void nextTick(() => {
+    focusTerminalSearchInput(true);
+    syncSearchToActiveTerminal("next", true);
+  });
+}
+
+function handleCloseTerminalSearch() {
+  if (!terminalSearchVisible.value && !terminalSearchQuery.value) {
+    return;
+  }
+
+  terminalSearchVisible.value = false;
+  terminalSearchQuery.value = "";
+  terminalSearchResults.value = {};
+  for (const handle of termRefs.values()) {
+    handle.clearSearch();
+  }
+  void nextTick(() => {
+    focusActiveTerminal();
+  });
+}
+
+function handleFindNextInTerminal() {
+  if (!terminalSearchVisible.value) {
+    handleOpenTerminalSearch();
+    return;
+  }
+  syncSearchToActiveTerminal("next", false);
+}
+
+function handleFindPreviousInTerminal() {
+  if (!terminalSearchVisible.value) {
+    handleOpenTerminalSearch();
+    return;
+  }
+  syncSearchToActiveTerminal("previous", false);
+}
+
+function toggleTerminalSearchOption(key: TerminalSearchToggleKey) {
+  terminalSearchOptions.value = {
+    ...terminalSearchOptions.value,
+    [key]: !terminalSearchOptions.value[key],
+  };
+}
+
+function handleTerminalSearchKeyDown(event: KeyboardEvent) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    if (event.shiftKey) {
+      handleFindPreviousInTerminal();
+    } else {
+      handleFindNextInTerminal();
+    }
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    handleCloseTerminalSearch();
+  }
+}
+
+function handleTerminalSearchBlur() {
+  getActiveTerminalHandle()?.clearSearchActiveDecoration();
 }
 
 function setPaneViewportRef(tabId: string, instance: Element | null) {
@@ -751,6 +963,11 @@ function setTerminalRef(tabId: string, instance: unknown) {
     if (paneByTabId.value[tabId]) {
       queueTerminalFit(tabId);
     }
+    if (terminalSearchVisible.value && activeTabId.value === tabId) {
+      void nextTick(() => {
+        syncSearchToActiveTerminal("next", true);
+      });
+    }
     return;
   }
   termRefs.delete(tabId);
@@ -766,6 +983,36 @@ watch(() => settings.value.showInputBar, () => {
   });
 });
 
+watch(terminalSearchVisible, () => {
+  void nextTick(() => {
+    fitVisibleTerminals();
+    if (terminalSearchVisible.value) {
+      focusTerminalSearchInput(true);
+    }
+  });
+});
+
+watch(
+  () => [
+    terminalSearchQuery.value,
+    terminalSearchOptions.value.caseSensitive,
+    terminalSearchOptions.value.wholeWord,
+    terminalSearchOptions.value.regex,
+  ],
+  () => {
+    if (!terminalSearchVisible.value) {
+      return;
+    }
+    if (searchDebounceTimer !== null) {
+      window.clearTimeout(searchDebounceTimer);
+    }
+    searchDebounceTimer = window.setTimeout(() => {
+      searchDebounceTimer = null;
+      syncSearchToActiveTerminal("next", true);
+    }, 300);
+  },
+);
+
 watch([paneLayout, sidebarOpen, showRemoteFileManager], () => {
   void nextTick(() => {
     fitVisibleTerminals();
@@ -779,6 +1026,21 @@ watch([tabs, paneLayout, focusedPaneId, activeTabId], () => {
 watch(focusedPaneId, () => {
   void nextTick(() => {
     focusActiveTerminal();
+  });
+});
+
+watch(activeTabId, (newTabId, previousTabId) => {
+  if (previousTabId && previousTabId !== newTabId) {
+    termRefs.get(previousTabId)?.clearSearch();
+  }
+
+  if (!terminalSearchVisible.value || !newTabId) {
+    return;
+  }
+
+  void nextTick(() => {
+    syncSearchToActiveTerminal("next", true);
+    focusTerminalSearchInput(false);
   });
 });
 
@@ -1130,6 +1392,11 @@ function handleCloseTab(id: string) {
     cancelTabRename();
   }
 
+  removeTerminalSearchResults(id);
+  if (nextTabs.length === 0) {
+    handleCloseTerminalSearch();
+  }
+
   handleTabRemoved(id, nextTabs);
 
   if (id in serialConnectionStates.value) {
@@ -1366,6 +1633,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
               View
             </button>
             <div v-if="openMenuId === 'view'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
+              <button class="titlebar-menu-item" type="button" :disabled="!activeTab" @click="handleOpenTerminalSearch">
+                <span>Find In Terminal</span>
+                <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+F</span>
+              </button>
+              <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleToggleBookmarks">
                 <span>{{ sidebarOpen ? 'Hide Bookmarks' : 'Show Bookmarks' }}</span>
               </button>
@@ -1510,6 +1782,17 @@ function handleBookmarkConnect(connection: SavedConnection) {
 
       <div class="tab-bar-actions">
         <button
+          class="tab-new-btn tab-search-btn"
+          :class="{ active: terminalSearchVisible }"
+          type="button"
+          title="Find in Terminal"
+          :disabled="!activeTab"
+          @mousedown.stop
+          @click.stop="handleOpenTerminalSearch"
+        >
+          ⌕
+        </button>
+        <button
           class="tab-new-btn"
           type="button"
           title="Split Right"
@@ -1570,6 +1853,53 @@ function handleBookmarkConnect(connection: SavedConnection) {
       <BookmarkSidebar v-if="sidebarOpen" :refresh-token="sidebarRefreshToken" :settings="settings" @connect="handleBookmarkConnect" />
 
       <div class="terminal-wrapper">
+        <div v-if="terminalSearchVisible" class="terminal-searchbar">
+          <div class="terminal-search-input-wrap">
+            <span class="terminal-search-label">Find</span>
+            <input
+              ref="terminalSearchInputRef"
+              v-model="terminalSearchQuery"
+              class="terminal-search-input"
+              type="text"
+              placeholder="Search active terminal"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              @blur="handleTerminalSearchBlur"
+              @keydown="handleTerminalSearchKeyDown"
+            >
+          </div>
+          <div class="terminal-search-summary">{{ terminalSearchSummary }}</div>
+          <div class="terminal-search-toggles">
+            <button
+              class="terminal-search-toggle"
+              :class="{ active: terminalSearchOptions.caseSensitive }"
+              type="button"
+              title="Match Case"
+              @click="toggleTerminalSearchOption('caseSensitive')"
+            >Aa</button>
+            <button
+              class="terminal-search-toggle"
+              :class="{ active: terminalSearchOptions.wholeWord }"
+              type="button"
+              title="Match Whole Word"
+              @click="toggleTerminalSearchOption('wholeWord')"
+            >W</button>
+            <button
+              class="terminal-search-toggle"
+              :class="{ active: terminalSearchOptions.regex }"
+              type="button"
+              title="Use Regular Expression"
+              @click="toggleTerminalSearchOption('regex')"
+            >.*</button>
+          </div>
+          <div class="terminal-search-actions">
+            <button class="terminal-search-action" type="button" :disabled="!terminalSearchQuery" title="Previous Match" @click="handleFindPreviousInTerminal">↑</button>
+            <button class="terminal-search-action" type="button" :disabled="!terminalSearchQuery" title="Next Match" @click="handleFindNextInTerminal">↓</button>
+            <button class="terminal-search-action close" type="button" title="Close Search" @click="handleCloseTerminalSearch">×</button>
+          </div>
+        </div>
+
         <div ref="terminalContainerRef" class="terminal-container split-terminal-container">
           <div v-if="tabs.length === 0" class="terminal-empty-state">
             No open tabs. Click + to open a new tab.
@@ -1641,6 +1971,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
                 :session="tab.session"
                 :log-path="tab.logPath"
                 :settings="settings"
+                @search-results-change="(results) => updateTerminalSearchResults(tab.id, results)"
                 @session-update="(session) => updateTabSession(tab.id, session)"
                 @ssh-password-updated="sidebarRefreshToken += 1"
                 @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"

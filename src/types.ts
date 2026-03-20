@@ -124,9 +124,27 @@ export type SessionConfig =
 
 export type SerialConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 
+export interface TerminalSearchOptions {
+  caseSensitive?: boolean;
+  wholeWord?: boolean;
+  regex?: boolean;
+  incremental?: boolean;
+}
+
+export interface TerminalSearchResults {
+  query: string;
+  resultIndex: number;
+  resultCount: number;
+  limitExceeded: boolean;
+}
+
 export interface TerminalHandle {
   saveLog: (tabTitle: string) => Promise<string>;
   sendData: (text: string) => void;
   fit: () => void;
   focus: () => void;
+  findNext: (text: string, options?: TerminalSearchOptions) => boolean;
+  findPrevious: (text: string, options?: TerminalSearchOptions) => boolean;
+  clearSearch: () => void;
+  clearSearchActiveDecoration: () => void;
 }
