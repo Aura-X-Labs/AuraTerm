@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { SearchAddon, type ISearchOptions } from "xterm-addon-search";
+import { Unicode11Addon } from "xterm-addon-unicode11";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
@@ -517,9 +518,14 @@ onMounted(() => {
   // froze WebKit. The active match is still highlighted via _selectResult() using
   // the activeMatch* colors in SEARCH_DECORATIONS.
   searchAddon = new SearchAddon({ highlightLimit: 0 });
+  const unicode11Addon = new Unicode11Addon();
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(searchAddon);
+  terminal.loadAddon(unicode11Addon);
   terminal.open(terminalRootRef.value);
+  // Activate Unicode 11 so emoji and wide characters (e.g. 💰) are treated as
+  // 2 columns wide, preventing them from overlapping the following character.
+  terminal.unicode.activeVersion = "11";
   fitAddon.fit();
   if (props.isFocused) {
     terminal.focus();
