@@ -1,5 +1,9 @@
 # AuraTerm
 
+<div align="center">
+  <img src="src-tauri/icons/icon.png" alt="AuraTerm Logo" width="128">
+</div>
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tauri](https://img.shields.io/badge/built%20with-Tauri-blue)](https://tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.x-brightgreen)](https://vuejs.org/)
