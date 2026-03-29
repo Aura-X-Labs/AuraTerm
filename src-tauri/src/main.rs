@@ -296,6 +296,9 @@ fn setup_window_bounds_persistence(app: &AppHandle) -> Result<(), String> {
     let event_window = window.clone();
     window.on_window_event(move |event| match event {
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+            if let Ok(size) = event_window.inner_size() {
+                println!("[Window] New inner size: {}x{}", size.width, size.height);
+            }
             if let Ok(bounds) = current_window_bounds(&event_window) {
                 let _ = save_window_bounds_if_needed(&app_handle, bounds);
             }
