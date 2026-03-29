@@ -6,7 +6,7 @@
 
 **[中文文档](README_CN.md)**
 
-**AuraTerm** is a modern, cross-platform terminal emulator built with [Tauri](https://tauri.app/). It aims to provide powerful connection capabilities (SSH, Serial, Telnet, Local Shell) similar to TeraTerm, while offering a modern UI/UX experience, tab management, split pane support, and a high-performance rendering engine.
+**AuraTerm** is a modern, cross-platform terminal emulator built with [Tauri](https://tauri.app/). It provides powerful connection capabilities (SSH, Serial, Telnet, Local Shell) with a modern UI/UX experience, tab management, split pane support, and a high-performance rendering engine.
 
 ---
 
@@ -102,5 +102,4 @@ We welcome all forms of contribution! Whether it's bug reports, feature suggesti
 
 ## 💡 Inspiration
 
-- **TeraTerm**: Core functionality goals and TTL script compatibility vision.
 - **Tauri**: Powerful cross-platform foundation.

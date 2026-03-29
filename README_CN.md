@@ -6,7 +6,7 @@
 
 **[English](README.md)**
 
-**AuraTerm** 是一款基于 [Tauri](https://tauri.app/) 开发的现代化、跨平台终端模拟器。它旨在提供类似 TeraTerm 的强大连接能力（SSH, Serial, Telnet, Local Shell），同时拥有现代化的 UI/UX 体验、标签页管理、分屏支持以及高性能的渲染引擎。
+**AuraTerm** 是一款基于 [Tauri](https://tauri.app/) 开发的现代化、跨平台终端模拟器。它提供强大的连接能力（SSH, Serial, Telnet, Local Shell），拥有现代化的 UI/UX 体验、标签页管理、分屏支持以及高性能的渲染引擎。
 
 ---
 
@@ -102,5 +102,4 @@ npm run tauri build
 
 ## 💡 灵感来源
 
-- **TeraTerm**: 提供核心功能目标与 TTL 脚本兼容愿景。
 - **Tauri**: 强力支持的跨平台底座。

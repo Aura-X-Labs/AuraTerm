@@ -21,7 +21,17 @@ export default defineConfig(async () => ({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: undefined,
+        manualChunks: (id) => {
+          if (id.includes("node_modules")) {
+            if (id.includes("@xterm")) {
+              return "xterm";
+            }
+            if (id.includes("vue")) {
+              return "vue";
+            }
+            return "vendor";
+          }
+        },
       },
     },
   },
