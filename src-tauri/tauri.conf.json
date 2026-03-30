@@ -32,6 +32,17 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "signCommand": {
+        "cmd": "powershell",
+        "args": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          "$file = '%1'; $thumbprint = $env:AURATERM_WINDOWS_CERT_THUMBPRINT; if (-not $thumbprint) { Write-Host 'Skipping Windows signing: AURATERM_WINDOWS_CERT_THUMBPRINT is not set.'; exit 0 }; $algorithm = if ($env:AURATERM_WINDOWS_DIGEST_ALGORITHM) { $env:AURATERM_WINDOWS_DIGEST_ALGORITHM } else { 'sha256' }; $timestampUrl = $env:AURATERM_WINDOWS_TIMESTAMP_URL; $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue; if (-not $signtool) { Write-Error 'signtool.exe was not found in PATH.'; exit 1 }; $signArgs = @('sign', '/sha1', $thumbprint, '/fd', $algorithm); if ($timestampUrl) { $signArgs += @('/tr', $timestampUrl, '/td', $algorithm) }; $signArgs += $file; & $signtool.Source @signArgs; exit $LASTEXITCODE"
+        ]
+      },
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "installMode": "currentUser",

@@ -9,7 +9,10 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "sync:version": "python scripts/sync_version.py",
-    "tauri": "npm run sync:version && tauri"
+    "tauri": "npm run sync:version && tauri",
+    "tauri:store": "npm run sync:version && tauri build --no-bundle && tauri bundle --config src-tauri/tauri.microsoftstore.conf.json",
+    "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1",
+    "release:windows:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1 -Store"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

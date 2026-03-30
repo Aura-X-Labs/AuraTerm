@@ -1,0 +1,17 @@
+{
+  "bundle": {
+    "publisher": "Aura X Labs",
+    "category": "DeveloperTool",
+    "homepage": "https://github.com/Aura-X-Labs/AuraTerm",
+    "shortDescription": "A modern, cross-platform terminal emulator built with Tauri.",
+    "longDescription": "AuraTerm is a modern, local-first terminal emulator built with Tauri, Vue, and Rust. It supports SSH, Telnet, and serial connections, bookmarks, split panes, and persistent sessions for developer and infrastructure workflows.",
+    "licenseFile": "../LICENSE",
+    "copyright": "Copyright (c) 2026 Aura-X-Labs",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      }
+    }
+  }
+}
