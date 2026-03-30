@@ -11,8 +11,12 @@
     "sync:version": "python scripts/sync_version.py",
     "tauri": "npm run sync:version && tauri",
     "tauri:store": "npm run sync:version && tauri build --no-bundle && tauri bundle --config src-tauri/tauri.microsoftstore.conf.json",
+    "package:msix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-msix.ps1",
+    "package:msixupload": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-msix.ps1 -MsixUpload",
     "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1",
-    "release:windows:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1 -Store"
+    "release:windows:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1 -Store",
+    "release:windows:msix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1 -Msix",
+    "release:windows:msixupload": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1 -MsixUpload"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

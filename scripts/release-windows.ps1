@@ -1,5 +1,7 @@
 param(
-    [switch]$Store
+    [switch]$Store,
+    [switch]$Msix,
+    [switch]$MsixUpload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,42 +16,22 @@ $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 Push-Location $repoRoot
 
 try {
-    if (-not $env:AURATERM_WINDOWS_DIGEST_ALGORITHM) {
-        $env:AURATERM_WINDOWS_DIGEST_ALGORITHM = 'sha256'
-    }
-
-    if (-not $env:AURATERM_WINDOWS_TIMESTAMP_URL) {
-        $env:AURATERM_WINDOWS_TIMESTAMP_URL = 'http://timestamp.digicert.com'
-    }
-
-    if (-not $env:AURATERM_WINDOWS_CERT_THUMBPRINT) {
-        if ($env:AURATERM_WINDOWS_PFX_PATH -and $env:AURATERM_WINDOWS_PFX_PASSWORD) {
-            $pfxPath = (Resolve-Path $env:AURATERM_WINDOWS_PFX_PATH).Path
-            $password = ConvertTo-SecureString -String $env:AURATERM_WINDOWS_PFX_PASSWORD -Force -AsPlainText
-            $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-
-            if (-not $certificate) {
-                throw 'Failed to import the Windows signing certificate from AURATERM_WINDOWS_PFX_PATH.'
-            }
-
-            $env:AURATERM_WINDOWS_CERT_THUMBPRINT = $certificate.Thumbprint
-            Write-Host "Imported Windows signing certificate: $($certificate.Thumbprint)"
-        }
-        else {
-            Write-Host 'No signing certificate configured. Build will continue unsigned.'
-        }
-    }
-
-    if ($env:AURATERM_WINDOWS_CERT_THUMBPRINT) {
-        $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
-        if (-not $signtool) {
-            throw 'signtool.exe was not found in PATH. Install the Windows SDK signing tools or add signtool.exe to PATH.'
-        }
+    $selectedModes = @($Store, $Msix, $MsixUpload) | Where-Object { $_ }
+    if ($selectedModes.Count -gt 1) {
+        throw 'Choose only one Windows packaging mode at a time: standard, -Store, -Msix, or -MsixUpload.'
     }
 
     if ($Store) {
         Write-Host 'Building Microsoft Store Windows package...'
         npm run tauri:store
+    }
+    elseif ($MsixUpload) {
+        Write-Host 'Building MSIX upload package...'
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-msix.ps1 -MsixUpload
+    }
+    elseif ($Msix) {
+        Write-Host 'Building MSIX package...'
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-msix.ps1
     }
     else {
         Write-Host 'Building standard Windows package...'

@@ -80,39 +80,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Configure Windows signing environment
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        env:
-          AURATERM_WINDOWS_PFX_BASE64: ${{ secrets.AURATERM_WINDOWS_PFX_BASE64 }}
-          AURATERM_WINDOWS_PFX_PASSWORD: ${{ secrets.AURATERM_WINDOWS_PFX_PASSWORD }}
-          AURATERM_WINDOWS_DIGEST_ALGORITHM: ${{ secrets.AURATERM_WINDOWS_DIGEST_ALGORITHM }}
-          AURATERM_WINDOWS_TIMESTAMP_URL: ${{ secrets.AURATERM_WINDOWS_TIMESTAMP_URL }}
-        run: |
-          $algorithm = if ($env:AURATERM_WINDOWS_DIGEST_ALGORITHM) { $env:AURATERM_WINDOWS_DIGEST_ALGORITHM } else { 'sha256' }
-          $timestampUrl = if ($env:AURATERM_WINDOWS_TIMESTAMP_URL) { $env:AURATERM_WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
-          "AURATERM_WINDOWS_DIGEST_ALGORITHM=$algorithm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "AURATERM_WINDOWS_TIMESTAMP_URL=$timestampUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          if ($env:AURATERM_WINDOWS_PFX_BASE64 -and $env:AURATERM_WINDOWS_PFX_PASSWORD) {
-            New-Item -ItemType Directory -Force -Path certificate | Out-Null
-            Set-Content -Path certificate/tempCert.txt -Value $env:AURATERM_WINDOWS_PFX_BASE64
-            certutil -decode certificate/tempCert.txt certificate/certificate.pfx | Out-Null
-            $password = ConvertTo-SecureString -String $env:AURATERM_WINDOWS_PFX_PASSWORD -Force -AsPlainText
-            $certificate = Import-PfxCertificate -FilePath certificate/certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
-
-            if (-not $certificate) {
-              throw 'Failed to import the Windows signing certificate in GitHub Actions.'
-            }
-
-            "AURATERM_WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            Remove-Item certificate -Recurse -Force
-            Write-Host 'Windows signing certificate imported successfully.'
-          }
-          else {
-            Write-Host 'Windows signing certificate secrets are not set. Windows release build will remain unsigned.'
-          }
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -124,6 +91,36 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      - name: Build MSIX artifacts
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        env:
+          AURATERM_MSIX_PACKAGE_NAME: ${{ vars.AURATERM_MSIX_PACKAGE_NAME }}
+          AURATERM_MSIX_PUBLISHER: ${{ vars.AURATERM_MSIX_PUBLISHER }}
+          AURATERM_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.AURATERM_MSIX_PUBLISHER_DISPLAY_NAME }}
+          AURATERM_MSIX_DISPLAY_NAME: ${{ vars.AURATERM_MSIX_DISPLAY_NAME }}
+          AURATERM_MSIX_DESCRIPTION: ${{ vars.AURATERM_MSIX_DESCRIPTION }}
+          AURATERM_MSIX_MIN_VERSION: ${{ vars.AURATERM_MSIX_MIN_VERSION }}
+          AURATERM_MSIX_MAX_VERSION_TESTED: ${{ vars.AURATERM_MSIX_MAX_VERSION_TESTED }}
+        run: |
+          .\scripts\package-msix.ps1 -SkipBuild -MsixUpload -Target '${{ matrix.target }}'
+
+      - name: Upload MSIX release assets
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $assets = Get-ChildItem -Path src-tauri/target/release/bundle/msix -File |
+            Where-Object { $_.Extension -in '.msix', '.msixupload', '.appxsym' }
+
+          if (-not $assets) {
+            throw 'No MSIX artifacts were generated for the Windows release build.'
+          }
+
+          $assetPaths = $assets | ForEach-Object { $_.FullName }
+          gh release upload ${{ github.ref_name }} $assetPaths --clobber
 
   publish-release:
     name: Publish Release

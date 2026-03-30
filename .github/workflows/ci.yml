@@ -75,3 +75,27 @@ jobs:
 
       - name: Build Tauri app
         run: npm run tauri build -- --target ${{ matrix.target }}
+
+      - name: Build MSIX artifacts
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        env:
+          AURATERM_MSIX_PACKAGE_NAME: ${{ vars.AURATERM_MSIX_PACKAGE_NAME }}
+          AURATERM_MSIX_PUBLISHER: ${{ vars.AURATERM_MSIX_PUBLISHER }}
+          AURATERM_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.AURATERM_MSIX_PUBLISHER_DISPLAY_NAME }}
+          AURATERM_MSIX_DISPLAY_NAME: ${{ vars.AURATERM_MSIX_DISPLAY_NAME }}
+          AURATERM_MSIX_DESCRIPTION: ${{ vars.AURATERM_MSIX_DESCRIPTION }}
+          AURATERM_MSIX_MIN_VERSION: ${{ vars.AURATERM_MSIX_MIN_VERSION }}
+          AURATERM_MSIX_MAX_VERSION_TESTED: ${{ vars.AURATERM_MSIX_MAX_VERSION_TESTED }}
+        run: |
+          .\scripts\package-msix.ps1 -SkipBuild -MsixUpload -Target '${{ matrix.target }}'
+
+      - name: Upload MSIX artifacts
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msix-${{ matrix.target }}
+          path: |
+            src-tauri/target/release/bundle/msix/*.msix
+            src-tauri/target/release/bundle/msix/*.msixupload
+            src-tauri/target/release/bundle/msix/*.appxsym
