@@ -84,6 +84,13 @@ npm run tauri build
 
 Build artifacts will be located in `src-tauri/target/release/bundle/`.
 
+Windows release variants:
+
+- Standard Windows installer: `npm run tauri build`
+- Microsoft Store Windows installer: `npm run tauri:store`
+
+Detailed Windows release and signing instructions are documented in [docs/Windows-Release.md](docs/Windows-Release.md).
+
 ---
 
 ## 📄 License

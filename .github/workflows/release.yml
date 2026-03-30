@@ -80,6 +80,39 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Configure Windows signing environment
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        env:
+          AURATERM_WINDOWS_PFX_BASE64: ${{ secrets.AURATERM_WINDOWS_PFX_BASE64 }}
+          AURATERM_WINDOWS_PFX_PASSWORD: ${{ secrets.AURATERM_WINDOWS_PFX_PASSWORD }}
+          AURATERM_WINDOWS_DIGEST_ALGORITHM: ${{ secrets.AURATERM_WINDOWS_DIGEST_ALGORITHM }}
+          AURATERM_WINDOWS_TIMESTAMP_URL: ${{ secrets.AURATERM_WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $algorithm = if ($env:AURATERM_WINDOWS_DIGEST_ALGORITHM) { $env:AURATERM_WINDOWS_DIGEST_ALGORITHM } else { 'sha256' }
+          $timestampUrl = if ($env:AURATERM_WINDOWS_TIMESTAMP_URL) { $env:AURATERM_WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+          "AURATERM_WINDOWS_DIGEST_ALGORITHM=$algorithm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AURATERM_WINDOWS_TIMESTAMP_URL=$timestampUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          if ($env:AURATERM_WINDOWS_PFX_BASE64 -and $env:AURATERM_WINDOWS_PFX_PASSWORD) {
+            New-Item -ItemType Directory -Force -Path certificate | Out-Null
+            Set-Content -Path certificate/tempCert.txt -Value $env:AURATERM_WINDOWS_PFX_BASE64
+            certutil -decode certificate/tempCert.txt certificate/certificate.pfx | Out-Null
+            $password = ConvertTo-SecureString -String $env:AURATERM_WINDOWS_PFX_PASSWORD -Force -AsPlainText
+            $certificate = Import-PfxCertificate -FilePath certificate/certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+
+            if (-not $certificate) {
+              throw 'Failed to import the Windows signing certificate in GitHub Actions.'
+            }
+
+            "AURATERM_WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Remove-Item certificate -Recurse -Force
+            Write-Host 'Windows signing certificate imported successfully.'
+          }
+          else {
+            Write-Host 'Windows signing certificate secrets are not set. Windows release build will remain unsigned.'
+          }
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
