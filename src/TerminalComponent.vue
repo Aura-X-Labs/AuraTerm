@@ -2,21 +2,18 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
+import { useTerminalSearch } from "./composables/useTerminalSearch";
+import { useTerminalSessionCommands } from "./composables/useTerminalSessionCommands";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
-import { isReconnectEnabled, normalizeReconnectType } from "./types";
 import type {
-  ReconnectType,
-  SavedConnection,
   SerialConnectionState,
   SessionConfig,
   SshConfig,
   TerminalHandle,
-  TerminalSearchOptions,
   TerminalSearchResults,
 } from "./types";
 import "@xterm/xterm/css/xterm.css";
@@ -54,18 +51,6 @@ interface ReconnectSessionPromptState {
   tool: string;
   sessions: string[];
 }
-
-// Only highlight the active (currently navigated) match.
-// We do NOT highlight all matches because xterm-addon-search's
-// _highlightAllMatches() does a full synchronous buffer scan and
-// creates up to highlightLimit decoration DOM objects — this freezes
-// WebKit (Tauri/macOS) when there are many matches.
-const SEARCH_DECORATIONS = {
-  matchOverviewRuler: "transparent",   // required field, unused (highlightLimit:0)
-  activeMatchBackground: "#FFB347",
-  activeMatchBorder: "#FFD38A",
-  activeMatchColorOverviewRuler: "#FFB347",
-};
 
 const props = defineProps<{
   sessionId: string;
@@ -149,45 +134,6 @@ function buildTerminalTheme(settings: AppSettings) {
   return { ...settings.theme };
 }
 
-
-function writeSessionInput(id: string, data: string, session: SessionConfig) {
-  switch (session.protocol) {
-    case "ssh":
-      return invoke("write_ssh_pty_input", { id, data });
-    case "telnet":
-      return invoke("write_telnet_input", { id, data });
-    case "serial":
-      return invoke("write_serial_input", { id, data });
-    case "local":
-      return invoke("write_pty_input", { id, data });
-  }
-}
-
-function resizeSession(id: string, cols: number, rows: number, session: SessionConfig) {
-  switch (session.protocol) {
-    case "ssh":
-      return invoke("resize_ssh_pty", { id, cols, rows });
-    case "local":
-      return invoke("resize_pty", { id, cols, rows });
-    case "telnet":
-    case "serial":
-      return Promise.resolve();
-  }
-}
-
-function closeSession(id: string, session: SessionConfig) {
-  switch (session.protocol) {
-    case "ssh":
-      return invoke("close_ssh_pty", { id });
-    case "telnet":
-      return invoke("close_telnet_session", { id });
-    case "serial":
-      return invoke("close_serial_session", { id });
-    case "local":
-      return invoke("close_pty", { id });
-  }
-}
-
 const effectiveSettings = computed(() => props.settings ?? DEFAULT_SETTINGS);
 const settingsRef = ref<AppSettings>(effectiveSettings.value);
 const terminalRootRef = ref<HTMLDivElement | null>(null);
@@ -209,6 +155,8 @@ const manualReconnectPending = ref(false);
 const activeSshConfig = computed(() => (
   activeSession.value.protocol === "ssh" ? activeSession.value.sshConfig : undefined
 ));
+const terminalRef = ref<Terminal | null>(null);
+const searchAddonRef = ref<SearchAddon | null>(null);
 
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
@@ -217,68 +165,38 @@ let terminalCleanup: (() => void) | null = null;
 let stopSessionWatch: (() => void) | null = null;
 let pendingInputBuffer = "";
 let pendingInputTimer: number | null = null;
-const activeSearchQuery = ref("");
 
-function emitSearchResults(results: TerminalSearchResults) {
-  emit("searchResultsChange", results);
-}
+const {
+  writeSessionInput,
+  resizeSession,
+  closeSession,
+  getSshReconnectType,
+  startSshSession,
+  startTelnetSession,
+  startSerialSession,
+  startLocalSession,
+  persistUpdatedSshPassword,
+  saveTerminalLog,
+  appendToLog,
+  answerSshMfa,
+  answerSshReconnectChoice,
+} = useTerminalSessionCommands({
+  onSshPasswordUpdated: () => {
+    emit("sshPasswordUpdated");
+  },
+});
 
-function clearSearch() {
-  activeSearchQuery.value = "";
-  searchAddon?.clearDecorations();
-  emitSearchResults({
-    query: "",
-    resultIndex: -1,
-    resultCount: 0,
-    limitExceeded: false,
-  });
-}
-
-function clearSearchActiveDecoration() {
-  searchAddon?.clearActiveDecoration();
-}
-
-function runSearch(direction: "next" | "previous", term: string, options: TerminalSearchOptions = {}) {
-  if (!searchAddon || !terminal) {
-    return false;
-  }
-
-  activeSearchQuery.value = term;
-  if (!term) {
-    clearSearch();
-    return false;
-  }
-
-  const searchOptions: ISearchOptions = {
-    caseSensitive: options.caseSensitive,
-    wholeWord: options.wholeWord,
-    regex: options.regex,
-    incremental: direction === "next" ? options.incremental : false,
-    decorations: SEARCH_DECORATIONS,
-  };
-
-  try {
-    const matched = direction === "previous"
-      ? searchAddon.findPrevious(term, searchOptions)
-      : searchAddon.findNext(term, searchOptions);
-
-    // Emit result directly from the boolean return value.
-    // We no longer use onDidChangeResults because it requires _highlightAllMatches
-    // to count all matches, which is the source of the synchronous freeze.
-    emitSearchResults({
-      query: term,
-      resultIndex: matched ? 0 : -1,
-      resultCount: matched ? 1 : 0,
-      limitExceeded: false,
-    });
-
-    return matched;
-  } catch (e) {
-    console.warn("Search failed (possibly invalid regex):", e);
-    emitSearchResults({ query: term, resultIndex: -1, resultCount: 0, limitExceeded: false });
-    return false;
-  }
-}
+const {
+  clearSearch,
+  clearSearchActiveDecoration,
+  runSearch,
+} = useTerminalSearch({
+  terminal: terminalRef,
+  searchAddon: searchAddonRef,
+  onResultsChange: (results) => {
+    emit("searchResultsChange", results);
+  },
+});
 
 function clearPendingInputFlush() {
   if (pendingInputTimer !== null) {
@@ -378,36 +296,9 @@ function notifySerialConnectionStateChange(state: SerialConnectionState) {
   }
 }
 
-async function persistUpdatedSshPassword(sshConfig: SshConfig) {
-  if (!sshConfig.savedConnectionId) {
-    return;
-  }
-
-  try {
-    const connections = await invoke<SavedConnection[]>("get_connections");
-    const existing = connections.find((connection) => connection.id === sshConfig.savedConnectionId);
-    if (!existing) {
-      return;
-    }
-
-    await invoke("save_connection", {
-      connection: {
-        ...existing,
-        password: sshConfig.password,
-      },
-    });
-    emit("sshPasswordUpdated");
-  } catch (error) {
-    console.error("Failed to persist updated SSH password", error);
-  }
-}
-
 async function saveLog(tabTitle: string) {
   const plain = stripAnsi(logBuffer.value);
-  return invoke<string>("save_terminal_log", {
-    content: plain,
-    tabName: tabTitle,
-  });
+  return saveTerminalLog(plain, tabTitle);
 }
 
 function sendData(text: string) {
@@ -426,34 +317,6 @@ function focus() {
   terminal?.focus();
 }
 
-function getSshReconnectType(sshConfig: SshConfig): ReconnectType {
-  return normalizeReconnectType(sshConfig);
-}
-
-async function startSshSession(sessionId: string, sshConfig: SshConfig) {
-  if (!terminal) {
-    return;
-  }
-
-  const reconnectType = getSshReconnectType(sshConfig);
-  const cols = terminal.cols ?? 80;
-  const rows = terminal.rows ?? 24;
-
-  ptyId.value = sessionId;
-  await invoke("start_ssh_pty", {
-    id: sessionId,
-    host: sshConfig.host,
-    port: sshConfig.port,
-    user: sshConfig.user,
-    password: sshConfig.password ?? null,
-    privateKey: sshConfig.privateKey ?? null,
-    cols,
-    rows,
-    autoReconnect: isReconnectEnabled(reconnectType),
-    reconnectType,
-  });
-}
-
 async function reconnectSshSession() {
   if (activeSessionRef.value.protocol !== "ssh" || !terminal) {
     return;
@@ -463,7 +326,12 @@ async function reconnectSshSession() {
   terminal.writeln("\r\n[Reconnecting...]");
 
   try {
-    await startSshSession(props.sessionId, activeSessionRef.value.sshConfig);
+    await startSshSession(
+      props.sessionId,
+      activeSessionRef.value.sshConfig,
+      terminal.cols ?? 80,
+      terminal.rows ?? 24,
+    );
   } catch (error) {
     const errorText = String(error);
     ptyId.value = null;
@@ -515,9 +383,10 @@ onMounted(() => {
   fitAddon = new FitAddon();
   // highlightLimit:0 means _highlightAllMatches() exits immediately (0 >= 0 → break).
   // This eliminates the O(n_matches) buffer scan + decoration-object creation that
-  // froze WebKit. The active match is still highlighted via _selectResult() using
-  // the activeMatch* colors in SEARCH_DECORATIONS.
+  // froze WebKit while still allowing the active match highlight.
   searchAddon = new SearchAddon({ highlightLimit: 0 });
+  terminalRef.value = terminal;
+  searchAddonRef.value = searchAddon;
   const unicode11Addon = new Unicode11Addon();
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(searchAddon);
@@ -666,8 +535,10 @@ onMounted(() => {
     }
     terminal?.dispose();
     terminal = null;
+    terminalRef.value = null;
     fitAddon = null;
     searchAddon = null;
+    searchAddonRef.value = null;
   };
 
   const sessionKey = computed(() => {
@@ -743,10 +614,7 @@ onMounted(() => {
         logBuffer.value += event.payload.data;
         if (actualLogPath.value) {
           const plain = stripAnsi(event.payload.data);
-          void invoke("append_to_log", {
-            path: actualLogPath.value,
-            content: plain,
-          }).catch((error) => {
+          void appendToLog(actualLogPath.value, plain).catch((error) => {
             console.error("append_to_log failed", error);
           });
         }
@@ -829,35 +697,23 @@ onMounted(() => {
             const reconnectType = getSshReconnectType(session.sshConfig);
             terminal.writeln(`Connecting to ${session.sshConfig.user}@${session.sshConfig.host}:${session.sshConfig.port}...`);
             terminal.writeln(`\x1b[33m[Reconnect mode: ${reconnectType}]\x1b[0m`);
-            await startSshSession(newId, session.sshConfig);
+            await startSshSession(newId, session.sshConfig, cols, rows);
             break;
           case "telnet":
             terminal.writeln(`Connecting to telnet://${session.telnetConfig.host}:${session.telnetConfig.port}...`);
-            await invoke("start_telnet_session", {
-              id: newId,
-              host: session.telnetConfig.host,
-              port: session.telnetConfig.port,
-            });
+            await startTelnetSession(newId, session.telnetConfig.host, session.telnetConfig.port);
             terminal.writeln("\r\n[Connected]");
             break;
           case "serial":
             notifySerialConnectionStateChange("connecting");
             terminal.writeln(`Opening serial port ${session.serialConfig.portName} @ ${session.serialConfig.baudRate}...`);
-            await invoke("start_serial_session", {
-              id: newId,
-              portName: session.serialConfig.portName,
-              baudRate: session.serialConfig.baudRate,
-              dataBits: session.serialConfig.dataBits,
-              stopBits: session.serialConfig.stopBits,
-              parity: session.serialConfig.parity,
-              flowControl: session.serialConfig.flowControl,
-            });
+            await startSerialSession(newId, session.serialConfig);
             break;
           case "local":
             terminal.writeln("Starting local shell PTY...");
             // Use session cwd, or fall back to startup directory from command line
             const cwd = session.cwd ?? window.getStartupDir?.() ?? undefined;
-            await invoke("start_pty", { id: newId, cols, rows, cwd });
+            await startLocalSession(newId, cols, rows, cwd);
             break;
         }
       } catch (error) {
@@ -907,10 +763,7 @@ function handleMfaSubmit(event: Event) {
   if (!mfaEvent.value || !ptyId.value) {
     return;
   }
-  void invoke("answer_ssh_mfa", {
-    id: ptyId.value,
-    responses: mfaResponses.value,
-  });
+  void answerSshMfa(ptyId.value, mfaResponses.value);
   showMfaOverlay.value = false;
 }
 
@@ -926,10 +779,10 @@ function inputValue(event: Event) {
 
 function handleCancelMfa() {
   showMfaOverlay.value = false;
-  void invoke("answer_ssh_mfa", {
-    id: ptyId.value,
-    responses: mfaEvent.value?.prompts.map(() => "") ?? [],
-  });
+  if (!ptyId.value) {
+    return;
+  }
+  void answerSshMfa(ptyId.value, mfaEvent.value?.prompts.map(() => "") ?? []);
 }
 
 function submitReconnectChoice(sessionName: string | null) {
@@ -941,10 +794,7 @@ function submitReconnectChoice(sessionName: string | null) {
     return;
   }
 
-  void invoke("answer_ssh_reconnect_choice", {
-    id: prompt.id,
-    sessionName,
-  }).catch((error) => {
+  void answerSshReconnectChoice(prompt.id, sessionName).catch((error) => {
     console.error("Failed to answer reconnect session prompt", error);
   });
 }

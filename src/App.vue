@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type as getOsType } from "@tauri-apps/plugin-os";
@@ -12,6 +11,8 @@ import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
 import RemoteFileManager from "./RemoteFileManager.vue";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
+import { useAppEventListeners } from "./composables/useAppEventListeners";
+import { useWorkspacePersistence } from "./composables/useWorkspacePersistence";
 import {
   DEFAULT_SETTINGS,
   deriveUiTheme,
@@ -238,8 +239,40 @@ const cleanupFns: Array<() => void> = [];
 let paneResizeObserver: ResizeObserver | null = null;
 let pendingFitFrame: number | null = null;
 const pendingFitTabIds = new Set<string>();
-let persistWorkspaceStateTimer: number | null = null;
 const hasLoadedSettings = ref(false);
+
+const {
+  prepareSettingsForSave,
+  persistSettingsSilently,
+  scheduleWorkspaceStatePersistence,
+  clearScheduledWorkspacePersistence,
+} = useWorkspacePersistence({
+  settings,
+  settingsRef,
+  hasLoadedSettings,
+  createPersistedPaneLayoutState,
+  createPersistedWorkspaceState,
+});
+
+const { registerAppEventListeners } = useAppEventListeners({
+  setWindowFocused: (focused) => {
+    isWindowFocused.value = focused;
+  },
+  focusActiveTerminal,
+  syncFullscreenState,
+  handleOpenAbout,
+  handleOpenSettings,
+  handleNewLocalSessionFromMenu,
+  handleOpenConnectionFromMenu,
+  handleCloseActiveTab,
+  handleToggleBookmarks,
+  handleToggleRemoteFileManager,
+  handleSplitPaneFromView,
+  handleClosePaneFromView,
+  handleIncreaseTerminalFontSize,
+  handleDecreaseTerminalFontSize,
+  handleResetTerminalFontSize,
+});
 
 function createDefaultLocalShellTab(tabId = "tab-0"): Tab {
   return {
@@ -258,36 +291,6 @@ function syncTabIdCounter(sourceTabs: Array<{ id: string }>) {
   }
 
   nextTabId = Math.max(nextTabId, maxTabIndex + 1);
-}
-
-function prepareSettingsForSave(baseSettings: AppSettings, restoreEnabled = baseSettings.restoreTabsOnStartup) {
-  return normalizeAppSettings({
-    ...baseSettings,
-    paneLayout: createPersistedPaneLayoutState(),
-    workspaceState: createPersistedWorkspaceState(restoreEnabled),
-  });
-}
-
-function scheduleWorkspaceStatePersistence() {
-  if (!hasLoadedSettings.value) {
-    return;
-  }
-
-  if (persistWorkspaceStateTimer !== null) {
-    window.clearTimeout(persistWorkspaceStateTimer);
-  }
-  persistWorkspaceStateTimer = window.setTimeout(() => {
-    persistWorkspaceStateTimer = null;
-    const nextSettings = prepareSettingsForSave(settingsRef.value);
-    if (
-      JSON.stringify(settingsRef.value.paneLayout) === JSON.stringify(nextSettings.paneLayout)
-      && JSON.stringify(settingsRef.value.workspaceState) === JSON.stringify(nextSettings.workspaceState)
-    ) {
-      return;
-    }
-
-    persistSettingsSilently(nextSettings);
-  }, 240);
 }
 
 function updateTabSession(tabId: string, session: SessionConfig) {
@@ -470,25 +473,6 @@ onMounted(async () => {
   }
 
   try {
-    cleanupFns.push(await listen("tauri://focus", () => {
-      isWindowFocused.value = true;
-      // Focus the active terminal when the window regains focus
-      const handle = termRefs.get(activeTabId.value);
-      if (handle) {
-        handle.focus();
-      }
-    }));
-    cleanupFns.push(await listen("tauri://blur", () => {
-      isWindowFocused.value = false;
-    }));
-    cleanupFns.push(await listen("tauri://resize", () => {
-      void syncFullscreenState();
-    }));
-  } catch (error) {
-    console.error("Failed to setup window focus listeners:", error);
-  }
-
-  try {
     osType.value = await getOsType();
   } catch (error) {
     console.error("Failed to detect OS:", error);
@@ -525,60 +509,7 @@ onMounted(async () => {
 
   hasLoadedSettings.value = true;
 
-  try {
-    cleanupFns.push(await listen("show-about", () => {
-      showAbout.value = true;
-    }));
-  } catch (error) {
-    console.error("Failed to setup about listener:", error);
-  }
-
-  try {
-    cleanupFns.push(await listen("menu-open-settings", () => {
-      handleOpenSettings();
-    }));
-    cleanupFns.push(await listen("menu-new-local", () => {
-      handleNewLocalSessionFromMenu();
-    }));
-    cleanupFns.push(await listen("menu-new-ssh", () => {
-      handleOpenConnectionFromMenu("ssh");
-    }));
-    cleanupFns.push(await listen("menu-new-telnet", () => {
-      handleOpenConnectionFromMenu("telnet");
-    }));
-    cleanupFns.push(await listen("menu-new-serial", () => {
-      handleOpenConnectionFromMenu("serial");
-    }));
-    cleanupFns.push(await listen("menu-close-tab", () => {
-      handleCloseActiveTab();
-    }));
-    cleanupFns.push(await listen("menu-toggle-bookmarks", () => {
-      handleToggleBookmarks();
-    }));
-    cleanupFns.push(await listen("menu-toggle-remote-files", () => {
-      handleToggleRemoteFileManager();
-    }));
-    cleanupFns.push(await listen("menu-split-right", () => {
-      handleSplitPaneFromView("vertical");
-    }));
-    cleanupFns.push(await listen("menu-split-down", () => {
-      handleSplitPaneFromView("horizontal");
-    }));
-    cleanupFns.push(await listen("menu-close-pane", () => {
-      handleClosePaneFromView();
-    }));
-    cleanupFns.push(await listen("menu-increase-font-size", () => {
-      handleIncreaseTerminalFontSize();
-    }));
-    cleanupFns.push(await listen("menu-decrease-font-size", () => {
-      handleDecreaseTerminalFontSize();
-    }));
-    cleanupFns.push(await listen("menu-reset-font-size", () => {
-      handleResetTerminalFontSize();
-    }));
-  } catch (error) {
-    console.error("Failed to setup menu listeners:", error);
-  }
+  cleanupFns.push(await registerAppEventListeners());
 
   window.addEventListener("keydown", handleGlobalKeyDown);
   cleanupFns.push(() => {
@@ -598,10 +529,7 @@ onBeforeUnmount(() => {
     });
   }
 
-  if (persistWorkspaceStateTimer !== null) {
-    window.clearTimeout(persistWorkspaceStateTimer);
-    persistWorkspaceStateTimer = null;
-  }
+  clearScheduledWorkspacePersistence();
   if (pendingFitFrame !== null) {
     window.cancelAnimationFrame(pendingFitFrame);
     pendingFitFrame = null;
@@ -872,15 +800,6 @@ async function handleSaveSettings(newSettings: AppSettings) {
   settingsRef.value = normalizedSettings;
   settings.value = normalizedSettings;
   showSettings.value = false;
-}
-
-function persistSettingsSilently(newSettings: AppSettings) {
-  const normalizedSettings = prepareSettingsForSave(newSettings, newSettings.restoreTabsOnStartup);
-  settingsRef.value = normalizedSettings;
-  settings.value = normalizedSettings;
-  void invoke("save_settings", { settings: normalizedSettings }).catch((error) => {
-    console.error("save_settings failed", error);
-  });
 }
 
 function rememberSerialConfig(serialConfig: SerialConfig) {
