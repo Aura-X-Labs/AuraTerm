@@ -1,6 +1,6 @@
 # Windows Release Guide
 
-This document describes how AuraTerm packages the standard Windows installer and the Microsoft Store installer, and how Windows signing is applied.
+This document describes how AuraTerm packages the standard Windows installer, the Microsoft Store installer, and the MSIX/MSIXUPLOAD artifacts used for Partner Center uploads.
 
 ## Build Variants
 
@@ -37,83 +37,116 @@ The Store build uses [src-tauri/tauri.microsoftstore.conf.json](../src-tauri/tau
 
 The offline WebView2 installer is required for Microsoft Store distribution.
 
+### MSIX Package Build
+
+Use the dedicated MSIX packaging script:
+
+```powershell
+npm run package:msix
+```
+
+This command:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-msix.ps1
+```
+
+It builds the unpackaged Windows binary if needed, stages a desktop-app `AppxManifest.xml`, generates logo assets from `src-tauri/icons/icon.png`, and then runs `makeappx.exe` to produce a standalone `.msix` file.
+
+The generated MSIX is intentionally unsigned. For Store submission, Microsoft applies the production signature during ingestion.
+
+Output files are written to `src-tauri/target/release/bundle/msix/`.
+
+### MSIX Upload Build
+
+To produce a Store-uploadable `.msixupload` file, run:
+
+```powershell
+npm run package:msixupload
+```
+
+This wraps the generated `.msix` together with an optional `.appxsym` symbol archive into a `.msixupload` file, which is the format Microsoft recommends for Partner Center uploads.
+
+Local wrapper commands are also available:
+
+```powershell
+npm run release:windows:msix
+npm run release:windows:msixupload
+```
+
 ## Signing Behavior
 
-Windows signing is configured in [src-tauri/tauri.conf.json](../src-tauri/tauri.conf.json) via `bundle.windows.signCommand`.
+The repository no longer depends on a local Windows signing certificate for MSIX packaging.
 
 Behavior:
 
-- If `AURATERM_WINDOWS_CERT_THUMBPRINT` is set, Tauri signs Windows bundles with `signtool.exe`
-- If `AURATERM_WINDOWS_CERT_THUMBPRINT` is not set, signing is skipped and the build remains unsigned
-- `AURATERM_WINDOWS_DIGEST_ALGORITHM` defaults to `sha256` when unset
-- `AURATERM_WINDOWS_TIMESTAMP_URL` is optional but strongly recommended
+- `npm run package:msix` and `npm run package:msixupload` produce unsigned artifacts for Partner Center upload
+- GitHub CI and GitHub release builds also produce unsigned MSIX artifacts
+- Microsoft Store signs the uploaded package during the Store ingestion flow
+- Standard Tauri Windows bundles are also produced unsigned unless you add signing back later
 
 Required tools:
 
-- A valid Windows code signing certificate already imported into `Cert:\CurrentUser\My`
-- `signtool.exe` available in `PATH`
+- `makeappx.exe` from the Windows SDK for MSIX packaging
 
 ## Environment Variables
-
-Set these in PowerShell before building signed Windows packages:
-
-```powershell
-$env:AURATERM_WINDOWS_CERT_THUMBPRINT = "YOUR_CERT_THUMBPRINT"
-$env:AURATERM_WINDOWS_DIGEST_ALGORITHM = "sha256"
-$env:AURATERM_WINDOWS_TIMESTAMP_URL = "http://timestamp.digicert.com"
-```
-
-If you prefer importing a `.pfx` file automatically for local releases, set these instead:
-
-```powershell
-$env:AURATERM_WINDOWS_PFX_PATH = "C:\path\to\certificate.pfx"
-$env:AURATERM_WINDOWS_PFX_PASSWORD = "YOUR_PFX_PASSWORD"
-```
 
 Then run one of the packaging commands:
 
 ```powershell
 npm run tauri build
 npm run tauri:store
+npm run package:msix
+npm run package:msixupload
 ```
 
-Or use the local Windows release wrappers, which reuse the same signing environment variables and import the `.pfx` automatically when needed:
+Or use the local Windows release wrappers:
 
 ```powershell
 npm run release:windows
 npm run release:windows:store
+npm run release:windows:msix
+npm run release:windows:msixupload
 ```
+
+## MSIX Identity Variables
+
+The MSIX packaging script now defaults to the Product Identity in [docs/Product-Identity.md](../docs/Product-Identity.md):
+
+- `Package/Identity/Name = AuraXLabs.AuraTerm`
+- `Package/Identity/Publisher = CN=671C654E-E6B4-48F6-9D75-058B100AA46A`
+- `Package/Properties/PublisherDisplayName = Aura X Labs`
+
+You can still override these values in CI or locally if needed:
+
+- `AURATERM_MSIX_PACKAGE_NAME`: Package `Identity Name`; set this to the exact reserved package identity name in Partner Center
+- `AURATERM_MSIX_PUBLISHER`: Package `Identity Publisher`; for Store uploads this should match the reserved Store identity
+- `AURATERM_MSIX_PUBLISHER_DISPLAY_NAME`: Store-facing publisher display name
+- `AURATERM_MSIX_DISPLAY_NAME`: Store-facing app display name
+- `AURATERM_MSIX_DESCRIPTION`: Manifest description
+- `AURATERM_MSIX_VERSION`: Optional dot-quad override such as `0.2.5.0`
+- `AURATERM_MSIX_MIN_VERSION`: Default `10.0.19041.0`
+- `AURATERM_MSIX_MAX_VERSION_TESTED`: Default `10.0.26100.0`
+
+In the normal Store flow you should not need any extra signing variables.
 
 ## GitHub Actions
 
-The release workflow imports the Windows certificate and maps it into the same runtime variables used locally.
+Configure these repository variables for both [ci.yml](../.github/workflows/ci.yml) and [release.yml](../.github/workflows/release.yml) when publishing Store-ready MSIX artifacts:
 
-Configure these repository secrets for [release.yml](../.github/workflows/release.yml):
+- `AURATERM_MSIX_PACKAGE_NAME`
+- `AURATERM_MSIX_PUBLISHER`
+- `AURATERM_MSIX_PUBLISHER_DISPLAY_NAME`
+- `AURATERM_MSIX_DISPLAY_NAME`
+- `AURATERM_MSIX_DESCRIPTION`
+- `AURATERM_MSIX_MIN_VERSION`
+- `AURATERM_MSIX_MAX_VERSION_TESTED`
 
-- `AURATERM_WINDOWS_PFX_BASE64`: Base64-encoded `.pfx` certificate content
-- `AURATERM_WINDOWS_PFX_PASSWORD`: Password for the `.pfx` file
-- `AURATERM_WINDOWS_DIGEST_ALGORITHM`: Optional, defaults to `sha256`
-- `AURATERM_WINDOWS_TIMESTAMP_URL`: Optional, defaults to `http://timestamp.digicert.com`
-
-At workflow runtime, the Windows job imports the certificate into `Cert:\CurrentUser\My`, extracts the thumbprint, and sets:
-
-- `AURATERM_WINDOWS_CERT_THUMBPRINT`
-- `AURATERM_WINDOWS_DIGEST_ALGORITHM`
-- `AURATERM_WINDOWS_TIMESTAMP_URL`
-
-## Certificate Import Example
-
-If you already have a `.pfx` certificate file, you can import it into the current user certificate store:
-
-```powershell
-$password = ConvertTo-SecureString -String "YOUR_PFX_PASSWORD" -Force -AsPlainText
-Import-PfxCertificate -FilePath .\certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
-```
-
-After import, open `certmgr.msc`, locate the certificate under `Personal > Certificates`, and copy its thumbprint.
+The CI workflow now also uploads `*.msix`, `*.msixupload`, and `*.appxsym` as Windows workflow artifacts. The tag-based release workflow builds the same files and attaches them to the GitHub release draft.
 
 ## Notes
 
-- Microsoft Store submission requires signed installers
+- Microsoft Store submission does not require you to locally sign the uploaded MSIX when the Store is responsible for final signing
+- MSIX packages for desktop apps require the `runFullTrust` restricted capability, so Partner Center will ask you to justify that during review
 - Standard Windows releases can be built unsigned, but users may see SmartScreen warnings
-- If your certificate provider requires a different timestamp flow than RFC 3161 `/tr`, adjust `bundle.windows.signCommand` accordingly
+- The MSIX package does not run the NSIS hook that adds the Explorer context-menu entry, so that Windows integration remains specific to the NSIS installer

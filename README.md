@@ -88,6 +88,8 @@ Windows release variants:
 
 - Standard Windows installer: `npm run tauri build`
 - Microsoft Store Windows installer: `npm run tauri:store`
+- MSIX package: `npm run package:msix`
+- Store upload bundle: `npm run package:msixupload`
 
 Detailed Windows release and signing instructions are documented in [docs/Windows-Release.md](docs/Windows-Release.md).
 
