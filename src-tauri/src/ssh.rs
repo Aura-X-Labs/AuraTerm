@@ -212,16 +212,35 @@ fn shell_escape(value: &str) -> String {
 
 fn build_screen_attach_command(session_name: &str) -> String {
     let escaped_session_name = shell_escape(session_name);
+    let screen_term_candidates = [
+        "screen.xterm-256color",
+        "screen-256color",
+        "screen",
+        "xterm-256color",
+        "vt100",
+    ]
+    .iter()
+    .map(|candidate| shell_escape(candidate))
+    .collect::<Vec<_>>()
+    .join(" ");
     format!(
         concat!(
+            "screen_term=''; ",
+            "for candidate in {candidates}; do ",
+            "if infocmp \"$candidate\" >/dev/null 2>&1 || TERM=\"$candidate\" tput longname >/dev/null 2>&1; then ",
+            "screen_term=\"$candidate\"; break; ",
+            "fi; ",
+            "done; ",
+            "[ -n \"$screen_term\" ] || screen_term='vt100'; ",
             "tmp_rc=$(mktemp /tmp/auraterm-screenrc.XXXXXX 2>/dev/null || mktemp -t auraterm-screenrc.XXXXXX) || exit 1; ",
-            "printf '%s\\n%s\\n%s\\n' 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' 'escape ^Bb' > \"$tmp_rc\"; ",
-            "printf '\\033[32m[AuraTerm] Screen mode: wheel scroll and 10000 lines scrollback enabled. Escape key is Ctrl+B.\\033[0m\\n'; ",
-            "screen -S {sess} -X eval 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' 'escape ^Bb' >/dev/null 2>&1 || true; ",
-            "screen -dr {sess} 2>/dev/null || screen -c \"$tmp_rc\" -S {sess}; ",
+            "printf '%s\\n%s\\n%s\\n%s\\n' \"term $screen_term\" 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' 'escape ^Bb' > \"$tmp_rc\"; ",
+            "printf '\\033[32m[AuraTerm] Screen mode: TERM=%s, wheel scroll and 10000 lines scrollback enabled. Escape key is Ctrl+B.\\033[0m\\n' \"$screen_term\"; ",
+            "screen -S {sess} -X eval \"term $screen_term\" 'termcapinfo xterm* ti@:te@' 'defscrollback 10000' 'escape ^Bb' >/dev/null 2>&1 || true; ",
+            "screen -T \"$screen_term\" -dr {sess} 2>/dev/null || screen -c \"$tmp_rc\" -T \"$screen_term\" -S {sess}; ",
             "status=$?; rm -f \"$tmp_rc\"; exit $status"
         ),
         sess = escaped_session_name,
+        candidates = screen_term_candidates,
     )
 }
 
@@ -1999,5 +2018,25 @@ async fn write_interactive_input(
         Err(error) => InteractiveWriteOutcome::Dropped(format!(
             "SSH write failed: {error}; input dropped"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_screen_attach_command, shell_escape};
+
+    #[test]
+    fn shell_escape_handles_single_quotes() {
+        assert_eq!(shell_escape("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn build_screen_attach_command_prefers_known_screen_terms() {
+        let command = build_screen_attach_command("demo");
+
+        assert!(command.contains("screen.xterm-256color"));
+        assert!(command.contains("screen-256color"));
+        assert!(command.contains("screen -T \"$screen_term\" -dr"));
+        assert!(command.contains("\"term $screen_term\""));
     }
 }

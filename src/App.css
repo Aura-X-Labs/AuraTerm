@@ -386,7 +386,8 @@
   margin-top: 35px;
   min-width: 0;
   position: relative;
-  z-index: 2;
+  /* 需要高于 pane-resize-layer(4) 以确保下拉菜单不被终端遮挡 */
+  z-index: 20;
 }
 
 .tab-bar.no-titlebar {
@@ -403,13 +404,98 @@
   overflow-y: hidden;
 }
 
+/* ── Step 1: Tab 栏按钮区分组 ───────────────────────────────── */
 .tab-bar-actions {
   flex-shrink: 0;
   display: flex;
   align-items: stretch;
-  padding: 0;
+  padding: 0 2px;
+  gap: 1px;
   border-left: 1px solid var(--app-border);
   background: var(--app-tabbar-bg);
+}
+
+.tab-bar-action-group {
+  display: flex;
+  align-items: stretch;
+}
+
+.tab-bar-action-divider {
+  width: 1px;
+  margin: 6px 3px;
+  background: var(--app-border);
+  flex-shrink: 0;
+}
+
+/* Layout 下拉按钮宽度稍宽以容纳文字+箭头 */
+.tab-layout-btn {
+  width: auto !important;
+  padding: 0 8px !important;
+  gap: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* ── Step 3: Layout 下拉菜单 ────────────────────────────────── */
+.tab-layout-group {
+  position: relative;
+}
+
+.layout-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 160px;
+  padding: 5px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-menu-bg);
+  box-shadow: 0 10px 28px var(--app-shadow);
+  z-index: 100;
+}
+
+/* fixed 变体：脱离父容器 stacking context，不被终端层遮挡 */
+.layout-dropdown--fixed {
+  position: fixed;
+  z-index: 1200;
+  top: unset;
+  right: unset;
+}
+
+.layout-dropdown-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+  transition: background 0.12s;
+}
+
+.layout-dropdown-item:hover:not(:disabled) {
+  background: var(--app-menu-hover);
+}
+
+.layout-dropdown-item:disabled {
+  color: var(--app-text-dim);
+  cursor: not-allowed;
+}
+
+.layout-dropdown-separator {
+  height: 1px;
+  margin: 4px 4px;
+  background: var(--app-menu-separator);
+}
+
+.tab-layout-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
 }
 
 .tab-item {
@@ -469,6 +555,23 @@
 /* smooth slide animation when tabs reorder */
 .tab-sort-move {
   transition: transform 0.15s ease;
+}
+
+/* ── Step 4: Tab 在非焦点 pane 中可见的指示 ──────────────── */
+.tab-item.pane-visible {
+  border-bottom: 2px solid var(--app-accent-soft-strong);
+}
+
+.tab-pane-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  flex-shrink: 0;
+  margin: 0 2px 0 0;
+  opacity: 0.7;
+  vertical-align: middle;
 }
 
 .tab-title {
@@ -775,6 +878,30 @@
   z-index: 2;
 }
 
+/* pane-overlay-layer: 包含 header/empty pane 交互内容，必须高于 terminal-instance-layer */
+.pane-overlay-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.pane-overlay-shell {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+  /* 圆角裁切与 pane-frame 保持一致 */
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* overlay 层里的 header 和 empty pane 需要 pointer-events: auto */
+.pane-overlay-shell .terminal-pane-header,
+.pane-overlay-shell .terminal-pane-empty {
+  pointer-events: auto;
+}
+
 .pane-resize-layer {
   z-index: 4;
   pointer-events: none;
@@ -801,13 +928,36 @@
   background: var(--app-terminal-panel-alt);
 }
 
+/* ── Step 7: Pane Header slide-down 进入动画 ─────────────────── */
+.pane-header-slide-enter-active {
+  transition: max-height 0.18s ease-out, opacity 0.18s ease-out;
+  overflow: hidden;
+}
+
+.pane-header-slide-leave-active {
+  transition: max-height 0.15s ease-in, opacity 0.15s ease-in;
+  overflow: hidden;
+}
+
+.pane-header-slide-enter-from,
+.pane-header-slide-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+
+.pane-header-slide-enter-to,
+.pane-header-slide-leave-from {
+  max-height: 30px;
+  opacity: 1;
+}
+
 .terminal-pane-header {
   height: 25px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 0 8px 0 10px;
+  gap: 6px;
+  padding: 0 8px 0 6px;
   border-bottom: 1px solid var(--app-border);
   background: var(--app-terminal-gradient);
   pointer-events: auto;
@@ -817,6 +967,23 @@
 
 .terminal-pane-header:active {
   cursor: grabbing;
+}
+
+/* Step 2/7: 拖拽手柄 */
+.terminal-pane-drag-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 100%;
+  cursor: grab;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+
+.terminal-pane-header:hover .terminal-pane-drag-handle {
+  opacity: 1;
 }
 
 .terminal-pane-header-meta {
@@ -910,6 +1077,46 @@
   line-height: 1.45;
 }
 
+/* ── Step 5: 空 Pane 快捷操作按钮 ──────────────────────────── */
+.terminal-pane-empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.terminal-pane-empty-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface-2);
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.terminal-pane-empty-btn:hover {
+  background: var(--app-accent-soft);
+  border-color: var(--app-border-accent);
+  color: var(--app-accent);
+}
+
+.terminal-pane-empty-btn--danger {
+  border-color: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.terminal-pane-empty-btn--danger:hover {
+  background: var(--app-danger-soft);
+  border-color: var(--app-danger);
+  color: var(--app-danger);
+}
+
 .terminal-instance-shell {
   position: absolute;
   min-width: 0;
@@ -922,9 +1129,28 @@
   inset: 0;
   background: var(--app-accent-soft-strong);
   border: 2px solid var(--app-border-accent);
+  border-radius: 4px;
   z-index: 100;
   pointer-events: none;
   transition: all 0.15s ease;
+  /* Step 6: flex 居中放文字 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Step 6: Drop preview 文字提示 */
+.terminal-pane-drop-label {
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px var(--app-shadow);
 }
 
 .terminal-pane-drop-preview.top {

@@ -168,6 +168,9 @@ const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
 const showNewTabMenu = ref(false);
 const showRemoteFileManager = ref(false);
+const showLayoutMenu = ref(false);
+const layoutMenuRef = ref<HTMLDivElement | null>(null);
+const layoutMenuPos = ref({ top: 0, right: 0 });
 const isWindowFocused = ref(true);
 const serialConnectionStates = ref<Record<string, SerialConnectionState>>({});
 const openMenuId = ref<AppMenuId | null>(null);
@@ -305,6 +308,24 @@ function closeOpenMenus() {
   openMenuId.value = null;
   openFileSubmenuId.value = null;
   tabContextMenu.value = null;
+  showLayoutMenu.value = false;
+}
+
+function toggleLayoutMenu() {
+  if (showLayoutMenu.value) {
+    showLayoutMenu.value = false;
+    return;
+  }
+  // 计算按钮的 viewport 坐标，用于 fixed 定位
+  const container = layoutMenuRef.value;
+  if (container) {
+    const rect = container.getBoundingClientRect();
+    layoutMenuPos.value = {
+      top: rect.bottom + 4,
+      right: window.innerWidth - rect.right,
+    };
+  }
+  showLayoutMenu.value = true;
 }
 
 watch(settings, (value) => {
@@ -375,6 +396,37 @@ watch(tabContextMenu, (value, _previous, onCleanup) => {
   const handleKeyDown = (event: KeyboardEvent) => {
     if (event.key === "Escape") {
       tabContextMenu.value = null;
+    }
+  };
+
+  document.addEventListener("pointerdown", handlePointerDown);
+  window.addEventListener("keydown", handleKeyDown);
+
+  onCleanup(() => {
+    document.removeEventListener("pointerdown", handlePointerDown);
+    window.removeEventListener("keydown", handleKeyDown);
+  });
+});
+
+watch(showLayoutMenu, (value, _previous, onCleanup) => {
+  if (!value) {
+    return;
+  }
+
+  const handlePointerDown = (event: PointerEvent) => {
+    const target = event.target;
+    if (!(target instanceof Node)) {
+      return;
+    }
+    if (layoutMenuRef.value?.contains(target)) {
+      return;
+    }
+    showLayoutMenu.value = false;
+  };
+
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      showLayoutMenu.value = false;
     }
   };
 
@@ -583,6 +635,18 @@ const appClassName = computed(() => [
   isWindowFocused.value ? "focused" : "blurred",
   draggedTabId.value ? "tab-dragging" : "",
 ]);
+
+// Step 4: 计算在非焦点 pane 中可见的 tab id 集合（用于在 tab 栏显示多 pane 指示点）
+const visibleNonFocusedTabIds = computed(() => {
+  if (paneLeaves.value.length <= 1) return new Set<string>();
+  const result = new Set<string>();
+  for (const pane of paneLeaves.value) {
+    if (pane.tabId && pane.paneId !== focusedPaneId.value) {
+      result.add(pane.tabId);
+    }
+  }
+  return result;
+});
 
 function flushPendingTerminalFits() {
   pendingFitFrame = null;
@@ -1670,7 +1734,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
           class="tab-item"
           :data-tab-id="tab.id"
           :title="renamingTabId === tab.id ? undefined : `${tab.title}\nRight-click to rename`"
-          :class="{ active: activeTabId === tab.id, dragging: draggedTabId === tab.id }"
+          :class="{
+            active: activeTabId === tab.id,
+            dragging: draggedTabId === tab.id,
+            'pane-visible': visibleNonFocusedTabIds.has(tab.id)
+          }"
           @pointerdown="handleTabPointerDown($event, tab.id)"
           @pointermove="handleTabPointerMove($event, tab.id)"
           @pointerup="handleTabPointerUp($event, tab.id)"
@@ -1693,64 +1761,88 @@ function handleBookmarkConnect(connection: SavedConnection) {
             @pointerdown.stop
           >
           <span v-else class="tab-title">{{ tab.title }}</span>
-          <button class="tab-close-btn" title="Close Tab" @click.stop="handleCloseTab(tab.id)">×</button>
+          <!-- Step 4: 多 pane 可见性指示点 -->
+          <span v-if="visibleNonFocusedTabIds.has(tab.id)" class="tab-pane-dot" title="Visible in another pane" />
+          <button class="tab-close-btn" title="Close Tab" @click.stop="handleCloseTab(tab.id)">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
         </div>
 
         <button key="__newtab__" class="tab-new-btn" type="button" title="New Tab" @mousedown.stop @click="handleOpenNewTabMenu">+</button>
       </TransitionGroup>
 
       <div class="tab-bar-actions">
-        <button
-          class="tab-new-btn tab-search-btn"
-          :class="{ active: terminalSearchVisible }"
-          type="button"
-          title="Find in Terminal"
-          :disabled="!activeTab"
-          @mousedown.stop
-          @click.stop="handleOpenTerminalSearch"
-        >
-          ⌕
-        </button>
-        <button
-          class="tab-new-btn"
-          type="button"
-          title="Split Right"
-          @mousedown.stop
-          @click.stop="handleSplitPane('vertical')"
-        >
-          ║
-        </button>
-        <button
-          class="tab-new-btn"
-          type="button"
-          title="Split Down"
-          @mousedown.stop
-          @click.stop="handleSplitPane('horizontal')"
-        >
-          ＝
-        </button>
-        <button
-          class="tab-new-btn"
-          type="button"
-          title="Close Pane"
-          :disabled="paneLeaves.length <= 1"
-          @mousedown.stop
-          @click.stop="handleClosePane()"
-        >
-          ◫
-        </button>
-        <button
-          v-if="activeSshConfig"
-          class="tab-new-btn tab-files-btn"
-          :class="{ active: showRemoteFileManager }"
-          type="button"
-          title="Remote Files"
-          @mousedown.stop
-          @click.stop="toggleRemoteFileManager"
-        >
-          📁
-        </button>
-        <button class="tab-new-btn tab-settings-btn" type="button" title="Settings" @mousedown.stop @click.stop="handleOpenSettings">&#x2699;</button>
+        <!-- 搜索组 -->
+        <div class="tab-bar-action-group">
+          <button
+            class="tab-new-btn tab-search-btn"
+            :class="{ active: terminalSearchVisible }"
+            type="button"
+            title="Find in Terminal (Ctrl+F)"
+            :disabled="!activeTab"
+            @mousedown.stop
+            @click.stop="handleOpenTerminalSearch"
+          >
+            <!-- Step 2: SVG 搜索图标 -->
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.4"/>
+              <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        <!-- Step 1: 分组分隔线 -->
+        <div class="tab-bar-action-divider" />
+        <!-- 分栏操作组 (Step 3: Layout 下拉菜单) -->
+        <!-- layoutMenuRef 绑在外层容器，用于检测点击外部关闭菜单 -->
+        <div ref="layoutMenuRef" class="tab-bar-action-group tab-layout-group">
+          <button
+            class="tab-new-btn tab-layout-btn"
+            :class="{ active: showLayoutMenu }"
+            type="button"
+            title="Layout"
+            @mousedown.stop
+            @click.stop="toggleLayoutMenu"
+          >
+            <!-- Step 2: SVG 分栏图标 -->
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="1" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+              <rect x="9" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+            </svg>
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" style="margin-left: 2px; opacity: 0.6;">
+              <path d="M1 2.5L4 5.5L7 2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            </svg>
+          </button>
+        </div>
+        <!-- Step 1: 分组分隔线 -->
+        <div class="tab-bar-action-divider" />
+        <!-- 工具组 -->
+        <div class="tab-bar-action-group">
+          <button
+            v-if="activeSshConfig"
+            class="tab-new-btn tab-files-btn"
+            :class="{ active: showRemoteFileManager }"
+            type="button"
+            title="Remote Files"
+            @mousedown.stop
+            @click.stop="toggleRemoteFileManager"
+          >
+            <!-- Step 2: SVG 文件图标 -->
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M3 2h6l4 4v9a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.3"/>
+              <path d="M9 2v4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button class="tab-new-btn tab-settings-btn" type="button" title="Settings" @mousedown.stop @click.stop="handleOpenSettings">
+            <!-- Step 2: SVG 设置图标 -->
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3"/>
+              <path d="M8 1v2M8 13v2M1 8h2M13 8h2M2.93 2.93l1.41 1.41M11.66 11.66l1.41 1.41M2.93 13.07l1.41-1.41M11.66 4.34l1.41-1.41" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -1766,6 +1858,39 @@ function handleBookmarkConnect(connection: SavedConnection) {
       <button class="tab-context-item" type="button" :disabled="paneLeaves.length <= 1" @click="handleClosePaneFromContextMenu">Close Pane</button>
       <div class="titlebar-menu-separator" />
       <button class="tab-context-item" type="button" @click="handleRenameTabFromContextMenu">Rename Tab</button>
+    </div>
+
+    <!-- Layout 下拉菜单：position:fixed 渲染在根级，避免被终端层遮挡 -->
+    <!-- @pointerdown.stop 阻止 pointerdown 冒泡到 document，防止 watcher 提前关闭菜单 -->
+    <div
+      v-if="showLayoutMenu"
+      class="layout-dropdown layout-dropdown--fixed"
+      :style="{ top: `${layoutMenuPos.top}px`, right: `${layoutMenuPos.right}px` }"
+      @pointerdown.stop
+    >
+      <button class="layout-dropdown-item" type="button" @click="showLayoutMenu = false; handleSplitPane('vertical')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+          <rect x="9" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+        </svg>
+        <span>Split Right</span>
+      </button>
+      <button class="layout-dropdown-item" type="button" @click="showLayoutMenu = false; handleSplitPane('horizontal')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1" y="1" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+          <rect x="1" y="9" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+        </svg>
+        <span>Split Down</span>
+      </button>
+      <div class="layout-dropdown-separator" />
+      <button class="layout-dropdown-item" type="button" :disabled="paneLeaves.length <= 1" @click="showLayoutMenu = false; handleClosePane()">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.3"/>
+          <line x1="5" y1="5" x2="11" y2="11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          <line x1="11" y1="5" x2="5" y2="11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        <span>Close Pane</span>
+      </button>
     </div>
 
     <div class="workspace">
@@ -1824,6 +1949,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
             No open tabs. Click + to open a new tab.
           </div>
 
+          <!-- pane-frame-layer: 只渲染边框/背景，pointer-events:none 不拦截交互 -->
           <div v-else class="pane-frame-layer">
             <div
               v-for="pane in paneLeaves"
@@ -1833,42 +1959,16 @@ function handleBookmarkConnect(connection: SavedConnection) {
               :style="getPaneShellStyle(pane.rect)"
               :data-pane-id="pane.paneId"
             >
-              <div
-                v-if="isMainWindow && paneLeaves.length > 1"
-                class="terminal-pane-header"
-                @pointerdown="handlePaneHeaderPointerDown($event, pane.paneId)"
-                @pointermove="handlePaneHeaderPointerMove($event, pane.paneId)"
-                @pointerup="handlePaneHeaderPointerUp($event, pane.paneId)"
-                @pointercancel="handlePaneHeaderPointerCancel(pane.paneId)"
-              >
-                <div class="terminal-pane-header-meta" @mousedown="focusPane(pane.paneId)">
-                  <span class="terminal-pane-title">{{ getTabTitle(pane.tabId) }}</span>
-                  <span class="terminal-pane-protocol">{{ getTabProtocolLabel(pane.tabId) }}</span>
-                </div>
-                <div class="terminal-pane-actions">
-                  <button type="button" title="Split Right" @click.stop="focusPane(pane.paneId); handleSplitPane('vertical', pane.paneId)">║</button>
-                  <button type="button" title="Split Down" @click.stop="focusPane(pane.paneId); handleSplitPane('horizontal', pane.paneId)">＝</button>
-                  <button type="button" title="Close Pane" :disabled="paneLeaves.length <= 1" @click.stop="focusPane(pane.paneId); handleClosePane(pane.paneId)">×</button>
-                </div>
-              </div>
-
-              <div
-                v-if="!pane.tabId"
-                class="terminal-pane-empty"
-                :class="{ 'drag-target': hoveredEmptyPaneId === pane.paneId }"
-                :data-pane-id="pane.paneId"
-                @mousedown="focusPane(pane.paneId)"
-              >
-                <div class="terminal-pane-empty-title">Empty Pane</div>
-                <div class="terminal-pane-empty-desc">
-                  {{ draggedTabId ? 'Release to move this tab into the empty pane.' : 'Drag a tab here, or select a tab above to show it here.' }}
-                </div>
-              </div>
+              <!-- Step 6: Drop preview 增加文字提示 -->
               <div
                 v-if="dropTargetPaneId === pane.paneId && dropTargetPosition"
                 class="terminal-pane-drop-preview"
                 :class="dropTargetPosition"
-              />
+              >
+                <span class="terminal-pane-drop-label">
+                  {{ dropTargetPosition === 'center' ? 'Move here' : dropTargetPosition === 'left' ? 'Split left' : dropTargetPosition === 'right' ? 'Split right' : dropTargetPosition === 'top' ? 'Split above' : 'Split below' }}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -1895,6 +1995,102 @@ function handleBookmarkConnect(connection: SavedConnection) {
                 @ssh-password-updated="sidebarRefreshToken += 1"
                 @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"
               />
+            </div>
+          </div>
+
+          <!-- pane-overlay-layer: z-index:3, 高于 terminal-instance-layer(2)，包含 header/empty 交互内容 -->
+          <div v-if="tabs.length > 0" class="pane-overlay-layer">
+            <div
+              v-for="pane in paneLeaves"
+              :key="pane.paneId"
+              class="pane-overlay-shell"
+              :style="getPaneShellStyle(pane.rect)"
+            >
+              <!-- Step 7: Pane header 使用 Transition 动画，单→多 pane 时 slide-down 过渡 -->
+              <Transition name="pane-header-slide">
+                <div
+                  v-if="isMainWindow && paneLeaves.length > 1"
+                  class="terminal-pane-header"
+                  @pointerdown="handlePaneHeaderPointerDown($event, pane.paneId)"
+                  @pointermove="handlePaneHeaderPointerMove($event, pane.paneId)"
+                  @pointerup="handlePaneHeaderPointerUp($event, pane.paneId)"
+                  @pointercancel="handlePaneHeaderPointerCancel(pane.paneId)"
+                >
+                  <div class="terminal-pane-drag-handle" aria-hidden="true">
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="opacity:0.35">
+                      <circle cx="2" cy="2" r="1.2"/><circle cx="5" cy="2" r="1.2"/><circle cx="8" cy="2" r="1.2"/>
+                      <circle cx="2" cy="5" r="1.2"/><circle cx="5" cy="5" r="1.2"/><circle cx="8" cy="5" r="1.2"/>
+                      <circle cx="2" cy="8" r="1.2"/><circle cx="5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/>
+                    </svg>
+                  </div>
+                  <div class="terminal-pane-header-meta" @mousedown="focusPane(pane.paneId)">
+                    <span class="terminal-pane-title">{{ getTabTitle(pane.tabId) }}</span>
+                    <span class="terminal-pane-protocol">{{ getTabProtocolLabel(pane.tabId) }}</span>
+                  </div>
+                  <div class="terminal-pane-actions">
+                    <button type="button" title="Split Right" @click.stop="focusPane(pane.paneId); handleSplitPane('vertical', pane.paneId)">
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <rect x="1" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+                        <rect x="9" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+                      </svg>
+                    </button>
+                    <button type="button" title="Split Down" @click.stop="focusPane(pane.paneId); handleSplitPane('horizontal', pane.paneId)">
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <rect x="1" y="1" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+                        <rect x="1" y="9" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+                      </svg>
+                    </button>
+                    <button type="button" title="Close Pane" :disabled="paneLeaves.length <= 1" @click.stop="focusPane(pane.paneId); handleClosePane(pane.paneId)">
+                      <svg width="12" height="12" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </Transition>
+
+              <!-- Step 5: 空 Pane 快捷操作 -->
+              <div
+                v-if="!pane.tabId"
+                class="terminal-pane-empty"
+                :class="{ 'drag-target': hoveredEmptyPaneId === pane.paneId }"
+                :data-pane-id="pane.paneId"
+                @mousedown="focusPane(pane.paneId)"
+              >
+                <template v-if="draggedTabId">
+                  <div class="terminal-pane-empty-title">Drop Here</div>
+                  <div class="terminal-pane-empty-desc">Release to show this tab in the pane.</div>
+                </template>
+                <template v-else>
+                  <div class="terminal-pane-empty-title">Empty Pane</div>
+                  <div class="terminal-pane-empty-desc">Start a new session or drag a tab here.</div>
+                  <div class="terminal-pane-empty-actions">
+                    <button class="terminal-pane-empty-btn" type="button" @click.stop="focusPane(pane.paneId); handleNewLocalSession()">
+                      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <rect x="1" y="2" width="14" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/>
+                        <path d="M4 6l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                        <line x1="9" y1="11" x2="12" y2="11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                      </svg>
+                      New Shell
+                    </button>
+                    <button class="terminal-pane-empty-btn" type="button" @click.stop="focusPane(pane.paneId); openConnect('ssh')">
+                      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3"/>
+                        <path d="M8 1.5C8 1.5 5.5 4 5.5 8s2.5 6.5 2.5 6.5M8 1.5C8 1.5 10.5 4 10.5 8S8 14.5 8 14.5M1.5 8h13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                      </svg>
+                      Connect
+                    </button>
+                    <button class="terminal-pane-empty-btn terminal-pane-empty-btn--danger" type="button" @click.stop="handleClosePane(pane.paneId)">
+                      <svg width="13" height="13" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                      </svg>
+                      Close Pane
+                    </button>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
 
