@@ -1,6 +1,6 @@
 ---
 name: git-commit-standard
-description: This skill should be used when committing code changes. It ensures commit messages are written in English and generated based on the actual code modifications, following conventional commit standards.
+description: Use this skill when committing code, submitting changes, creating git commits, or when the user says "提交代码". It requires reviewing the actual diff, staging only intended files, and writing English Conventional Commit messages with a required body.
 ---
 
 # Git Commit Standard
@@ -11,6 +11,8 @@ Provide standardized Git commit workflow ensuring:
 - Commit messages in English
 - Messages generated from actual code changes
 - Follow conventional commit format
+- Only intended files are staged and committed
+- Repository validation is run when feasible before commit
 
 ## When to Use
 
@@ -60,6 +62,8 @@ git diff --staged
 git diff
 ```
 
+Also check whether unrelated files are dirty. Do not include unrelated changes in the same commit.
+
 ### Step 2: Stage Changes
 
 Stage relevant files:
@@ -68,11 +72,17 @@ Stage relevant files:
 git add <files>
 ```
 
+Rules:
+- Stage only files that belong to the requested change
+- If unrelated changes exist, leave them unstaged
+- Do not create empty commits
+
 ### Step 3: Generate Commit Message
 
 Generate commit message based on actual changes:
 - Review all modified files
 - Identify the primary change type
+- Pick a scope when it improves clarity, such as `frontend`, `ssh`, `terminal`, `docs`, or `build`
 - Write concise description in English
 - Keep first line under 72 characters
 - **ALWAYS include a body** explaining what and why (not how)
@@ -88,6 +98,20 @@ Or use multi-line format:
 ```bash
 git commit -m "<type>(<scope>): <description>" -m "" -m "- Change 1" -m "- Change 2"
 ```
+
+### Step 5: Verify Result
+
+After committing:
+- Confirm the commit succeeded
+- Report the commit hash and summary to the user
+- Do not amend or push unless the user explicitly asks
+
+### Step 6: Run Relevant Checks When Feasible
+
+For this repository:
+- Run `npm run build` for Vue and TypeScript changes when feasible
+- Run `cd src-tauri && cargo check` for Rust and Tauri changes when feasible
+- If checks are skipped, say so explicitly in the response
 
 ## Examples
 
@@ -116,3 +140,6 @@ git commit -m "<type>(<scope>): <description>" -m "" -m "- Change 1" -m "- Chang
 - ALWAYS include a body with bullet points explaining changes
 - NEVER commit without reviewing changes first
 - Body should answer "what" and "why", not "how"
+- NEVER stage or commit unrelated files just to get a clean working tree
+- NEVER amend an existing commit unless the user explicitly requests it
+- ALWAYS tell the user what was committed and whether validation ran
