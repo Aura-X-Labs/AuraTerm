@@ -1,6 +1,6 @@
 use russh::{
     client,
-    keys::{decode_secret_key, PrivateKeyWithHashAlg},
+    keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg},
     ChannelMsg,
 };
 use russh_sftp::client::SftpSession;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
@@ -19,6 +19,8 @@ const SSH_TRANSFER_PROGRESS_EVENT: &str = "ssh-transfer-progress";
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
 const TRANSFER_PROGRESS_EMIT_STEP: u64 = 256 * 1024;
 const AURATERM_RECONNECT_SESSION_PREFIX: &str = "at-";
+const SSH_KNOWN_HOSTS_FILE: &str = "ssh_known_hosts.json";
+const SECURITY_AUDIT_LOG_FILE: &str = "security_audit.log";
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SshTransferMode {
@@ -114,13 +116,65 @@ pub struct ReconnectSessionPromptPayload {
     pub sessions: Vec<String>,
 }
 
-struct ClientHandler {}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshHostKeyMismatchPromptPayload {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+    pub expected_fingerprint: String,
+    pub observed_fingerprint: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedSshHostKeyEntry {
+    pub host: String,
+    pub port: u16,
+    pub fingerprint: String,
+    pub fingerprint_summary: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KnownHostsStore {
+    #[serde(default)]
+    hosts: HashMap<String, String>,
+}
+
+struct ClientHandler {
+    expected_fingerprint: Option<String>,
+    observed_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ClientHandler {
+    fn new(expected_fingerprint: Option<String>, observed_fingerprint: Arc<std::sync::Mutex<Option<String>>>) -> Self {
+        Self {
+            expected_fingerprint,
+            observed_fingerprint,
+        }
+    }
+}
 
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
-    fn check_server_key(self: &mut Self, _server_public_key: &russh::keys::PublicKey) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        async { Ok(true) }
+    fn check_server_key(self: &mut Self, server_public_key: &russh::keys::PublicKey) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        let observed = self.observed_fingerprint.clone();
+        let expected = self.expected_fingerprint.clone();
+        let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
+
+        async move {
+            if let Ok(mut guard) = observed.lock() {
+                *guard = Some(fingerprint.clone());
+            }
+
+            if let Some(expected_fingerprint) = expected {
+                return Ok(expected_fingerprint == fingerprint);
+            }
+
+            Ok(true)
+        }
     }
 }
 
@@ -131,6 +185,7 @@ pub struct SshState {
     pub resize_channels: Arc<Mutex<HashMap<String, mpsc::Sender<(u32, u32)>>>>,
     handles: Arc<Mutex<HashMap<String, SharedSshHandle>>>,
     reconnect_prompt_responses: Arc<Mutex<HashMap<String, mpsc::Sender<Option<String>>>>>,
+    host_key_prompt_responses: Arc<Mutex<HashMap<String, mpsc::Sender<bool>>>>,
     /// Tracks whether auto-reconnect is active for each session.
     /// When set to false, the reconnect loop will exit.
     reconnect_flags: Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
@@ -178,10 +233,234 @@ impl SshState {
             resize_channels: Arc::new(Mutex::new(HashMap::new())),
             handles: Arc::new(Mutex::new(HashMap::new())),
             reconnect_prompt_responses: Arc::new(Mutex::new(HashMap::new())),
+            host_key_prompt_responses: Arc::new(Mutex::new(HashMap::new())),
             reconnect_flags: Arc::new(Mutex::new(HashMap::new())),
             reconnect_configs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+fn known_host_scope(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
+fn parse_known_host_scope(scope: &str) -> Option<(String, u16)> {
+    let (host, port_text) = scope.rsplit_once(':')?;
+    let port = port_text.parse::<u16>().ok()?;
+    Some((host.to_string(), port))
+}
+
+fn summarize_fingerprint(fingerprint: &str) -> String {
+    const PREFIX_LEN: usize = 16;
+    const SUFFIX_LEN: usize = 12;
+
+    if fingerprint.len() <= PREFIX_LEN + SUFFIX_LEN + 3 {
+        return fingerprint.to_string();
+    }
+
+    format!(
+        "{}...{}",
+        &fingerprint[..PREFIX_LEN],
+        &fingerprint[fingerprint.len() - SUFFIX_LEN..]
+    )
+}
+
+async fn append_host_key_override_audit_log(
+    app: &AppHandle,
+    host: &str,
+    port: u16,
+    old_fingerprint: &str,
+    new_fingerprint: &str,
+) -> Result<(), String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Failed to resolve app config directory: {error}"))?;
+    fs::create_dir_all(&config_dir)
+        .await
+        .map_err(|error| format!("Failed to create config directory: {error}"))?;
+
+    let path = config_dir.join(SECURITY_AUDIT_LOG_FILE);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let timestamp_secs = now.as_secs();
+    let timestamp_millis = now.subsec_millis();
+
+    let line = format!(
+        "ts_unix={timestamp_secs}.{timestamp_millis:03} event=ssh_host_key_override host={host} port={port} old_summary=\"{}\" new_summary=\"{}\" old=\"{}\" new=\"{}\"\n",
+        summarize_fingerprint(old_fingerprint),
+        summarize_fingerprint(new_fingerprint),
+        old_fingerprint,
+        new_fingerprint,
+    );
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .map_err(|error| format!("Failed to open security audit log: {error}"))?;
+    file.write_all(line.as_bytes())
+        .await
+        .map_err(|error| format!("Failed to append security audit log: {error}"))?;
+    file.flush()
+        .await
+        .map_err(|error| format!("Failed to flush security audit log: {error}"))?;
+
+    Ok(())
+}
+
+fn known_hosts_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Failed to resolve app config directory: {error}"))?;
+    Ok(config_dir.join(SSH_KNOWN_HOSTS_FILE))
+}
+
+async fn load_known_hosts(app: &AppHandle) -> Result<KnownHostsStore, String> {
+    let path = known_hosts_path(app)?;
+    if !path.exists() {
+        return Ok(KnownHostsStore::default());
+    }
+
+    let content = fs::read_to_string(&path)
+        .await
+        .map_err(|error| format!("Failed to read SSH known hosts: {error}"))?;
+
+    serde_json::from_str(&content)
+        .map_err(|error| format!("Failed to parse SSH known hosts: {error}"))
+}
+
+async fn save_known_hosts(app: &AppHandle, known_hosts: &KnownHostsStore) -> Result<(), String> {
+    let path = known_hosts_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("Failed to create config directory: {error}"))?;
+    }
+
+    let content = serde_json::to_string_pretty(known_hosts)
+        .map_err(|error| format!("Failed to serialize SSH known hosts: {error}"))?;
+
+    fs::write(&path, content)
+        .await
+        .map_err(|error| format!("Failed to write SSH known hosts: {error}"))
+}
+
+#[tauri::command]
+pub async fn ssh_list_known_hosts(app: AppHandle) -> Result<Vec<TrustedSshHostKeyEntry>, String> {
+    let known_hosts = load_known_hosts(&app).await?;
+    let mut entries = Vec::new();
+
+    for (scope, fingerprint) in known_hosts.hosts {
+        if let Some((host, port)) = parse_known_host_scope(&scope) {
+            entries.push(TrustedSshHostKeyEntry {
+                host,
+                port,
+                fingerprint_summary: summarize_fingerprint(&fingerprint),
+                fingerprint,
+            });
+        }
+    }
+
+    entries.sort_by(|left, right| {
+        left.host
+            .cmp(&right.host)
+            .then_with(|| left.port.cmp(&right.port))
+    });
+
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn ssh_delete_known_host(app: AppHandle, host: String, port: u16) -> Result<(), String> {
+    let mut known_hosts = load_known_hosts(&app).await?;
+    known_hosts.hosts.remove(&known_host_scope(host.trim(), port));
+    save_known_hosts(&app, &known_hosts).await
+}
+
+#[tauri::command]
+pub async fn ssh_reset_known_hosts(app: AppHandle) -> Result<(), String> {
+    let mut known_hosts = load_known_hosts(&app).await?;
+    known_hosts.hosts.clear();
+    save_known_hosts(&app, &known_hosts).await
+}
+
+fn observed_fingerprint_value(observed: &Arc<std::sync::Mutex<Option<String>>>) -> Option<String> {
+    observed
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+async fn connect_with_expected_fingerprint(
+    host: &str,
+    port: u16,
+    expected_fingerprint: Option<String>,
+) -> Result<(client::Handle<ClientHandler>, Option<String>), (String, Option<String>)> {
+    let observed_fingerprint = Arc::new(std::sync::Mutex::new(None));
+    let handler = ClientHandler::new(expected_fingerprint, observed_fingerprint.clone());
+    let config = Arc::new(client::Config {
+        // Send a keepalive every 15 s; disconnect only after 8 consecutive
+        // missing replies (= 120 s). This more frequent probing helps detect
+        // TCP silent drops by NAT/Firewall faster while maintaining tolerance.
+        keepalive_interval: Some(std::time::Duration::from_secs(15)),
+        keepalive_max: 8,
+        ..Default::default()
+    });
+
+    let addr = format!("{host}:{port}");
+    match client::connect(config, addr, handler).await {
+        Ok(session) => Ok((session, observed_fingerprint_value(&observed_fingerprint))),
+        Err(error) => Err((
+            format!("Connection error: {error}"),
+            observed_fingerprint_value(&observed_fingerprint),
+        )),
+    }
+}
+
+async fn prompt_for_host_key_override(
+    app: &AppHandle,
+    state: SshState,
+    id: &str,
+    host: &str,
+    port: u16,
+    expected_fingerprint: &str,
+    observed_fingerprint: &str,
+) -> Result<bool, String> {
+    let (tx, mut rx) = mpsc::channel::<bool>(1);
+    state
+        .host_key_prompt_responses
+        .lock()
+        .await
+        .insert(id.to_string(), tx);
+
+    let emitted = app.emit(
+        "ssh-host-key-mismatch-prompt",
+        SshHostKeyMismatchPromptPayload {
+            id: id.to_string(),
+            host: host.to_string(),
+            port,
+            expected_fingerprint: expected_fingerprint.to_string(),
+            observed_fingerprint: observed_fingerprint.to_string(),
+        },
+    );
+
+    if emitted.is_err() {
+        state.host_key_prompt_responses.lock().await.remove(id);
+        return Err("Failed to emit SSH host key mismatch prompt".to_string());
+    }
+
+    let decision = tokio::time::timeout(tokio::time::Duration::from_secs(180), rx.recv())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+    state.host_key_prompt_responses.lock().await.remove(id);
+    Ok(decision)
 }
 
 fn remote_parent_path(path: &str) -> Option<String> {
@@ -397,6 +676,7 @@ async fn cleanup_ssh_runtime_state(state: &SshState, id: &str) {
     state.auth_responses.lock().await.remove(id);
     state.handles.lock().await.remove(id);
     state.reconnect_prompt_responses.lock().await.remove(id);
+    state.host_key_prompt_responses.lock().await.remove(id);
 }
 
 async fn cleanup_ssh_session(state: &SshState, id: &str) {
@@ -1069,6 +1349,25 @@ pub async fn answer_ssh_reconnect_choice(
 }
 
 #[tauri::command]
+pub async fn answer_ssh_host_key_mismatch(
+    state: State<'_, SshState>,
+    id: String,
+    trust_new_fingerprint: bool,
+) -> Result<(), String> {
+    let tx = state
+        .host_key_prompt_responses
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "Host key prompt channel not found".to_string())?;
+
+    tx.send(trust_new_fingerprint)
+        .await
+        .map_err(|_| "Failed to send host key decision".to_string())
+}
+
+#[tauri::command]
 pub async fn rename_ssh_session(
     state: State<'_, SshState>,
     id: String,
@@ -1208,7 +1507,8 @@ pub async fn close_ssh_pty(
 
 /// Authenticate an SSH session and return a connected handle.
 async fn authenticate_ssh(
-    addr: &str,
+    host: &str,
+    port: u16,
     user: &str,
     password: Option<&str>,
     private_key: Option<&str>,
@@ -1216,19 +1516,73 @@ async fn authenticate_ssh(
     id: &str,
     auth_response_rx: &mut mpsc::Receiver<String>,
 ) -> Result<SharedSshHandle, String> {
-    let handler = ClientHandler {};
-    let config = Arc::new(client::Config {
-        // Send a keepalive every 15 s; disconnect only after 8 consecutive
-        // missing replies (= 120 s). This more frequent probing helps detect
-        // TCP silent drops by NAT/Firewall faster while maintaining tolerance.
-        keepalive_interval: Some(std::time::Duration::from_secs(15)),
-        keepalive_max: 8,
-        ..Default::default()
-    });
+    let scope = known_host_scope(host, port);
+    let mut known_hosts = load_known_hosts(app).await?;
+    let expected_fingerprint = known_hosts.hosts.get(&scope).cloned();
 
-    let mut session = client::connect(config, addr, handler)
-        .await
-        .map_err(|error| format!("Connection error: {error}"))?;
+    let (mut session, observed_fingerprint) = match connect_with_expected_fingerprint(
+        host,
+        port,
+        expected_fingerprint.clone(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err((connection_error, observed)) => {
+            let mismatch = expected_fingerprint
+                .as_ref()
+                .zip(observed.as_ref())
+                .is_some_and(|(expected, actual)| expected != actual);
+
+            if !mismatch {
+                return Err(connection_error);
+            }
+
+            let expected_value = expected_fingerprint
+                .clone()
+                .ok_or_else(|| "Missing expected fingerprint".to_string())?;
+            let observed_value = observed
+                .clone()
+                .ok_or_else(|| "Missing observed fingerprint".to_string())?;
+            let ssh_state = app.state::<SshState>().inner().clone();
+
+            let trust_new = prompt_for_host_key_override(
+                app,
+                ssh_state,
+                id,
+                host,
+                port,
+                &expected_value,
+                &observed_value,
+            )
+            .await?;
+
+            if !trust_new {
+                return Err(format!(
+                    "SSH host key changed for {scope}. Connection cancelled by user."
+                ));
+            }
+
+            known_hosts
+                .hosts
+                .insert(scope.clone(), observed_value.clone());
+            save_known_hosts(app, &known_hosts).await?;
+            append_host_key_override_audit_log(
+                app,
+                host,
+                port,
+                &expected_value,
+                &observed_value,
+            )
+            .await?;
+
+            connect_with_expected_fingerprint(host, port, Some(observed_value.clone()))
+                .await
+                .map_err(|(error, _)| {
+                    format!("Failed to reconnect after trusting new host key: {error}")
+                })?
+        }
+    };
 
     println!("Authenticating as {}...", user);
 
@@ -1309,6 +1663,13 @@ async fn authenticate_ssh(
                         .map_err(|error| format!("Failed auth step: {error}"))?;
                 }
             }
+        }
+    }
+
+    if expected_fingerprint.is_none() {
+        if let Some(observed) = observed_fingerprint {
+            known_hosts.hosts.insert(scope, observed);
+            save_known_hosts(app, &known_hosts).await?;
         }
     }
 
@@ -1587,7 +1948,6 @@ pub async fn start_ssh_pty(
         Ok(())
     } else {
         // Single-shot connection (no reconnect).
-        let addr = format!("{}:{}", host, port);
         // For Manual/Simple mode, no multiplexer is needed even in single-shot mode.
         let mux_type = match rt {
             ReconnectType::Manual => None,
@@ -1598,7 +1958,8 @@ pub async fn start_ssh_pty(
             &app,
             state.inner(),
             &id,
-            &addr,
+            &host,
+            port,
             &user,
             password.as_deref(),
             private_key.as_deref(),
@@ -1682,8 +2043,6 @@ async fn run_reconnect_loop(
             }
         };
 
-        let addr = format!("{}:{}", cfg.host, cfg.port);
-
         // Ensure a fresh auth-response channel is available.
         let (auth_tx, rx) = mpsc::channel::<String>(4);
         state.auth_responses.lock().await.insert(id.clone(), auth_tx);
@@ -1698,7 +2057,8 @@ async fn run_reconnect_loop(
             &app,
             &state,
             &id,
-            &addr,
+            &cfg.host,
+            cfg.port,
             &cfg.user,
             cfg.password.as_deref(),
             cfg.private_key.as_deref(),
@@ -1775,7 +2135,8 @@ async fn do_single_ssh_connect(
     app: &AppHandle,
     state: &SshState,
     id: &str,
-    addr: &str,
+    host: &str,
+    port: u16,
     user: &str,
     password: Option<&str>,
     private_key: Option<&str>,
@@ -1786,9 +2147,10 @@ async fn do_single_ssh_connect(
     should_prompt_existing_sessions: bool,
     mut auth_response_rx: mpsc::Receiver<String>,
 ) -> Result<mpsc::Receiver<String>, String> {
+    let addr = format!("{host}:{port}");
     println!("Connecting to {}...", addr);
 
-    let session_handle = authenticate_ssh(addr, user, password, private_key, app, id, &mut auth_response_rx).await?;
+    let session_handle = authenticate_ssh(host, port, user, password, private_key, app, id, &mut auth_response_rx).await?;
 
     println!("Requesting PTY and shell...");
     let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(id));

@@ -2141,6 +2141,107 @@
   min-width: 0;
 }
 
+.settings-btn-secondary:disabled,
+.settings-btn-cancel:disabled,
+.settings-btn-save:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-btn-danger {
+  color: var(--app-danger);
+  border-color: var(--app-danger);
+}
+
+.settings-btn-danger:hover {
+  background: var(--app-overlay-soft);
+}
+
+.settings-security-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-security-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.settings-security-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.settings-security-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-security-error,
+.settings-security-loading,
+.settings-security-empty {
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.settings-security-error {
+  color: var(--app-danger);
+  border-color: var(--app-danger);
+  background: var(--app-overlay-soft);
+}
+
+.settings-security-loading,
+.settings-security-empty {
+  color: var(--app-text-muted);
+}
+
+.settings-security-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-security-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--app-surface-2);
+}
+
+.settings-security-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-security-host {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.settings-security-fingerprint {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+.settings-security-fingerprint-full {
+  font-size: 11px;
+  color: var(--app-text-muted);
+  overflow-wrap: anywhere;
+}
+
 /* ── Toggle switch ── */
 .settings-field--toggle {
   align-items: flex-start;
@@ -2263,6 +2364,20 @@
   .settings-theme-preset-row {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .settings-security-header,
+  .settings-security-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings-security-actions {
+    width: 100%;
+  }
+
+  .settings-security-actions .settings-btn-secondary {
+    flex: 1;
   }
 
   .terminal-searchbar {

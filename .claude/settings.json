@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E '\\\\.\\(json|md|yaml|yml|toml|sh|mk\\)$')",
+      "Read(//Users/bill/Desktop/Projects/AuraTerm/**)",
+      "Read(//Users/bill/workspace/aura/docs/AuraTerm/**)",
+      "Read(//Users/parker/Documents/dev/claude-engineer/claude-code-oss/**)"
+    ]
+  }
+}

@@ -24,7 +24,11 @@ import {
   type QuickButton,
   type SerialHistoryItem,
 } from "./settings";
-import { isReconnectEnabled, normalizeReconnectType } from "./types";
+import {
+  buildSavedConnectionFromConnectResult,
+  buildSessionFromConnectResult,
+  buildSessionFromSavedConnection,
+} from "./composables/sessionMapping";
 import type {
   ConnectResult,
   ConnectionProtocol,
@@ -1391,23 +1395,11 @@ function handleCloseTab(id: string) {
 
 async function handleConnectResult(result: ConnectResult) {
   const newId = `tab-${nextTabId++}`;
-  const { protocol, sshConfig, telnetConfig, serialConfig, saveAs, saveGroup } = result;
-  let tab: Tab | null = null;
-  const savedConnectionId = saveAs ? crypto.randomUUID() : undefined;
-
-  if (protocol === "ssh" && sshConfig) {
-    tab = createSessionTab(newId, {
-      protocol: "ssh",
-      sshConfig: {
-        ...sshConfig,
-        savedConnectionId,
-      },
-    }, saveAs, result.logPath);
-  } else if (protocol === "telnet" && telnetConfig) {
-    tab = createSessionTab(newId, { protocol: "telnet", telnetConfig }, saveAs, result.logPath);
-  } else if (protocol === "serial" && serialConfig) {
-    tab = createSessionTab(newId, { protocol: "serial", serialConfig }, saveAs, result.logPath);
-  }
+  const savedConnectionId = result.saveAs ? crypto.randomUUID() : undefined;
+  const session = buildSessionFromConnectResult(result, savedConnectionId);
+  const tab = session
+    ? createSessionTab(newId, session, result.saveAs, result.logPath)
+    : null;
 
   if (!tab) {
     showConnectDialog.value = false;
@@ -1416,42 +1408,23 @@ async function handleConnectResult(result: ConnectResult) {
 
   tabs.value = [...tabs.value, tab];
 
-  if (protocol === "serial" && serialConfig) {
-    rememberSerialConfig(serialConfig);
+  if (session?.protocol === "serial") {
+    rememberSerialConfig(session.serialConfig);
     updateSerialConnectionState(newId, "connecting");
   }
 
   assignTabToFocusedPane(newId);
   showConnectDialog.value = false;
 
-  if (!saveAs) {
+  if (!result.saveAs) {
     return;
   }
 
-  const reconnectType = protocol === "ssh" ? normalizeReconnectType(sshConfig) : undefined;
-
-  const connection: SavedConnection = {
-    id: savedConnectionId ?? crypto.randomUUID(),
-    name: saveAs,
-    group: saveGroup,
-    logPath: result.logPath,
-    protocol,
-    host: protocol === "ssh" ? sshConfig!.host : protocol === "telnet" ? telnetConfig!.host : "",
-    port: protocol === "ssh" ? sshConfig!.port : protocol === "telnet" ? telnetConfig!.port : 0,
-    user: protocol === "ssh" ? sshConfig!.user : "",
-    authType: protocol === "ssh" ? (sshConfig!.privateKey ? "key" : "password") : "none",
-    password: protocol === "ssh" ? sshConfig!.password : undefined,
-    privateKey: protocol === "ssh" ? sshConfig!.privateKey : undefined,
-    portName: protocol === "serial" ? serialConfig!.portName : undefined,
-    baudRate: protocol === "serial" ? serialConfig!.baudRate : undefined,
-    dataBits: protocol === "serial" ? serialConfig!.dataBits : undefined,
-    stopBits: protocol === "serial" ? serialConfig!.stopBits : undefined,
-    parity: protocol === "serial" ? serialConfig!.parity : undefined,
-    flowControl: protocol === "serial" ? serialConfig!.flowControl : undefined,
-    createdAt: Date.now(),
-    autoReconnect: protocol === "ssh" && reconnectType ? isReconnectEnabled(reconnectType) : undefined,
-    reconnectType,
-  };
+  const connection = buildSavedConnectionFromConnectResult(
+    result,
+    savedConnectionId ?? crypto.randomUUID(),
+    Date.now(),
+  );
 
   try {
     await invoke("save_connection", { connection });
@@ -1464,46 +1437,11 @@ async function handleConnectResult(result: ConnectResult) {
 
 function handleBookmarkConnect(connection: SavedConnection) {
   const newId = `tab-${nextTabId++}`;
-  const protocol = connection.protocol ?? "ssh";
+  const session = buildSessionFromSavedConnection(connection);
+  const tab = createSessionTab(newId, session, connection.name, connection.logPath);
 
-  let tab: Tab;
-  if (protocol === "serial" && connection.portName && connection.baudRate) {
-    const serialConfig: SerialConfig = {
-      portName: connection.portName,
-      baudRate: connection.baudRate,
-      dataBits: connection.dataBits ?? 8,
-      stopBits: connection.stopBits ?? 1,
-      parity: connection.parity ?? "none",
-      flowControl: connection.flowControl ?? "none",
-    };
-    rememberSerialConfig(serialConfig);
-    tab = createSessionTab(newId, { protocol: "serial", serialConfig }, connection.name, connection.logPath);
-  } else if (protocol === "telnet") {
-    tab = createSessionTab(newId, {
-      protocol: "telnet",
-      telnetConfig: {
-        host: connection.host,
-        port: connection.port,
-      },
-    }, connection.name, connection.logPath);
-  } else {
-    const reconnectType = normalizeReconnectType(connection);
-    tab = createSessionTab(newId, {
-      protocol: "ssh",
-      sshConfig: {
-        host: connection.host,
-        port: connection.port,
-        user: connection.user,
-        password: connection.password,
-        privateKey: connection.authType === "key" ? connection.privateKey : undefined,
-        savedConnectionId: connection.id,
-        autoReconnect: isReconnectEnabled(reconnectType),
-        reconnectType,
-      },
-    }, connection.name, connection.logPath);
-  }
-
-  if (tab.session.protocol === "serial") {
+  if (session.protocol === "serial") {
+    rememberSerialConfig(session.serialConfig);
     updateSerialConnectionState(newId, "connecting");
   }
 

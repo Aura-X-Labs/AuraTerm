@@ -28,9 +28,31 @@ jobs:
       - name: Type check
         run: npm run build
 
+  rust-check:
+    name: Rust Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install dependencies (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libudev-dev
+
+      - name: Cargo check
+        run: cd src-tauri && cargo check
+
   build:
     name: Build (${{ matrix.os }})
-    needs: lint
+    needs: [lint, rust-check]
     strategy:
       fail-fast: false
       matrix:
