@@ -147,6 +147,13 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
     });
   }
 
+  function answerSshHostKeyMismatch(id: string, trustNewFingerprint: boolean) {
+    return invoke("answer_ssh_host_key_mismatch", {
+      id,
+      trustNewFingerprint,
+    });
+  }
+
   return {
     writeSessionInput,
     resizeSession,
@@ -160,6 +167,7 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
     saveTerminalLog,
     appendToLog,
     answerSshMfa,
+    answerSshHostKeyMismatch,
     answerSshReconnectChoice,
   };
 }

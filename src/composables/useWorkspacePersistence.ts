@@ -18,6 +18,28 @@ export function useWorkspacePersistence({
   createPersistedWorkspaceState,
 }: UseWorkspacePersistenceOptions) {
   let persistWorkspaceStateTimer: number | null = null;
+  let lastPersistedPaneLayoutSnapshot: string | null = null;
+  let lastPersistedWorkspaceStateSnapshot: string | null = null;
+
+  const PERSIST_WORKSPACE_DEBOUNCE_MS = 700;
+
+  function snapshotState(value: unknown) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      // Fallback token to avoid blocking persistence on rare circular payloads.
+      return "__snapshot_error__";
+    }
+  }
+
+  function ensurePersistedStateSnapshots() {
+    if (lastPersistedPaneLayoutSnapshot !== null && lastPersistedWorkspaceStateSnapshot !== null) {
+      return;
+    }
+
+    lastPersistedPaneLayoutSnapshot = snapshotState(settingsRef.value.paneLayout);
+    lastPersistedWorkspaceStateSnapshot = snapshotState(settingsRef.value.workspaceState);
+  }
 
   function prepareSettingsForSave(baseSettings: AppSettings, restoreEnabled = baseSettings.restoreTabsOnStartup) {
     return normalizeAppSettings({
@@ -34,13 +56,19 @@ export function useWorkspacePersistence({
     }
   }
 
-  function persistSettingsSilently(newSettings: AppSettings) {
-    const normalizedSettings = prepareSettingsForSave(newSettings, newSettings.restoreTabsOnStartup);
+  function persistNormalizedSettings(normalizedSettings: AppSettings) {
+    lastPersistedPaneLayoutSnapshot = snapshotState(normalizedSettings.paneLayout);
+    lastPersistedWorkspaceStateSnapshot = snapshotState(normalizedSettings.workspaceState);
     settingsRef.value = normalizedSettings;
     settings.value = normalizedSettings;
     void invoke("save_settings", { settings: normalizedSettings }).catch((error) => {
       console.error("save_settings failed", error);
     });
+  }
+
+  function persistSettingsSilently(newSettings: AppSettings) {
+    const normalizedSettings = prepareSettingsForSave(newSettings, newSettings.restoreTabsOnStartup);
+    persistNormalizedSettings(normalizedSettings);
   }
 
   function scheduleWorkspaceStatePersistence() {
@@ -51,16 +79,18 @@ export function useWorkspacePersistence({
     clearScheduledWorkspacePersistence();
     persistWorkspaceStateTimer = window.setTimeout(() => {
       persistWorkspaceStateTimer = null;
+      ensurePersistedStateSnapshots();
+
       const nextSettings = prepareSettingsForSave(settingsRef.value);
-      if (
-        JSON.stringify(settingsRef.value.paneLayout) === JSON.stringify(nextSettings.paneLayout)
-        && JSON.stringify(settingsRef.value.workspaceState) === JSON.stringify(nextSettings.workspaceState)
-      ) {
+      const nextPaneLayoutSnapshot = snapshotState(nextSettings.paneLayout);
+      const nextWorkspaceStateSnapshot = snapshotState(nextSettings.workspaceState);
+      if (lastPersistedPaneLayoutSnapshot === nextPaneLayoutSnapshot
+        && lastPersistedWorkspaceStateSnapshot === nextWorkspaceStateSnapshot) {
         return;
       }
 
-      persistSettingsSilently(nextSettings);
-    }, 240);
+      persistNormalizedSettings(nextSettings);
+    }, PERSIST_WORKSPACE_DEBOUNCE_MS);
   }
 
   return {

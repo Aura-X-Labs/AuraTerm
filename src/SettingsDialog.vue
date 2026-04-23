@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { ref, computed, watch } from "vue";
 import {
   cloneTerminalTheme,
   getMatchingTerminalThemePreset,
@@ -22,7 +23,14 @@ const emit = defineEmits<{
 
 const settings = ref<AppSettings>(normalizeAppSettings(props.initial));
 
-const activeTab = ref<"terminal" | "keyboard" | "theme">("terminal");
+const activeTab = ref<"terminal" | "keyboard" | "theme" | "security">("terminal");
+
+type TrustedSshHostKeyEntry = {
+  host: string;
+  port: number;
+  fingerprint: string;
+  fingerprintSummary: string;
+};
 
 type ShellPresetValue = "auto" | "git-bash" | "powershell" | "cmd" | "custom";
 type ThemeColorKey = keyof TerminalTheme;
@@ -175,6 +183,77 @@ function resetThemeToDefault() {
 
   update("theme", cloneTerminalTheme(defaultPreset.theme));
 }
+
+const trustedHostKeys = ref<TrustedSshHostKeyEntry[]>([]);
+const trustedHostKeysLoading = ref(false);
+const trustedHostKeysError = ref("");
+const deletingHostKeyScope = ref<string | null>(null);
+const resettingHostKeys = ref(false);
+
+function trustedHostScope(entry: TrustedSshHostKeyEntry) {
+  return `${entry.host}:${entry.port}`;
+}
+
+async function refreshTrustedHostKeys() {
+  trustedHostKeysLoading.value = true;
+  trustedHostKeysError.value = "";
+  try {
+    const entries = await invoke<TrustedSshHostKeyEntry[]>("ssh_list_known_hosts");
+    trustedHostKeys.value = entries;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    trustedHostKeysError.value = `Failed to load trusted host keys: ${message}`;
+  } finally {
+    trustedHostKeysLoading.value = false;
+  }
+}
+
+async function removeTrustedHostKey(entry: TrustedSshHostKeyEntry) {
+  const scope = trustedHostScope(entry);
+  deletingHostKeyScope.value = scope;
+  trustedHostKeysError.value = "";
+  try {
+    await invoke("ssh_delete_known_host", {
+      host: entry.host,
+      port: entry.port,
+    });
+    await refreshTrustedHostKeys();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    trustedHostKeysError.value = `Failed to remove trusted host key: ${message}`;
+  } finally {
+    deletingHostKeyScope.value = null;
+  }
+}
+
+async function resetTrustedHostKeys() {
+  const confirmed = window.confirm("Remove all trusted SSH host fingerprints?");
+  if (!confirmed) {
+    return;
+  }
+
+  resettingHostKeys.value = true;
+  trustedHostKeysError.value = "";
+  try {
+    await invoke("ssh_reset_known_hosts");
+    await refreshTrustedHostKeys();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    trustedHostKeysError.value = `Failed to reset trusted host keys: ${message}`;
+  } finally {
+    resettingHostKeys.value = false;
+  }
+}
+
+watch(
+  activeTab,
+  (tab) => {
+    if (tab === "security") {
+      void refreshTrustedHostKeys();
+    }
+  },
+  { immediate: false },
+);
 </script>
 
 <template>
@@ -201,6 +280,11 @@ function resetThemeToDefault() {
           type="button"
           @click="activeTab = 'theme'"
         >Theme</button>
+        <button
+          :class="['settings-tab', { 'settings-tab--active': activeTab === 'security' }]"
+          type="button"
+          @click="activeTab = 'security'"
+        >Security</button>
       </div>
 
       <div class="settings-body">
@@ -483,6 +567,59 @@ function resetThemeToDefault() {
                   >
                 </div>
               </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Security Tab -->
+        <div v-show="activeTab === 'security'" class="settings-section">
+          <div class="settings-security-header">
+            <div>
+              <div class="settings-security-title">Trusted SSH Host Fingerprints</div>
+              <div class="settings-security-subtitle">
+                Review and manage fingerprints saved for host verification.
+              </div>
+            </div>
+            <div class="settings-security-actions">
+              <button class="settings-btn-secondary" type="button" @click="refreshTrustedHostKeys" :disabled="trustedHostKeysLoading">
+                Refresh
+              </button>
+              <button
+                class="settings-btn-secondary settings-btn-danger"
+                type="button"
+                @click="resetTrustedHostKeys"
+                :disabled="resettingHostKeys || trustedHostKeysLoading || trustedHostKeys.length === 0"
+              >
+                {{ resettingHostKeys ? 'Resetting...' : 'Reset All' }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="trustedHostKeysError" class="settings-security-error">{{ trustedHostKeysError }}</div>
+
+          <div v-if="trustedHostKeysLoading" class="settings-security-loading">Loading trusted host keys...</div>
+
+          <div v-else-if="trustedHostKeys.length === 0" class="settings-security-empty">
+            No trusted SSH host fingerprints found.
+          </div>
+
+          <div v-else class="settings-security-list">
+            <div v-for="entry in trustedHostKeys" :key="trustedHostScope(entry)" class="settings-security-item">
+              <div class="settings-security-item-main">
+                <div class="settings-security-host">{{ entry.host }}:{{ entry.port }}</div>
+                <div class="settings-security-fingerprint" :title="entry.fingerprint">
+                  {{ entry.fingerprintSummary }}
+                </div>
+                <div class="settings-security-fingerprint-full">{{ entry.fingerprint }}</div>
+              </div>
+              <button
+                class="settings-btn-secondary settings-btn-danger"
+                type="button"
+                @click="removeTrustedHostKey(entry)"
+                :disabled="deletingHostKeyScope === trustedHostScope(entry) || resettingHostKeys"
+              >
+                {{ deletingHostKeyScope === trustedHostScope(entry) ? 'Removing...' : 'Delete' }}
+              </button>
             </div>
           </div>
         </div>

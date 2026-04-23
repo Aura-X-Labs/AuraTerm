@@ -46,6 +46,14 @@ interface SshReconnectSessionPromptEvent {
   sessions: string[];
 }
 
+interface SshHostKeyMismatchPromptEvent {
+  id: string;
+  host: string;
+  port: number;
+  expectedFingerprint: string;
+  observedFingerprint: string;
+}
+
 interface ReconnectSessionPromptState {
   id: string;
   tool: string;
@@ -151,7 +159,10 @@ const mfaResponses = ref<string[]>([]);
 const showMfaOverlay = ref(false);
 const reconnectPrompt = ref<ReconnectSessionPromptState | null>(null);
 const selectedReconnectSession = ref("");
+const hostKeyPrompt = ref<SshHostKeyMismatchPromptEvent | null>(null);
+const showHostKeyOverlay = ref(false);
 const manualReconnectPending = ref(false);
+const sessionRevision = ref(0);
 const activeSshConfig = computed(() => (
   activeSession.value.protocol === "ssh" ? activeSession.value.sshConfig : undefined
 ));
@@ -165,6 +176,12 @@ let terminalCleanup: (() => void) | null = null;
 let stopSessionWatch: (() => void) | null = null;
 let pendingInputBuffer = "";
 let pendingInputTimer: number | null = null;
+let pendingLogBuffer = "";
+let pendingLogPath: string | null = null;
+let pendingLogTimer: number | null = null;
+
+const LOG_FLUSH_INTERVAL_MS = 180;
+const LOG_FLUSH_MAX_CHUNK = 4096;
 
 const {
   writeSessionInput,
@@ -179,6 +196,7 @@ const {
   saveTerminalLog,
   appendToLog,
   answerSshMfa,
+  answerSshHostKeyMismatch,
   answerSshReconnectChoice,
 } = useTerminalSessionCommands({
   onSshPasswordUpdated: () => {
@@ -229,6 +247,63 @@ function queueTerminalInput(data: string) {
   }, 10);
 }
 
+function clearPendingLogFlush() {
+  if (pendingLogTimer !== null) {
+    window.clearTimeout(pendingLogTimer);
+    pendingLogTimer = null;
+  }
+}
+
+function flushPendingLog(force = false) {
+  if (!pendingLogBuffer || !pendingLogPath) {
+    pendingLogBuffer = "";
+    pendingLogPath = null;
+    clearPendingLogFlush();
+    return;
+  }
+
+  if (!force && pendingLogBuffer.length < LOG_FLUSH_MAX_CHUNK) {
+    return;
+  }
+
+  const path = pendingLogPath;
+  const payload = pendingLogBuffer;
+  pendingLogBuffer = "";
+  pendingLogPath = null;
+  clearPendingLogFlush();
+
+  void appendToLog(path, payload).catch((error) => {
+    console.error("append_to_log failed", error);
+  });
+}
+
+function queueLogChunk(path: string, chunk: string) {
+  if (!chunk) {
+    return;
+  }
+
+  if (pendingLogPath && pendingLogPath !== path) {
+    flushPendingLog(true);
+  }
+
+  pendingLogPath = path;
+  pendingLogBuffer += chunk;
+
+  if (pendingLogBuffer.length >= LOG_FLUSH_MAX_CHUNK) {
+    flushPendingLog(true);
+    return;
+  }
+
+  if (pendingLogTimer !== null) {
+    return;
+  }
+
+  pendingLogTimer = window.setTimeout(() => {
+    pendingLogTimer = null;
+    flushPendingLog(true);
+  }, LOG_FLUSH_INTERVAL_MS);
+}
+
 watch(effectiveSettings, (value) => {
   settingsRef.value = value;
 }, { deep: true, immediate: true });
@@ -246,7 +321,10 @@ watch(() => props.session, (session) => {
   showMfaOverlay.value = false;
   reconnectPrompt.value = null;
   selectedReconnectSession.value = "";
+  hostKeyPrompt.value = null;
+  showHostKeyOverlay.value = false;
   manualReconnectPending.value = false;
+  sessionRevision.value += 1;
   if (session.protocol === "serial") {
     notifySerialConnectionStateChange("connecting");
   }
@@ -522,6 +600,7 @@ onMounted(() => {
 
   terminalCleanup = () => {
     flushPendingInput();
+    flushPendingLog(true);
     window.removeEventListener("resize", handleWindowResize);
     terminalElement.removeEventListener("mousedown", handleMiddleMouseDown);
     terminalElement.removeEventListener("auxclick", handleMiddleClick);
@@ -545,21 +624,19 @@ onMounted(() => {
     const s = activeSession.value;
     switch (s.protocol) {
       case "local":
-        return `local:${s.cwd || ""}`;
+        return `local:${s.cwd || ""}:rev:${sessionRevision.value}`;
       case "ssh":
-        // Include password/key in key to restart if auth changes
-        return `ssh:${s.sshConfig.user}@${s.sshConfig.host}:${s.sshConfig.port}:${s.sshConfig.password || ""}:${s.sshConfig.privateKey || ""}`;
+        return `ssh:${s.sshConfig.user}@${s.sshConfig.host}:${s.sshConfig.port}:${s.sshConfig.privateKey ? "key" : "password"}:rev:${sessionRevision.value}`;
       case "telnet":
-        return `telnet:${s.telnetConfig.host}:${s.telnetConfig.port}`;
+        return `telnet:${s.telnetConfig.host}:${s.telnetConfig.port}:rev:${sessionRevision.value}`;
       case "serial":
-        return `serial:${s.serialConfig.portName}:${s.serialConfig.baudRate}:${s.serialConfig.dataBits}:${s.serialConfig.stopBits}:${s.serialConfig.parity}:${s.serialConfig.flowControl}`;
+        return `serial:${s.serialConfig.portName}:${s.serialConfig.baudRate}:${s.serialConfig.dataBits}:${s.serialConfig.stopBits}:${s.serialConfig.parity}:${s.serialConfig.flowControl}:rev:${sessionRevision.value}`;
       default:
         return "unknown";
     }
   });
 
-  stopSessionWatch = watch(sessionKey, (newKey, oldKey, onCleanup) => {
-    console.log(`[Terminal] Session key changed: ${oldKey} -> ${newKey}`);
+  stopSessionWatch = watch(sessionKey, (_newKey, _oldKey, onCleanup) => {
     const session = activeSession.value;
     let disposed = false;
     let unlistenOutput: UnlistenFn | null = null;
@@ -567,16 +644,18 @@ onMounted(() => {
     let unlistenMfa: UnlistenFn | null = null;
     let unlistenSshConnected: UnlistenFn | null = null;
     let unlistenReconnectPrompt: UnlistenFn | null = null;
+    let unlistenHostKeyMismatch: UnlistenFn | null = null;
     let unlistenSerialConnected: UnlistenFn | null = null;
 
     const cleanup = () => {
-      console.log(`[Terminal] Cleaning up session: ${newKey}`);
       disposed = true;
+      flushPendingLog(true);
       unlistenOutput?.();
       unlistenExit?.();
       unlistenMfa?.();
       unlistenSshConnected?.();
       unlistenReconnectPrompt?.();
+      unlistenHostKeyMismatch?.();
       unlistenSerialConnected?.();
       if (ptyId.value) {
         const id = ptyId.value;
@@ -595,7 +674,7 @@ onMounted(() => {
         return;
       }
 
-      console.log(`[Terminal] Starting new session: ${newKey}`);
+      flushPendingLog(true);
       logBuffer.value = "";
       if (logPathRef.value) {
         const trimmedPath = logPathRef.value.trim();
@@ -614,9 +693,7 @@ onMounted(() => {
         logBuffer.value += event.payload.data;
         if (actualLogPath.value) {
           const plain = stripAnsi(event.payload.data);
-          void appendToLog(actualLogPath.value, plain).catch((error) => {
-            console.error("append_to_log failed", error);
-          });
+          queueLogChunk(actualLogPath.value, plain);
         }
       });
 
@@ -676,12 +753,22 @@ onMounted(() => {
         selectedReconnectSession.value = event.payload.sessions[0] ?? "";
       });
 
+      unlistenHostKeyMismatch = await listen<SshHostKeyMismatchPromptEvent>("ssh-host-key-mismatch-prompt", (event) => {
+        if (event.payload.id !== props.sessionId) {
+          return;
+        }
+
+        hostKeyPrompt.value = event.payload;
+        showHostKeyOverlay.value = true;
+      });
+
       if (disposed || !terminal) {
         unlistenOutput?.();
         unlistenExit?.();
         unlistenMfa?.();
         unlistenSshConnected?.();
         unlistenReconnectPrompt?.();
+        unlistenHostKeyMismatch?.();
         unlistenSerialConnected?.();
         return;
       }
@@ -741,6 +828,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   flushPendingInput();
+  flushPendingLog(true);
   stopSessionWatch?.();
   terminalCleanup?.();
 });
@@ -805,6 +893,28 @@ function handleAttachSelectedReconnectSession() {
 
 function handleSkipReconnectSession() {
   submitReconnectChoice(null);
+}
+
+function submitHostKeyDecision(trustNewFingerprint: boolean) {
+  const prompt = hostKeyPrompt.value;
+  hostKeyPrompt.value = null;
+  showHostKeyOverlay.value = false;
+
+  if (!prompt) {
+    return;
+  }
+
+  void answerSshHostKeyMismatch(prompt.id, trustNewFingerprint).catch((error) => {
+    console.error("Failed to answer host key mismatch prompt", error);
+  });
+}
+
+function handleTrustHostKey() {
+  submitHostKeyDecision(true);
+}
+
+function handleRejectHostKey() {
+  submitHostKeyDecision(false);
 }
 </script>
 
@@ -908,6 +1018,27 @@ function handleSkipReconnectSession() {
       </div>
     </div>
 
+    <div v-if="showHostKeyOverlay && hostKeyPrompt" class="password-retry-overlay">
+      <div class="password-retry-dialog">
+        <div class="password-retry-icon">⚠️</div>
+        <h3 class="password-retry-title">Host Key Changed</h3>
+        <p class="password-retry-desc">
+          The SSH host key for <strong>{{ hostKeyPrompt.host }}:{{ hostKeyPrompt.port }}</strong> changed.
+          This may indicate a reinstalled host or a man-in-the-middle attack.
+        </p>
+        <div class="host-key-fingerprint-block">
+          <div class="host-key-fingerprint-label">Known fingerprint</div>
+          <div class="host-key-fingerprint-value">{{ hostKeyPrompt.expectedFingerprint }}</div>
+          <div class="host-key-fingerprint-label" style="margin-top: 8px;">Presented fingerprint</div>
+          <div class="host-key-fingerprint-value">{{ hostKeyPrompt.observedFingerprint }}</div>
+        </div>
+        <div class="password-retry-actions">
+          <button type="button" class="password-retry-btn cancel" @click="handleRejectHostKey">Cancel</button>
+          <button type="button" class="password-retry-btn retry" @click="handleTrustHostKey">Trust And Continue</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Manual Reconnect Status Bar -->
     <div v-if="manualReconnectPending" class="reconnect-status-bar">
       <div class="reconnect-status-content">
@@ -981,5 +1112,24 @@ function handleSkipReconnectSession() {
 
 .reconnect-status-btn:active {
   background: #006cc1;
+}
+
+.host-key-fingerprint-block {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.host-key-fingerprint-label {
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+
+.host-key-fingerprint-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  word-break: break-all;
 }
 </style>
