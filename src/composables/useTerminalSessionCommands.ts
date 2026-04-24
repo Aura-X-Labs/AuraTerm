@@ -96,23 +96,55 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
   }
 
   async function persistUpdatedSshPassword(sshConfig: SshConfig) {
-    if (!sshConfig.savedConnectionId) {
-      return;
-    }
-
     try {
       const connections = await invoke<SavedConnection[]>("get_connections");
-      const existing = connections.find((connection) => connection.id === sshConfig.savedConnectionId);
-      if (!existing) {
+
+      // 1. Prefer matching by the explicit savedConnectionId.
+      let target = sshConfig.savedConnectionId
+        ? connections.find((connection) => connection.id === sshConfig.savedConnectionId)
+        : undefined;
+
+      // 2. Fallback: match an existing SSH bookmark by host/port/user so that
+      //    quick-connect reconnects for a known server also update the stored
+      //    password (only when exactly one candidate exists — otherwise we
+      //    would silently mutate the wrong bookmark).
+      if (!target) {
+        const candidates = connections.filter(
+          (connection) =>
+            (connection.protocol ?? "ssh") === "ssh"
+            && connection.host === sshConfig.host
+            && connection.port === sshConfig.port
+            && connection.user === sshConfig.user,
+        );
+        if (candidates.length === 1) {
+          target = candidates[0];
+          console.info(
+            `[password-retry] matched bookmark "${target.name}" by host/port/user; updating its stored password`,
+          );
+        } else if (candidates.length > 1) {
+          console.warn(
+            `[password-retry] ${candidates.length} bookmarks match ${sshConfig.user}@${sshConfig.host}:${sshConfig.port}; skipping persistence to avoid ambiguous overwrite`,
+          );
+        }
+      }
+
+      if (!target) {
+        console.info(
+          `[password-retry] no saved bookmark found for ${sshConfig.user}@${sshConfig.host}:${sshConfig.port}; new password will only last for the current session`,
+        );
         return;
       }
 
       await invoke("save_connection", {
         connection: {
-          ...existing,
+          ...target,
+          // Keep the bookmark's stored authType; if it was "none" we still
+          // upgrade to "password" because the user just authenticated with one.
+          authType: target.authType === "key" ? "key" : "password",
           password: sshConfig.password,
         },
       });
+      console.info(`[password-retry] password for bookmark "${target.name}" updated`);
       onSshPasswordUpdated();
     } catch (error) {
       console.error("Failed to persist updated SSH password", error);
