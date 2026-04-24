@@ -2086,6 +2086,22 @@ async fn run_reconnect_loop(
             }
             Err(err) => {
                 cleanup_ssh_runtime_state(&state, &id).await;
+
+                // Authentication errors are not recoverable by retrying with the
+                // same stored credentials. Stop the reconnect loop and let the
+                // frontend show the password-retry overlay via pty-exit.
+                if is_auth_error(&err) {
+                    cleanup_ssh_session(&state, &id).await;
+                    let _ = app.emit(
+                        "pty-exit",
+                        PtyExitPayload {
+                            id: id.clone(),
+                            message: err,
+                        },
+                    );
+                    return;
+                }
+
                 let _ = app.emit(
                     "pty-output",
                     TerminalDataPayload {
@@ -2106,6 +2122,18 @@ async fn run_reconnect_loop(
             message: "SSH session ended".to_string(),
         },
     );
+}
+
+/// Detect authentication-related error messages so the reconnect loop can
+/// bail out instead of retrying with invalid credentials forever.
+fn is_auth_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("authentication failed")
+        || lower.contains("auth failed")
+        || lower.contains("incorrect password")
+        || lower.contains("permission denied")
+        || lower.contains("password authentication failed")
+        || lower.contains("private key authentication failed")
 }
 
 fn is_cancelled(notify: &Arc<tokio::sync::Notify>) -> bool {
