@@ -19,9 +19,9 @@
     "release:windows:msixupload": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1 -MsixUpload"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-os": "^2.3.2",
-    "@tauri-apps/plugin-shell": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.3.5",
     "cloc": "^2.6.0-cloc",
     "vue": "^3.5.13",
     "@xterm/addon-fit": "^0.10.0",
@@ -31,7 +31,7 @@
     "@xterm/xterm": "^5.5.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "^2.10.1",
     "@vitejs/plugin-vue": "^6.0.1",
     "@vue/compiler-sfc": "^3.5.13",
     "typescript": "^5.0.2",
