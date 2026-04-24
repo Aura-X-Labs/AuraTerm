@@ -2085,6 +2085,7 @@ async fn run_reconnect_loop(
                 }
             }
             Err(err) => {
+                eprintln!("[ssh-debug] {} do_single_ssh_connect returned Err: {}", id, err);
                 cleanup_ssh_runtime_state(&state, &id).await;
 
                 // Authentication errors are not recoverable by retrying with the
@@ -2179,6 +2180,7 @@ async fn do_single_ssh_connect(
     println!("Connecting to {}...", addr);
 
     let session_handle = authenticate_ssh(host, port, user, password, private_key, app, id, &mut auth_response_rx).await?;
+    eprintln!("[ssh-debug] {} authenticated; opening PTY channel", id);
 
     println!("Requesting PTY and shell...");
     let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(id));
@@ -2268,6 +2270,11 @@ async fn do_single_ssh_connect(
     let state_clone = state.clone();
     let session_handle_for_io = session_handle.clone();
 
+    eprintln!(
+        "[ssh-debug] {} PTY channel established (used_multiplexer={}); entering IO loop",
+        connection_id, used_multiplexer
+    );
+
     tokio::spawn(async move {
         run_channel_io_loop(
             app_handle,
@@ -2296,12 +2303,19 @@ async fn run_channel_io_loop(
 ) {
     let mut last_write_error_notice_at: Option<std::time::Instant> = None;
     let final_exit_message;
+    let loop_started_at = std::time::Instant::now();
+    let mut data_bytes_total: u64 = 0;
+    let mut data_msg_count: u64 = 0;
+
+    eprintln!("[ssh-debug] {} run_channel_io_loop started", id);
 
     loop {
         tokio::select! {
             msg = channel.wait() => {
                 match msg {
-                    Some(ChannelMsg::Data { ref data }) | Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                    Some(ChannelMsg::Data { ref data }) => {
+                        data_msg_count += 1;
+                        data_bytes_total += data.len() as u64;
                         let _ = app.emit(
                             "pty-output",
                             TerminalDataPayload {
@@ -2310,15 +2324,80 @@ async fn run_channel_io_loop(
                             },
                         );
                     }
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => {
-                        final_exit_message = Some("SSH connection closed by remote".to_string());
+                    Some(ChannelMsg::ExtendedData { ref data, ext }) => {
+                        data_msg_count += 1;
+                        data_bytes_total += data.len() as u64;
+                        eprintln!(
+                            "[ssh-debug] {} ExtendedData ext={} ({} bytes)",
+                            id, ext, data.len()
+                        );
+                        let _ = app.emit(
+                            "pty-output",
+                            TerminalDataPayload {
+                                id: id.clone(),
+                                data: String::from_utf8_lossy(data).to_string(),
+                            },
+                        );
+                    }
+                    Some(ChannelMsg::Eof) => {
+                        eprintln!(
+                            "[ssh-debug] {} received ChannelMsg::Eof after {:?} (msgs={}, bytes={})",
+                            id, loop_started_at.elapsed(), data_msg_count, data_bytes_total
+                        );
+                        final_exit_message = Some("SSH connection closed by remote (EOF)".to_string());
                         break;
+                    }
+                    Some(ChannelMsg::Close) => {
+                        eprintln!(
+                            "[ssh-debug] {} received ChannelMsg::Close after {:?} (msgs={}, bytes={})",
+                            id, loop_started_at.elapsed(), data_msg_count, data_bytes_total
+                        );
+                        final_exit_message = Some("SSH connection closed by remote (Close)".to_string());
+                        break;
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        eprintln!(
+                            "[ssh-debug] {} received ExitStatus={} after {:?}",
+                            id, exit_status, loop_started_at.elapsed()
+                        );
+                    }
+                    Some(ChannelMsg::ExitSignal { ref signal_name, core_dumped, ref error_message, ref lang_tag }) => {
+                        eprintln!(
+                            "[ssh-debug] {} received ExitSignal signal={:?} core_dumped={} error={:?} lang={:?}",
+                            id, signal_name, core_dumped, error_message, lang_tag
+                        );
+                        final_exit_message = Some(format!(
+                            "SSH remote shell killed by signal {:?}: {}",
+                            signal_name, error_message
+                        ));
+                        break;
+                    }
+                    Some(ChannelMsg::Success) => {
+                        // Normal reply to a channel request (e.g. pty-req / shell). Ignore.
+                    }
+                    Some(ChannelMsg::Failure) => {
+                        eprintln!("[ssh-debug] {} received ChannelMsg::Failure (server rejected a channel request)", id);
+                    }
+                    Some(ChannelMsg::OpenFailure(reason)) => {
+                        eprintln!("[ssh-debug] {} received ChannelMsg::OpenFailure: {:?}", id, reason);
+                        final_exit_message = Some(format!("SSH channel open failure: {:?}", reason));
+                        break;
+                    }
+                    Some(other) => {
+                        // Log unknown / unhandled ChannelMsg variants to diagnose unexpected disconnects.
+                        eprintln!(
+                            "[ssh-debug] {} unhandled ChannelMsg variant: {:?}",
+                            id, std::mem::discriminant(&other)
+                        );
                     }
                     None => {
-                        final_exit_message = Some("SSH channel closed (None)".to_string());
+                        eprintln!(
+                            "[ssh-debug] {} channel.wait() returned None after {:?} (msgs={}, bytes={}); likely transport closed (keepalive timeout or TCP reset)",
+                            id, loop_started_at.elapsed(), data_msg_count, data_bytes_total
+                        );
+                        final_exit_message = Some("SSH channel closed (transport ended)".to_string());
                         break;
                     }
-                    _ => {}
                 }
             }
             Some(input) = input_rx.recv() => {
@@ -2326,6 +2405,7 @@ async fn run_channel_io_loop(
                 match write_interactive_input(&mut channel, &handle, input_bytes.as_slice()).await {
                     InteractiveWriteOutcome::Sent => {}
                     InteractiveWriteOutcome::Dropped(message) => {
+                        eprintln!("[ssh-debug] {} write dropped: {}", id, message);
                         let should_emit = last_write_error_notice_at
                             .map(|t| t.elapsed() >= std::time::Duration::from_secs(2))
                             .unwrap_or(true);
@@ -2351,11 +2431,21 @@ async fn run_channel_io_loop(
                 }
             }
             else => {
+                eprintln!("[ssh-debug] {} select!/else branch hit — all sources closed", id);
                 final_exit_message = Some("Interactive IO loop ended unexpectedly".to_string());
                 break;
             }
         }
     }
+
+    eprintln!(
+        "[ssh-debug] {} IO loop exit after {:?}; final_message={:?}; msgs={}, bytes={}",
+        id,
+        loop_started_at.elapsed(),
+        final_exit_message,
+        data_msg_count,
+        data_bytes_total
+    );
 
     // Connection dropped — remove handles so the reconnect loop detects it.
     state.connections.lock().await.remove(&id);
