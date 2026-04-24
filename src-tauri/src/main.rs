@@ -294,10 +294,17 @@ fn setup_window_bounds_persistence(app: &AppHandle) -> Result<(), String> {
 
     let app_handle = app.clone();
     let event_window = window.clone();
+    // Track the last reported inner size so we don't spam logs when the OS emits
+    // redundant Resized events with the same dimensions (common on macOS).
+    let last_logged_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     window.on_window_event(move |event| match event {
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
             if let Ok(size) = event_window.inner_size() {
-                println!("[Window] New inner size: {}x{}", size.width, size.height);
+                let packed = ((size.width as u64) << 32) | (size.height as u64);
+                let prev = last_logged_size.swap(packed, std::sync::atomic::Ordering::Relaxed);
+                if prev != packed {
+                    println!("[Window] New inner size: {}x{}", size.width, size.height);
+                }
             }
             if let Ok(bounds) = current_window_bounds(&event_window) {
                 let _ = save_window_bounds_if_needed(&app_handle, bounds);
