@@ -132,6 +132,9 @@ pub struct Settings {
     /// Recent serial parameter presets inferred from usage history
     #[serde(default)]
     pub recent_serial_configs: Vec<SerialHistoryItem>,
+    /// Input history for the terminal input bar (most recent first)
+    #[serde(default)]
+    pub input_history: Vec<String>,
     /// Whether to restore the previous session tabs on startup
     #[serde(default)]
     pub restore_tabs_on_startup: bool,
@@ -145,7 +148,7 @@ pub struct Settings {
 
 fn default_true() -> bool { true }
 fn default_log_save_path() -> String { "~/AuraTerm/logs".to_string() }
-fn default_log_file_name_template() -> String { "{timestamp}_{session}".to_string() }
+fn default_log_file_name_template() -> String { "{session}_{timestamp}".to_string() }
 
 
 impl Default for Settings {
@@ -167,6 +170,7 @@ impl Default for Settings {
             quick_buttons: vec![],
             last_serial_config: None,
             recent_serial_configs: vec![],
+            input_history: vec![],
             restore_tabs_on_startup: false,
             pane_layout: None,
             workspace_state: None,
@@ -218,5 +222,108 @@ fn merge_json(base: serde_json::Value, patch: serde_json::Value) -> serde_json::
             serde_json::Value::Object(base_map)
         }
         (_base, patch) => patch,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+    use std::{collections::BTreeSet, fs, path::PathBuf};
+    use serde_json::json;
+
+    fn frontend_settings_ts_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("src")
+            .join("settings.ts")
+    }
+
+    fn load_frontend_app_settings_keys() -> BTreeSet<String> {
+        let content = fs::read_to_string(frontend_settings_ts_path())
+            .expect("frontend settings.ts should be readable during schema tests");
+        let marker = "export interface AppSettings {";
+        let start = content
+            .find(marker)
+            .map(|idx| idx + marker.len())
+            .expect("AppSettings interface should exist in frontend settings.ts");
+        let rest = &content[start..];
+        let end = rest
+            .find("\n}")
+            .expect("AppSettings interface should have a closing brace");
+        let block = &rest[..end];
+
+        block
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty()
+                    || trimmed.starts_with("/**")
+                    || trimmed.starts_with('*')
+                    || trimmed.starts_with("*/")
+                    || trimmed.starts_with("//")
+                {
+                    return None;
+                }
+
+                let (name, _ty) = trimmed.split_once(':')?;
+                let normalized_name = name.trim().trim_end_matches('?');
+                if normalized_name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+                    Some(normalized_name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn serialized_settings_keys(settings: &Settings) -> BTreeSet<String> {
+        serde_json::to_value(settings)
+            .expect("settings should serialize to JSON")
+            .as_object()
+            .expect("settings JSON should be an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn settings_deserialize_input_history_from_frontend_shape() {
+        let mut payload = serde_json::to_value(Settings::default())
+            .expect("default settings should serialize to JSON");
+        payload["inputHistory"] = json!(["ls", "pwd"]);
+
+        let settings: Settings = serde_json::from_value(payload)
+        .expect("settings should deserialize from frontend camelCase shape");
+
+        assert_eq!(settings.input_history, vec!["ls", "pwd"]);
+    }
+
+    #[test]
+    fn settings_default_log_template_matches_frontend_default() {
+        assert_eq!(Settings::default().log_file_name_template, "{session}_{timestamp}");
+    }
+
+    #[test]
+    fn settings_schema_keys_match_frontend_app_settings_interface() {
+        let frontend_keys = load_frontend_app_settings_keys();
+        let backend_keys = serialized_settings_keys(&Settings::default());
+
+        assert_eq!(backend_keys, frontend_keys);
+    }
+
+    #[test]
+    fn settings_round_trip_preserves_frontend_schema_defaults() {
+        let frontend_keys = load_frontend_app_settings_keys();
+        let serialized = serde_json::to_value(Settings::default())
+            .expect("default settings should serialize to JSON");
+        let round_tripped: Settings = serde_json::from_value(serialized.clone())
+            .expect("default settings JSON should deserialize back into Settings");
+        let reserialized = serde_json::to_value(round_tripped)
+            .expect("round-tripped settings should serialize to JSON");
+
+        assert_eq!(serialized, reserialized);
+        assert_eq!(reserialized.as_object().expect("round-trip JSON should be an object").keys().cloned().collect::<BTreeSet<_>>(), frontend_keys);
+        assert_eq!(reserialized["inputHistory"], json!([]));
+        assert_eq!(reserialized["logFileNameTemplate"], json!("{session}_{timestamp}"));
     }
 }
