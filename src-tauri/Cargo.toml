@@ -26,4 +26,12 @@ russh = "0.60.1"
 russh-sftp = "2.1.1"
 ssh-key = "0.6.7"
 serialport = "4.8.1"
-keyring = "3.6.2"
+# keyring v3 requires explicit platform backend features; without them the
+# crate silently falls back to a mock in-memory store (writes succeed but
+# reads never find the entry). Enable the native credential store on each
+# supported desktop platform.
+keyring = { version = "3.6.2", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
