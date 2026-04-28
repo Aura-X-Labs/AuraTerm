@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 type SharedSshHandle = Arc<Mutex<client::Handle<ClientHandler>>>;
 const SSH_TRANSFER_PROGRESS_EVENT: &str = "ssh-transfer-progress";
@@ -178,19 +178,44 @@ impl client::Handler for ClientHandler {
     }
 }
 
+/// Per-session state consolidated into a single record.
+///
+/// Previously these fields lived in eight separate `Arc<Mutex<HashMap>>`s,
+/// which produced significant lock contention on the keystroke hot path
+/// (`write_ssh_pty_input`) and on the IO loop's teardown. We now store the
+/// whole per-id record in a single `Arc<RwLock<HashMap<String, SshSessionState>>>`:
+///
+/// - Hot-path readers (keystroke / resize dispatch) acquire a `read()` lock,
+///   clone the cheap `mpsc::Sender` they need, and release the lock before
+///   awaiting on the channel `.send()`. Because `Sender` is `Clone` and just
+///   bumps an Arc refcount, the read section is O(1) and non-blocking.
+/// - Low-frequency mutators (session insert/remove, reconnect metadata
+///   update) take a `write()` lock only briefly.
+#[derive(Default)]
+pub struct SshSessionState {
+    /// PTY input forwarder — the channel whose receiver feeds the IO loop.
+    input_tx: Option<mpsc::Sender<String>>,
+    /// Window-resize forwarder.
+    resize_tx: Option<mpsc::Sender<(u32, u32)>>,
+    /// MFA / keyboard-interactive answer forwarder.
+    auth_tx: Option<mpsc::Sender<String>>,
+    /// Reconnect-session-name picker response forwarder.
+    reconnect_prompt_tx: Option<mpsc::Sender<Option<String>>>,
+    /// Host-key mismatch trust decision forwarder.
+    host_key_prompt_tx: Option<mpsc::Sender<bool>>,
+    /// Underlying russh handle shared across PTY / SFTP / kill paths.
+    handle: Option<SharedSshHandle>,
+    /// When `Some`, an auto-reconnect loop is active; notifying it stops the loop.
+    reconnect_flag: Option<Arc<tokio::sync::Notify>>,
+    /// When `Some`, auto-reconnect is enabled and this config is used on every retry.
+    reconnect_config: Option<ReconnectConfig>,
+}
+
 #[derive(Clone)]
 pub struct SshState {
-    pub connections: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
-    pub auth_responses: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
-    pub resize_channels: Arc<Mutex<HashMap<String, mpsc::Sender<(u32, u32)>>>>,
-    handles: Arc<Mutex<HashMap<String, SharedSshHandle>>>,
-    reconnect_prompt_responses: Arc<Mutex<HashMap<String, mpsc::Sender<Option<String>>>>>,
-    host_key_prompt_responses: Arc<Mutex<HashMap<String, mpsc::Sender<bool>>>>,
-    /// Tracks whether auto-reconnect is active for each session.
-    /// When set to false, the reconnect loop will exit.
-    reconnect_flags: Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
-    /// Stores reconnect config per session: (host, port, user, password, private_key, reconnect_type)
-    reconnect_configs: Arc<Mutex<HashMap<String, ReconnectConfig>>>,
+    /// Single source of truth for every live SSH session, keyed by the
+    /// frontend-assigned connection id.
+    sessions: Arc<RwLock<HashMap<String, SshSessionState>>>,
 }
 
 #[derive(Clone)]
@@ -228,15 +253,76 @@ impl Default for SshState {
 impl SshState {
     pub fn new() -> Self {
         Self {
-            connections: Arc::new(Mutex::new(HashMap::new())),
-            auth_responses: Arc::new(Mutex::new(HashMap::new())),
-            resize_channels: Arc::new(Mutex::new(HashMap::new())),
-            handles: Arc::new(Mutex::new(HashMap::new())),
-            reconnect_prompt_responses: Arc::new(Mutex::new(HashMap::new())),
-            host_key_prompt_responses: Arc::new(Mutex::new(HashMap::new())),
-            reconnect_flags: Arc::new(Mutex::new(HashMap::new())),
-            reconnect_configs: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Return a snapshot clone of `T` extracted from the session at `id`,
+    /// holding only a read lock during the extraction. Used on hot paths.
+    async fn snapshot<T, F>(&self, id: &str, f: F) -> Option<T>
+    where
+        F: FnOnce(&SshSessionState) -> Option<T>,
+    {
+        let guard = self.sessions.read().await;
+        guard.get(id).and_then(f)
+    }
+
+    /// Clone the cheap `mpsc::Sender<String>` for PTY input, if any.
+    async fn input_sender(&self, id: &str) -> Option<mpsc::Sender<String>> {
+        self.snapshot(id, |s| s.input_tx.clone()).await
+    }
+
+    /// Clone the cheap `mpsc::Sender<(u32, u32)>` for window resize, if any.
+    async fn resize_sender(&self, id: &str) -> Option<mpsc::Sender<(u32, u32)>> {
+        self.snapshot(id, |s| s.resize_tx.clone()).await
+    }
+
+    /// Clone the MFA response sender, if any.
+    async fn auth_sender(&self, id: &str) -> Option<mpsc::Sender<String>> {
+        self.snapshot(id, |s| s.auth_tx.clone()).await
+    }
+
+    /// Clone the reconnect-prompt response sender, if any.
+    async fn reconnect_prompt_sender(
+        &self,
+        id: &str,
+    ) -> Option<mpsc::Sender<Option<String>>> {
+        self.snapshot(id, |s| s.reconnect_prompt_tx.clone()).await
+    }
+
+    /// Clone the host-key-prompt response sender, if any.
+    async fn host_key_prompt_sender(&self, id: &str) -> Option<mpsc::Sender<bool>> {
+        self.snapshot(id, |s| s.host_key_prompt_tx.clone()).await
+    }
+
+    /// Clone the underlying russh handle, if any.
+    async fn handle(&self, id: &str) -> Option<SharedSshHandle> {
+        self.snapshot(id, |s| s.handle.clone()).await
+    }
+
+    /// Clone the reconnect config, if any.
+    async fn reconnect_config(&self, id: &str) -> Option<ReconnectConfig> {
+        self.snapshot(id, |s| s.reconnect_config.clone()).await
+    }
+
+    /// Mutate an existing session record under the write lock. No-op if
+    /// the session has already been cleaned up.
+    async fn with_session_mut<F, R>(&self, id: &str, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut SshSessionState) -> R,
+    {
+        let mut guard = self.sessions.write().await;
+        guard.get_mut(id).map(f)
+    }
+
+    /// Ensure a session record exists and apply a mutation closure.
+    async fn upsert_session<F>(&self, id: &str, f: F)
+    where
+        F: FnOnce(&mut SshSessionState),
+    {
+        let mut guard = self.sessions.write().await;
+        let entry = guard.entry(id.to_string()).or_default();
+        f(entry);
     }
 }
 
@@ -432,10 +518,8 @@ async fn prompt_for_host_key_override(
 ) -> Result<bool, String> {
     let (tx, mut rx) = mpsc::channel::<bool>(1);
     state
-        .host_key_prompt_responses
-        .lock()
-        .await
-        .insert(id.to_string(), tx);
+        .upsert_session(id, |s| s.host_key_prompt_tx = Some(tx))
+        .await;
 
     let emitted = app.emit(
         "ssh-host-key-mismatch-prompt",
@@ -449,7 +533,9 @@ async fn prompt_for_host_key_override(
     );
 
     if emitted.is_err() {
-        state.host_key_prompt_responses.lock().await.remove(id);
+        state
+            .with_session_mut(id, |s| s.host_key_prompt_tx = None)
+            .await;
         return Err("Failed to emit SSH host key mismatch prompt".to_string());
     }
 
@@ -459,7 +545,9 @@ async fn prompt_for_host_key_override(
         .flatten()
         .unwrap_or(false);
 
-    state.host_key_prompt_responses.lock().await.remove(id);
+    state
+        .with_session_mut(id, |s| s.host_key_prompt_tx = None)
+        .await;
     Ok(decision)
 }
 
@@ -670,38 +758,60 @@ fn maybe_emit_transfer_progress(
     );
 }
 
+/// Clear all transient channels/handles for a session while keeping the
+/// reconnect config and reconnect flag (so auto-reconnect can restart).
 async fn cleanup_ssh_runtime_state(state: &SshState, id: &str) {
-    state.connections.lock().await.remove(id);
-    state.resize_channels.lock().await.remove(id);
-    state.auth_responses.lock().await.remove(id);
-    state.handles.lock().await.remove(id);
-    state.reconnect_prompt_responses.lock().await.remove(id);
-    state.host_key_prompt_responses.lock().await.remove(id);
+    state
+        .with_session_mut(id, |s| {
+            s.input_tx = None;
+            s.resize_tx = None;
+            s.auth_tx = None;
+            s.handle = None;
+            s.reconnect_prompt_tx = None;
+            s.host_key_prompt_tx = None;
+        })
+        .await;
 }
 
+/// Clear transient state plus the reconnect config. Auto-reconnect flag is
+/// preserved so the reconnect loop can observe cancellation.
 async fn cleanup_ssh_session(state: &SshState, id: &str) {
-    cleanup_ssh_runtime_state(state, id).await;
-    state.reconnect_configs.lock().await.remove(id);
-    // Do NOT remove reconnect_flags here — that's handled only in close_ssh_pty
+    state
+        .with_session_mut(id, |s| {
+            s.input_tx = None;
+            s.resize_tx = None;
+            s.auth_tx = None;
+            s.handle = None;
+            s.reconnect_prompt_tx = None;
+            s.host_key_prompt_tx = None;
+            s.reconnect_config = None;
+        })
+        .await;
+    // Do NOT clear reconnect_flag here — that's handled only in close_ssh_pty
     // to allow the reconnect loop to restart the connection.
 }
 
-/// Stop reconnect loop for a session and clean up all state.
+/// Stop reconnect loop for a session and clean up all state, finally dropping
+/// the entire session record.
 async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) {
-    // Signal the reconnect loop to stop.
-    if let Some(notify) = state.reconnect_flags.lock().await.remove(id) {
+    // Signal the reconnect loop to stop, then remove the session entirely.
+    let notify = {
+        let mut guard = state.sessions.write().await;
+        let notify = guard
+            .get_mut(id)
+            .and_then(|s| s.reconnect_flag.take());
+        guard.remove(id);
+        notify
+    };
+    if let Some(notify) = notify {
         notify.notify_waiters();
     }
-    cleanup_ssh_session(state, id).await;
 }
 
 async fn get_ssh_handle(state: &SshState, id: &str) -> Result<SharedSshHandle, String> {
     state
-        .handles
-        .lock()
+        .handle(id)
         .await
-        .get(id)
-        .cloned()
         .ok_or_else(|| "SSH session is not ready yet".to_string())
 }
 
@@ -711,14 +821,18 @@ async fn set_reconnect_session_metadata(
     session_name: Option<String>,
     checked_existing_sessions: Option<bool>,
 ) {
-    if let Some(config) = state.reconnect_configs.lock().await.get_mut(id) {
-        if let Some(name) = session_name {
-            config.session_name = name;
-        }
-        if let Some(checked) = checked_existing_sessions {
-            config.checked_existing_sessions = checked;
-        }
-    }
+    state
+        .with_session_mut(id, |s| {
+            if let Some(config) = s.reconnect_config.as_mut() {
+                if let Some(name) = session_name {
+                    config.session_name = name;
+                }
+                if let Some(checked) = checked_existing_sessions {
+                    config.checked_existing_sessions = checked;
+                }
+            }
+        })
+        .await;
 }
 
 async fn open_ssh_channel(
@@ -1316,17 +1430,17 @@ pub async fn answer_ssh_mfa(
     id: String,
     responses: Vec<String>,
 ) -> Result<(), String> {
-    let mut auth_responses = state.auth_responses.lock().await;
-    if let Some(tx) = auth_responses.get_mut(&id) {
-        for response in responses {
-            tx.send(response)
-                .await
-                .map_err(|_| "Failed to send MFA response".to_string())?;
-        }
-        Ok(())
-    } else {
-        Err("Auth response channel not found".to_string())
+    // Clone the sender under the read lock so the mpsc awaits run lock-free.
+    let tx = state
+        .auth_sender(&id)
+        .await
+        .ok_or_else(|| "Auth response channel not found".to_string())?;
+    for response in responses {
+        tx.send(response)
+            .await
+            .map_err(|_| "Failed to send MFA response".to_string())?;
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1336,11 +1450,8 @@ pub async fn answer_ssh_reconnect_choice(
     session_name: Option<String>,
 ) -> Result<(), String> {
     let tx = state
-        .reconnect_prompt_responses
-        .lock()
+        .reconnect_prompt_sender(&id)
         .await
-        .get(&id)
-        .cloned()
         .ok_or_else(|| "Reconnect prompt channel not found".to_string())?;
 
     tx.send(session_name.filter(|value| !value.trim().is_empty()))
@@ -1355,11 +1466,8 @@ pub async fn answer_ssh_host_key_mismatch(
     trust_new_fingerprint: bool,
 ) -> Result<(), String> {
     let tx = state
-        .host_key_prompt_responses
-        .lock()
+        .host_key_prompt_sender(&id)
         .await
-        .get(&id)
-        .cloned()
         .ok_or_else(|| "Host key prompt channel not found".to_string())?;
 
     tx.send(trust_new_fingerprint)
@@ -1378,13 +1486,11 @@ pub async fn rename_ssh_session(
         return Err("New session name cannot be empty".to_string());
     }
 
-    let (old_name, reconnect_type) = {
-        let configs = state.reconnect_configs.lock().await;
-        let config = configs
-            .get(&id)
-            .ok_or_else(|| "SSH session not found or not in reconnect mode".to_string())?;
-        (config.session_name.clone(), config.reconnect_type)
-    };
+    let (old_name, reconnect_type) = state
+        .reconnect_config(&id)
+        .await
+        .map(|c| (c.session_name.clone(), c.reconnect_type))
+        .ok_or_else(|| "SSH session not found or not in reconnect mode".to_string())?;
 
     if old_name == new_name {
         return Ok(());
@@ -1407,9 +1513,13 @@ pub async fn rename_ssh_session(
     let handle = get_ssh_handle(&state, &id).await?;
     run_remote_command_capture(&handle, rename_cmd).await?;
 
-    if let Some(config) = state.reconnect_configs.lock().await.get_mut(&id) {
-        config.session_name = new_name;
-    }
+    state
+        .with_session_mut(&id, |s| {
+            if let Some(config) = s.reconnect_config.as_mut() {
+                config.session_name = new_name;
+            }
+        })
+        .await;
 
     Ok(())
 }
@@ -1421,10 +1531,10 @@ pub async fn write_ssh_pty_input(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let tx = {
-        let connections = state.connections.lock().await;
-        connections.get(&id).cloned()
-    };
+    // Hot path: acquire the read lock only long enough to clone the cheap
+    // mpsc::Sender, then drop the lock before awaiting on `.send()`. This
+    // lets concurrent keystrokes and IO-loop teardown proceed in parallel.
+    let tx = state.input_sender(&id).await;
 
     if let Some(tx) = tx {
         if tx.send(data).await.is_err() {
@@ -1452,13 +1562,13 @@ pub async fn resize_ssh_pty(
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
-    let mut resize_channels = state.resize_channels.lock().await;
-    if let Some(tx) = resize_channels.get_mut(&id) {
-        let _ = tx.send((cols, rows)).await;
-        Ok(())
-    } else {
-        Err("Connection not found".to_string())
-    }
+    // Clone the sender under a read lock so `.send()` happens lock-free.
+    let tx = state
+        .resize_sender(&id)
+        .await
+        .ok_or_else(|| "Connection not found".to_string())?;
+    let _ = tx.send((cols, rows)).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1467,7 +1577,7 @@ pub async fn close_ssh_pty(
     id: String,
 ) -> Result<(), String> {
     // For session-persistence modes (tmux/screen), try to destroy the remote session first.
-    let config = state.reconnect_configs.lock().await.get(&id).cloned();
+    let config = state.reconnect_config(&id).await;
     if let Some(cfg) = config {
         let kill_cmd = match cfg.reconnect_type {
             ReconnectType::Manual => None,
@@ -1775,10 +1885,8 @@ async fn prompt_for_existing_reconnect_session(
 
     let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
     state
-        .reconnect_prompt_responses
-        .lock()
-        .await
-        .insert(id.to_string(), tx);
+        .upsert_session(id, |s| s.reconnect_prompt_tx = Some(tx))
+        .await;
 
     let tool = match reconnect_type {
         ReconnectType::Manual => "manual",
@@ -1798,7 +1906,9 @@ async fn prompt_for_existing_reconnect_session(
         )
         .is_err()
     {
-        state.reconnect_prompt_responses.lock().await.remove(id);
+        state
+            .with_session_mut(id, |s| s.reconnect_prompt_tx = None)
+            .await;
         return Ok(None);
     }
 
@@ -1808,7 +1918,9 @@ async fn prompt_for_existing_reconnect_session(
         .flatten()
         .flatten();
 
-    state.reconnect_prompt_responses.lock().await.remove(id);
+    state
+        .with_session_mut(id, |s| s.reconnect_prompt_tx = None)
+        .await;
     Ok(response)
 }
 
@@ -1909,27 +2021,33 @@ pub async fn start_ssh_pty(
 
     // Always create a fresh auth-response channel registered under this id.
     let (auth_response_tx, auth_response_rx) = mpsc::channel::<String>(4);
-    state.auth_responses.lock().await.insert(id.clone(), auth_response_tx);
+    state
+        .upsert_session(&id, |s| s.auth_tx = Some(auth_response_tx))
+        .await;
 
     if use_reconnect {
-        // Store reconnect configuration.
-        state.reconnect_configs.lock().await.insert(id.clone(), ReconnectConfig {
-            host: host.clone(),
-            port,
-            user: user.clone(),
-            password: password.clone(),
-            private_key: private_key.clone(),
-            reconnect_type: rt,
-            session_name: auraterm_reconnect_session_name(&id),
-            checked_existing_sessions: false,
-            cols,
-            rows,
-            last_error: None,
-        });
-
-        // Create a cancellation notifier and register it.
+        // Store reconnect configuration + cancellation notifier in a single
+        // write-lock acquisition.
         let cancel_notify = Arc::new(tokio::sync::Notify::new());
-        state.reconnect_flags.lock().await.insert(id.clone(), cancel_notify.clone());
+        let cancel_notify_clone = cancel_notify.clone();
+        state
+            .upsert_session(&id, |s| {
+                s.reconnect_config = Some(ReconnectConfig {
+                    host: host.clone(),
+                    port,
+                    user: user.clone(),
+                    password: password.clone(),
+                    private_key: private_key.clone(),
+                    reconnect_type: rt,
+                    session_name: auraterm_reconnect_session_name(&id),
+                    checked_existing_sessions: false,
+                    cols,
+                    rows,
+                    last_error: None,
+                });
+                s.reconnect_flag = Some(cancel_notify_clone);
+            })
+            .await;
 
         let state_clone = state.inner().clone();
         let app_clone = app.clone();
@@ -1998,14 +2116,12 @@ async fn run_reconnect_loop(
 
         if !first_attempt {
             // Get the last error if available
-            let last_error = {
-                let mut configs = state.reconnect_configs.lock().await;
-                if let Some(cfg) = configs.get_mut(&id) {
-                    cfg.last_error.take()
-                } else {
-                    None
-                }
-            };
+            let last_error = state
+                .with_session_mut(&id, |s| {
+                    s.reconnect_config.as_mut().and_then(|c| c.last_error.take())
+                })
+                .await
+                .flatten();
 
             let notice = if let Some(err) = last_error {
                 format!("\r\n\x1b[31m[Disconnected: {err}]\x1b[0m\r\n\x1b[33m[Reconnecting in 5 s...]\x1b[0m\r\n")
@@ -2035,17 +2151,16 @@ async fn run_reconnect_loop(
         first_attempt = false;
 
         // Retrieve the latest reconnect config (cols/rows may have been updated by resize).
-        let cfg = {
-            let guard = state.reconnect_configs.lock().await;
-            match guard.get(&id).cloned() {
-                Some(c) => c,
-                None => break,
-            }
+        let cfg = match state.reconnect_config(&id).await {
+            Some(c) => c,
+            None => break,
         };
 
         // Ensure a fresh auth-response channel is available.
         let (auth_tx, rx) = mpsc::channel::<String>(4);
-        state.auth_responses.lock().await.insert(id.clone(), auth_tx);
+        state
+            .upsert_session(&id, |s| s.auth_tx = Some(auth_tx))
+            .await;
 
         // For Manual/Simple mode, pass None as reconnect_type so no multiplexer is used.
         let mux_type = match cfg.reconnect_type {
@@ -2077,7 +2192,7 @@ async fn run_reconnect_loop(
                 loop {
                     tokio::select! {
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {
-                            let gone = state.handles.lock().await.get(&id).is_none();
+                            let gone = state.handle(&id).await.is_none();
                             if gone { break; }
                         }
                         _ = cancel_notify.notified() => { return; }
@@ -2229,13 +2344,18 @@ async fn do_single_ssh_connect(
     let (input_tx, input_rx) = mpsc::channel::<String>(512);
     let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
-    state.connections.lock().await.insert(id.to_string(), input_tx);
-    state.resize_channels.lock().await.insert(id.to_string(), resize_tx);
-    state
-        .handles
-        .lock()
-        .await
-        .insert(id.to_string(), session_handle.clone());
+    // Register all runtime channels/handles for this session in a single
+    // write-lock acquisition.
+    {
+        let session_handle_entry = session_handle.clone();
+        state
+            .upsert_session(id, move |s| {
+                s.input_tx = Some(input_tx);
+                s.resize_tx = Some(resize_tx);
+                s.handle = Some(session_handle_entry);
+            })
+            .await;
+    }
 
     let _ = app.emit(
         "ssh-connected",
@@ -2425,10 +2545,14 @@ async fn run_channel_io_loop(
             Some((c, r)) = resize_rx.recv() => {
                 let _ = channel.window_change(c, r, 0, 0).await;
                 // Keep cols/rows up-to-date for reconnect.
-                if let Some(cfg) = state.reconnect_configs.lock().await.get_mut(&id) {
-                    cfg.cols = c;
-                    cfg.rows = r;
-                }
+                state
+                    .with_session_mut(&id, |s| {
+                        if let Some(cfg) = s.reconnect_config.as_mut() {
+                            cfg.cols = c;
+                            cfg.rows = r;
+                        }
+                    })
+                    .await;
             }
             else => {
                 eprintln!("[ssh-debug] {} select!/else branch hit — all sources closed", id);
@@ -2447,20 +2571,25 @@ async fn run_channel_io_loop(
         data_bytes_total
     );
 
-    // Connection dropped — remove handles so the reconnect loop detects it.
-    state.connections.lock().await.remove(&id);
-    state.resize_channels.lock().await.remove(&id);
-    state.handles.lock().await.remove(&id);
-
-    // If auto-reconnect is enabled, store the exit message so it can be shown.
-    if let Some(ref msg) = final_exit_message {
-        if let Some(cfg) = state.reconnect_configs.lock().await.get_mut(&id) {
-             cfg.last_error = Some(msg.clone());
+    // Connection dropped — drop transient handles so the reconnect loop detects it,
+    // and update the last-error in a single write-lock acquisition.
+    let has_reconnect = {
+        let mut guard = state.sessions.write().await;
+        match guard.get_mut(&id) {
+            Some(s) => {
+                s.input_tx = None;
+                s.resize_tx = None;
+                s.handle = None;
+                if let Some(ref msg) = final_exit_message {
+                    if let Some(cfg) = s.reconnect_config.as_mut() {
+                        cfg.last_error = Some(msg.clone());
+                    }
+                }
+                s.reconnect_flag.is_some()
+            }
+            None => false,
         }
-    }
-
-    // Do NOT emit pty-exit here when auto-reconnect is enabled; the reconnect loop handles messaging.
-    let has_reconnect = state.reconnect_flags.lock().await.contains_key(&id);
+    };
     if !has_reconnect {
         let _ = app.emit(
             "pty-exit",
