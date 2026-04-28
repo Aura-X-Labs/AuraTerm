@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type as getOsType } from "@tauri-apps/plugin-os";
@@ -165,7 +165,9 @@ const appWindow = getCurrentWindow();
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
 const showConnectDialog = ref(false);
 const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
-const settings = ref<AppSettings>(DEFAULT_SETTINGS);
+// settings/settingsRef are replaced wholesale (normalizeAppSettings returns new objects),
+// so shallowRef avoids building a deep Proxy over the large AppSettings tree.
+const settings = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const showSettings = ref(false);
 const showAbout = ref(false);
 const sidebarOpen = ref(false);
@@ -176,14 +178,16 @@ const showLayoutMenu = ref(false);
 const layoutMenuRef = ref<HTMLDivElement | null>(null);
 const layoutMenuPos = ref({ top: 0, right: 0 });
 const isWindowFocused = ref(true);
-const serialConnectionStates = ref<Record<string, SerialConnectionState>>({});
+// Immutable Record updates ({ ...obj, [k]: v }) pair best with shallowRef:
+// the whole map is swapped, so shallow reactivity is enough and skips per-key proxies.
+const serialConnectionStates = shallowRef<Record<string, SerialConnectionState>>({});
 const openMenuId = ref<AppMenuId | null>(null);
 const openFileSubmenuId = ref<FileSubmenuId | null>(null);
 const renamingTabId = ref<string | null>(null);
 const renamingTabTitle = ref("");
 const tabContextMenu = ref<TabContextMenuState | null>(null);
 const suppressTabClick = ref(false);
-const settingsRef = ref<AppSettings>(DEFAULT_SETTINGS);
+const settingsRef = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const uiTheme = computed(() => deriveUiTheme(settings.value.theme, settings.value.uiThemeMode));
 const menuBarRef = ref<HTMLDivElement | null>(null);
 const tabContextMenuRef = ref<HTMLDivElement | null>(null);
@@ -197,7 +201,8 @@ const terminalSearchOptions = ref<Required<Pick<TerminalSearchOptions, TerminalS
   wholeWord: false,
   regex: false,
 });
-const terminalSearchResults = ref<Record<string, TerminalSearchResults>>({});
+// Same immutable-swap pattern as serialConnectionStates.
+const terminalSearchResults = shallowRef<Record<string, TerminalSearchResults>>({});
 let searchDebounceTimer: number | null = null;
 const {
   paneLayout,
@@ -332,10 +337,12 @@ function toggleLayoutMenu() {
   showLayoutMenu.value = true;
 }
 
+// settings is replaced wholesale; shallow watch suffices (no deep traversal).
 watch(settings, (value) => {
   settingsRef.value = value;
-}, { deep: true, immediate: true });
+}, { immediate: true });
 
+// uiTheme is a computed that returns a fresh object on change; deep traversal is unnecessary.
 watch(uiTheme, (value) => {
   const root = document.documentElement;
   Object.entries(value.variables).forEach(([key, cssValue]) => {
@@ -344,7 +351,7 @@ watch(uiTheme, (value) => {
   root.style.colorScheme = value.appearance;
   document.body.style.backgroundColor = value.variables["--app-bg"];
   document.body.style.color = value.variables["--app-text"];
-}, { deep: true, immediate: true });
+}, { immediate: true });
 
 watch(openMenuId, (menuId, _previous, onCleanup) => {
   if (menuId !== "file") {
@@ -1000,15 +1007,21 @@ watch(
   },
 );
 
+// paneLayout is always replaced via `paneLayout.value = newTree` (see usePaneLayout.ts),
+// including split-ratio drags, so shallow watch catches every structural change while
+// skipping the deep traversal over the pane tree on every tab/split interaction.
 watch([paneLayout, sidebarOpen, showRemoteFileManager], () => {
   void nextTick(() => {
     fitVisibleTerminals();
   });
-}, { deep: true });
+});
 
+// tabs is also replaced wholesale (`tabs.value = [...tabs.value, tab]` etc.).
+// Dropping deep here is the main win: pane drag/reorder no longer walks the whole tree
+// on every frame just to schedule a debounced save.
 watch([tabs, paneLayout, focusedPaneId, activeTabId], () => {
   scheduleWorkspaceStatePersistence();
-}, { deep: true });
+});
 
 watch(focusedPaneId, () => {
   void nextTick(() => {
