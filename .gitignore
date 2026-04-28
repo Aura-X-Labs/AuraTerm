@@ -40,3 +40,9 @@ AGENTS.md
 .codefactory/*
 
 settings.json
+
+# Vitest
+coverage/
+.vitest-cache/
+.vitest-reports/
+*.timestamp-*.mjs

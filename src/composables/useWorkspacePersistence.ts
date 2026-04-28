@@ -1,10 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Ref } from "vue";
+import type { Ref, ShallowRef } from "vue";
 import { normalizeAppSettings, type AppSettings } from "../settings";
 
+// Accept either Ref<T> or ShallowRef<T> so callers can pick the cheaper reactivity flavor
+// when a value is always replaced wholesale (AppSettings is one such value).
+type AnyRef<T> = Ref<T> | ShallowRef<T>;
+
 interface UseWorkspacePersistenceOptions {
-  settings: Ref<AppSettings>;
-  settingsRef: Ref<AppSettings>;
+  settings: AnyRef<AppSettings>;
+  settingsRef: AnyRef<AppSettings>;
   hasLoadedSettings: Ref<boolean>;
   createPersistedPaneLayoutState: () => unknown;
   createPersistedWorkspaceState: (restoreEnabled: boolean) => unknown;
@@ -21,7 +25,10 @@ export function useWorkspacePersistence({
   let lastPersistedPaneLayoutSnapshot: string | null = null;
   let lastPersistedWorkspaceStateSnapshot: string | null = null;
 
-  const PERSIST_WORKSPACE_DEBOUNCE_MS = 700;
+  // Raised from 700ms: workspace snapshots only need to land on disk well after the user
+  // finishes a burst of tab drags / split resizes. Coalescing more aggressively reduces
+  // JSON.stringify churn on the pane tree during active interaction.
+  const PERSIST_WORKSPACE_DEBOUNCE_MS = 1200;
 
   function snapshotState(value: unknown) {
     try {
