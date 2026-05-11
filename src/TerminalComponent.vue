@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -844,6 +844,8 @@ function handlePasswordRetry(event: Event) {
   activeSession.value = { protocol: "ssh", sshConfig: newConfig };
   emit("sessionUpdate", activeSession.value);
   void persistUpdatedSshPassword(newConfig);
+  // overlay 卸载后把焦点交还给 xterm，避免用户必须再点一下终端才能输入
+  void nextTick(() => terminal?.focus());
 }
 
 function handleMfaSubmit(event: Event) {
