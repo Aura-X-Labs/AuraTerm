@@ -10,6 +10,7 @@ import SettingsDialog from "./SettingsDialog.vue";
 import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
 import RemoteFileManager from "./RemoteFileManager.vue";
+import MasterPasswordDialog from "./MasterPasswordDialog.vue";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
 import { useAppEventListeners } from "./composables/useAppEventListeners";
 import { useWorkspacePersistence } from "./composables/useWorkspacePersistence";
@@ -172,6 +173,7 @@ const showSettings = ref(false);
 const showAbout = ref(false);
 const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
+const sidebarExpandGroup = ref<string | undefined>(undefined);
 const showNewTabMenu = ref(false);
 const showRemoteFileManager = ref(false);
 const showLayoutMenu = ref(false);
@@ -196,6 +198,9 @@ const terminalSearchInputRef = ref<HTMLInputElement | null>(null);
 const isFullscreen = ref(false);
 const terminalSearchVisible = ref(false);
 const terminalSearchQuery = ref("");
+const showMasterPasswordDialog = ref(false);
+const masterPasswordDialogMode = ref<'setup' | 'unlock'>('setup');
+const masterPasswordVerified = ref(false);
 const terminalSearchOptions = ref<Required<Pick<TerminalSearchOptions, TerminalSearchToggleKey>>>({
   caseSensitive: false,
   wholeWord: false,
@@ -572,6 +577,18 @@ onMounted(async () => {
 
   hasLoadedSettings.value = true;
 
+  // 检查主密码是否已设置
+  const credentialsInitialized = settings.value.credentialsInitialized ?? false;
+  if (!credentialsInitialized) {
+    // 首次使用，显示主密码设置对话框
+    masterPasswordDialogMode.value = 'setup';
+    showMasterPasswordDialog.value = true;
+  } else if (!masterPasswordVerified.value) {
+    // 已设置过主密码，显示解锁对话框
+    masterPasswordDialogMode.value = 'unlock';
+    showMasterPasswordDialog.value = true;
+  }
+
   cleanupFns.push(await registerAppEventListeners());
 
   window.addEventListener("keydown", handleGlobalKeyDown);
@@ -866,6 +883,33 @@ function setPaneViewportRef(tabId: string, instance: Element | null) {
   paneResizeObserver?.observe(element);
   if (paneByTabId.value[tabId]) {
     queueTerminalFit(tabId);
+  }
+}
+
+function handleMasterPasswordSuccess() {
+  // 主密码设置成功
+  showMasterPasswordDialog.value = false;
+  masterPasswordVerified.value = true;
+}
+
+function handleMasterPasswordUnlocked() {
+  // 主密码验证成功
+  showMasterPasswordDialog.value = false;
+  masterPasswordVerified.value = true;
+}
+
+function handleMasterPasswordCancel() {
+  // 用户取消，如果是首次设置则退出应用
+  if (masterPasswordDialogMode.value === 'setup') {
+    // 首次设置被取消，退出应用
+    void invoke('tauri', { __tauriModule: 'Core', message: { cmd: 'exit', exitCode: 0 } }).catch(() => {
+      window.close();
+    });
+  } else {
+    // 解锁被取消，退出应用
+    void invoke('tauri', { __tauriModule: 'Core', message: { cmd: 'exit', exitCode: 0 } }).catch(() => {
+      window.close();
+    });
   }
 }
 
@@ -1433,14 +1477,42 @@ async function handleConnectResult(result: ConnectResult) {
     return;
   }
 
+  // 查找已存在的同主机+端口+用户的连接，复用其 id 和 lastUsed 以更新而非重复追加
+  let existingConn: SavedConnection | undefined;
+  try {
+    const existingConns = await invoke<SavedConnection[]>("get_connections");
+    if (result.protocol === "ssh" && result.sshConfig) {
+      const { host, port, user } = result.sshConfig;
+      existingConn = existingConns.find(
+        c => c.protocol === "ssh" && c.host === host && c.port === (port ?? 22) && c.user === user,
+      );
+    } else if (result.protocol === "telnet" && result.telnetConfig) {
+      const { host, port } = result.telnetConfig;
+      existingConn = existingConns.find(
+        c => c.protocol === "telnet" && c.host === host && c.port === (port ?? 23),
+      );
+    } else if (result.protocol === "serial" && result.serialConfig) {
+      existingConn = existingConns.find(
+        c => c.protocol === "serial" && c.portName === result.serialConfig!.portName,
+      );
+    }
+  } catch {
+    // 查询失败时降级为新建
+  }
+
   const connection = buildSavedConnectionFromConnectResult(
     result,
-    savedConnectionId ?? crypto.randomUUID(),
-    Date.now(),
+    existingConn?.id ?? savedConnectionId ?? crypto.randomUUID(),
+    existingConn?.createdAt ?? Date.now(),
   );
+  // 保留已有的 lastUsed，避免更新时丢失（否则连接会从 Recently Used 消失）
+  if (existingConn?.lastUsed) {
+    connection.lastUsed = existingConn.lastUsed;
+  }
 
   try {
     await invoke("save_connection", { connection });
+    sidebarExpandGroup.value = connection.group?.trim() || "Ungrouped";
     sidebarRefreshToken.value += 1;
     sidebarOpen.value = true;
   } catch (error) {
@@ -1845,7 +1917,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
     </div>
 
     <div class="workspace">
-      <BookmarkSidebar v-if="sidebarOpen" :refresh-token="sidebarRefreshToken" :settings="settings" @connect="handleBookmarkConnect" />
+      <BookmarkSidebar v-if="sidebarOpen" :refresh-token="sidebarRefreshToken" :expand-group="sidebarExpandGroup" :settings="settings" @connect="handleBookmarkConnect" />
 
       <div class="terminal-wrapper">
         <div v-if="terminalSearchVisible" class="terminal-searchbar">
@@ -2090,6 +2162,14 @@ function handleBookmarkConnect(connection: SavedConnection) {
         @close="showRemoteFileManager = false"
       />
     </div>
+
+    <MasterPasswordDialog
+      :is-open="showMasterPasswordDialog"
+      :mode="masterPasswordDialogMode"
+      @success="handleMasterPasswordSuccess"
+      @unlocked="handleMasterPasswordUnlocked"
+      @cancel="handleMasterPasswordCancel"
+    />
 
     <SettingsDialog v-if="showSettings" :initial="settings" @save="handleSaveSettings" @cancel="showSettings = false" />
     <AboutDialog v-if="showAbout" @close="showAbout = false" />

@@ -8,8 +8,10 @@ import BookmarkEditor from "./BookmarkEditor.vue";
 const props = withDefaults(defineProps<{
   refreshToken?: number;
   settings?: AppSettings;
+  expandGroup?: string;
 }>(), {
   settings: () => DEFAULT_SETTINGS,
+  expandGroup: undefined,
 });
 
 const emit = defineEmits<{
@@ -68,11 +70,13 @@ function saveCollapsedState() {
 }
 
 function toggleGroup(group: string) {
-  if (collapsedGroups.value.has(group)) {
-    collapsedGroups.value.delete(group);
+  const next = new Set(collapsedGroups.value);
+  if (next.has(group)) {
+    next.delete(group);
   } else {
-    collapsedGroups.value.add(group);
+    next.add(group);
   }
+  collapsedGroups.value = next;
   saveCollapsedState();
 }
 
@@ -80,17 +84,26 @@ function isGroupCollapsed(group: string) {
   return collapsedGroups.value.has(group);
 }
 
-async function loadConnections() {
+async function loadConnections(expandGroup?: string) {
   try {
     connections.value = await invoke<SavedConnection[]>("get_connections");
+    // 自动展开指定分组（如新保存的连接所在分组）
+    // 必须用赋值新 Set 来触发 Vue 响应式，直 .delete() 不会重新渲染
+    if (expandGroup && collapsedGroups.value.has(expandGroup)) {
+      const next = new Set(collapsedGroups.value);
+      next.delete(expandGroup);
+      collapsedGroups.value = next;
+    }
   } catch (error) {
     console.error("Failed to load connections", error);
   }
 }
 
 watch(() => props.refreshToken, () => {
-  void loadConnections();
+  // 先同步恢复折叠状态，再异步加载数据并在加载完成后展开目标分组
+  // （顺序不能颠倒：loadCollapsedState 是同步的，必须在 loadConnections 的 await 之前完成）
   loadCollapsedState();
+  void loadConnections(props.expandGroup);
 }, { immediate: true });
 
 watch(contextMenu, (value, _previous, onCleanup) => {
@@ -129,8 +142,6 @@ const filteredConnections = computed(() => {
 const groupedConnections = computed(() => {
   const groups = new Map<string, SavedConnection[]>();
 
-  // Add "Recently Used" group if there is a search query or we just want them shown
-  // But typically "Recently Used" should be its own special top-level group
   const recentlyUsed = [...connections.value]
     .filter(c => c.lastUsed)
     .sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))
@@ -146,7 +157,8 @@ const groupedConnections = computed(() => {
     list.push(connection);
     groups.set(group, list);
   }
-  return Array.from(groups.entries()).sort(([left], [right]) => {
+
+  const result = Array.from(groups.entries()).sort(([left], [right]) => {
     if (left === RECENTLY_USED_LABEL) {
       return -1;
     }
@@ -161,6 +173,8 @@ const groupedConnections = computed(() => {
     }
     return left.localeCompare(right, "zh-CN");
   });
+
+  return result;
 });
 
 async function handleDoubleClick(connection: SavedConnection) {
@@ -215,7 +229,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
   <div class="bookmark-sidebar">
     <div class="bookmark-sidebar-header">
       <span class="bookmark-sidebar-title">🔖 Quick Connect</span>
-      <button class="bookmark-refresh-btn" title="Refresh list" @click="loadConnections">↻</button>
+      <button class="bookmark-refresh-btn" title="Refresh list" @click="() => loadConnections()">↻</button>
     </div>
 
     <div class="bookmark-search-container">

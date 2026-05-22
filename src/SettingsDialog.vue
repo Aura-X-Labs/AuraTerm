@@ -254,6 +254,161 @@ watch(
   },
   { immediate: false },
 );
+
+// ---------- Master password / credential backup ----------
+
+const exportPassword = ref("");
+const exportPasswordConfirm = ref("");
+const exportLoading = ref(false);
+const exportError = ref("");
+const exportSuccess = ref("");
+
+const importPassword = ref("");
+const importLoading = ref(false);
+const importError = ref("");
+const importSuccess = ref("");
+const importFileInput = ref<HTMLInputElement | null>(null);
+const pendingImportContent = ref<string>("");
+const pendingImportFileName = ref<string>("");
+
+const lockingMasterPassword = ref(false);
+
+function resetExportForm() {
+  exportPassword.value = "";
+  exportPasswordConfirm.value = "";
+  exportError.value = "";
+}
+
+function resetImportForm() {
+  importPassword.value = "";
+  importError.value = "";
+  pendingImportContent.value = "";
+  pendingImportFileName.value = "";
+  if (importFileInput.value) {
+    importFileInput.value.value = "";
+  }
+}
+
+async function exportCredentials() {
+  exportError.value = "";
+  exportSuccess.value = "";
+
+  if (exportPassword.value.length < 8) {
+    exportError.value = "Backup password must be at least 8 characters.";
+    return;
+  }
+  if (exportPassword.value !== exportPasswordConfirm.value) {
+    exportError.value = "Backup passwords do not match.";
+    return;
+  }
+
+  exportLoading.value = true;
+  try {
+    const backupContent = await invoke<string>("export_connections", {
+      password: exportPassword.value,
+    });
+
+    // 触发浏览器下载
+    const blob = new Blob([backupContent], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    link.href = url;
+    link.download = `auraterm-credentials-${timestamp}.aurabak`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    exportSuccess.value = "Backup downloaded successfully.";
+    resetExportForm();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    exportError.value = `Export failed: ${message}`;
+  } finally {
+    exportLoading.value = false;
+  }
+}
+
+function onImportFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) {
+    pendingImportContent.value = "";
+    pendingImportFileName.value = "";
+    return;
+  }
+
+  importError.value = "";
+  importSuccess.value = "";
+  pendingImportFileName.value = file.name;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    pendingImportContent.value = String(reader.result ?? "");
+  };
+  reader.onerror = () => {
+    importError.value = "Failed to read selected file.";
+    pendingImportContent.value = "";
+  };
+  reader.readAsText(file);
+}
+
+async function importCredentials() {
+  importError.value = "";
+  importSuccess.value = "";
+
+  if (!pendingImportContent.value) {
+    importError.value = "Please select a backup file first.";
+    return;
+  }
+  if (!importPassword.value) {
+    importError.value = "Backup password is required.";
+    return;
+  }
+
+  const confirmed = window.confirm(
+    "Importing will overwrite existing connection credentials with the same IDs. Continue?",
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  importLoading.value = true;
+  try {
+    await invoke("import_connections", {
+      backupContent: pendingImportContent.value,
+      password: importPassword.value,
+    });
+    importSuccess.value = "Credentials imported successfully.";
+    resetImportForm();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    importError.value = `Import failed: ${message}`;
+  } finally {
+    importLoading.value = false;
+  }
+}
+
+async function lockMasterPasswordNow() {
+  const confirmed = window.confirm(
+    "Lock the master password now? You'll need to re-enter it before accessing saved credentials.",
+  );
+  if (!confirmed) {
+    return;
+  }
+  lockingMasterPassword.value = true;
+  try {
+    await invoke("lock_master_password");
+    window.alert("Master password locked. The application will now reload.");
+    window.location.reload();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    window.alert(`Failed to lock master password: ${message}`);
+  } finally {
+    lockingMasterPassword.value = false;
+  }
+}
 </script>
 
 <template>
@@ -619,6 +774,114 @@ watch(
                 :disabled="deletingHostKeyScope === trustedHostScope(entry) || resettingHostKeys"
               >
                 {{ deletingHostKeyScope === trustedHostScope(entry) ? 'Removing...' : 'Delete' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Encrypted Credential Backup -->
+          <div class="settings-security-header" style="margin-top: 32px;">
+            <div>
+              <div class="settings-security-title">Encrypted Credential Backup</div>
+              <div class="settings-security-subtitle">
+                Export saved connection passwords/SSH keys to an encrypted backup, or import a previous backup.
+                The backup uses its own password (independent of your master password).
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-backup-grid">
+            <!-- Export -->
+            <div class="settings-backup-card">
+              <div class="settings-backup-card-title">Export Backup</div>
+              <div class="settings-backup-card-desc">
+                Choose a strong password to encrypt the exported file.
+              </div>
+              <div class="settings-form-row">
+                <label>Backup password (min 8 chars)</label>
+                <input
+                  v-model="exportPassword"
+                  type="password"
+                  autocomplete="new-password"
+                  :disabled="exportLoading"
+                />
+              </div>
+              <div class="settings-form-row">
+                <label>Confirm password</label>
+                <input
+                  v-model="exportPasswordConfirm"
+                  type="password"
+                  autocomplete="new-password"
+                  :disabled="exportLoading"
+                />
+              </div>
+              <div v-if="exportError" class="settings-security-error">{{ exportError }}</div>
+              <div v-if="exportSuccess" class="settings-security-success">{{ exportSuccess }}</div>
+              <button
+                class="settings-btn-primary"
+                type="button"
+                :disabled="exportLoading"
+                @click="exportCredentials"
+              >
+                {{ exportLoading ? 'Exporting...' : 'Export & Download' }}
+              </button>
+            </div>
+
+            <!-- Import -->
+            <div class="settings-backup-card">
+              <div class="settings-backup-card-title">Import Backup</div>
+              <div class="settings-backup-card-desc">
+                Existing connections with the same ID will be overwritten.
+              </div>
+              <div class="settings-form-row">
+                <label>Backup file</label>
+                <input
+                  ref="importFileInput"
+                  type="file"
+                  accept=".aurabak,.txt,application/octet-stream"
+                  :disabled="importLoading"
+                  @change="onImportFileSelected"
+                />
+                <small v-if="pendingImportFileName">Selected: {{ pendingImportFileName }}</small>
+              </div>
+              <div class="settings-form-row">
+                <label>Backup password</label>
+                <input
+                  v-model="importPassword"
+                  type="password"
+                  autocomplete="off"
+                  :disabled="importLoading"
+                />
+              </div>
+              <div v-if="importError" class="settings-security-error">{{ importError }}</div>
+              <div v-if="importSuccess" class="settings-security-success">{{ importSuccess }}</div>
+              <button
+                class="settings-btn-primary"
+                type="button"
+                :disabled="importLoading || !pendingImportContent"
+                @click="importCredentials"
+              >
+                {{ importLoading ? 'Importing...' : 'Import' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Lock master password -->
+          <div class="settings-security-header" style="margin-top: 32px;">
+            <div>
+              <div class="settings-security-title">Lock Master Password</div>
+              <div class="settings-security-subtitle">
+                Clear the cached master password from memory. The app will reload and prompt
+                you to enter it again before accessing saved credentials.
+              </div>
+            </div>
+            <div class="settings-security-actions">
+              <button
+                class="settings-btn-secondary settings-btn-danger"
+                type="button"
+                :disabled="lockingMasterPassword"
+                @click="lockMasterPasswordNow"
+              >
+                {{ lockingMasterPassword ? 'Locking...' : 'Lock Now' }}
               </button>
             </div>
           </div>

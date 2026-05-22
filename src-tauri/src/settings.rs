@@ -144,6 +144,15 @@ pub struct Settings {
     /// Persisted workspace snapshot including tabs and pane layout
     #[serde(default)]
     pub workspace_state: Option<serde_json::Value>,
+    /// Master password hash (Argon2 format)
+    #[serde(default)]
+    pub master_password_hash: Option<String>,
+    /// Master password salt (Base64 encoded)
+    #[serde(default)]
+    pub master_password_salt: Option<String>,
+    /// Whether credentials have been initialized with encryption
+    #[serde(default)]
+    pub credentials_initialized: bool,
 }
 
 fn default_true() -> bool { true }
@@ -174,6 +183,9 @@ impl Default for Settings {
             restore_tabs_on_startup: false,
             pane_layout: None,
             workspace_state: None,
+            master_password_hash: None,
+            master_password_salt: None,
+            credentials_initialized: false,
         }
     }
 }
