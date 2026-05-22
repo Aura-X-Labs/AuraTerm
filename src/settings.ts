@@ -123,6 +123,12 @@ export interface AppSettings {
   paneLayout: unknown | null;
   /** Persisted workspace snapshot including tabs and pane layout */
   workspaceState: unknown | null;
+  /** Master password hash (Argon2 format) - managed by backend */
+  masterPasswordHash?: string | null;
+  /** Master password salt (Base64 encoded) - managed by backend */
+  masterPasswordSalt?: string | null;
+  /** Whether credentials have been initialized with encryption */
+  credentialsInitialized?: boolean;
 }
 
 const LEGACY_DEFAULT_THEME: TerminalTheme = {
@@ -440,6 +446,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   restoreTabsOnStartup: false,
   paneLayout: null,
   workspaceState: null,
+  masterPasswordHash: null,
+  masterPasswordSalt: null,
+  credentialsInitialized: false,
 };
 
 export const MAX_INPUT_HISTORY = 100;
@@ -486,6 +495,9 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     restoreTabsOnStartup: value?.restoreTabsOnStartup ?? DEFAULT_SETTINGS.restoreTabsOnStartup,
     paneLayout: value?.paneLayout ?? DEFAULT_SETTINGS.paneLayout,
     workspaceState: value?.workspaceState ?? DEFAULT_SETTINGS.workspaceState,
+    masterPasswordHash: value?.masterPasswordHash ?? DEFAULT_SETTINGS.masterPasswordHash,
+    masterPasswordSalt: value?.masterPasswordSalt ?? DEFAULT_SETTINGS.masterPasswordSalt,
+    credentialsInitialized: value?.credentialsInitialized ?? DEFAULT_SETTINGS.credentialsInitialized,
   };
 }
 

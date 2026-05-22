@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use base64::Engine as _;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 #[cfg(unix)]
 use std::ffi::CStr;
@@ -19,6 +20,7 @@ use tauri::{
 };
 
 mod connections;
+mod encryption;
 mod serial;
 mod settings;
 mod ssh;
@@ -476,6 +478,91 @@ fn close_pty(state: State<'_, AppState>, id: String) -> Result<(), String> {
 }
 
 #[command]
+fn set_master_password(
+    app: AppHandle,
+    password: String,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<(), String> {
+    use rand::Rng;
+
+    // 生成随机盐值
+    let mut rng = rand::thread_rng();
+    let salt: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+
+    // 生成主密码哈希
+    let password_hash = encryption::hash_master_password(&password, &salt)
+        .map_err(|e| format!("Failed to hash password: {}", e))?;
+
+    // 保存到 settings.json
+    let mut settings = settings::get_settings(app.clone())?;
+    settings.master_password_hash = Some(password_hash);
+    settings.master_password_salt = Some(base64::engine::general_purpose::STANDARD.encode(&salt));
+    settings.credentials_initialized = true;
+
+    settings::save_settings(app.clone(), settings)?;
+
+    // 用新密码重建 credentials.enc，避免遗留旧密码加密的文件导致后续解密失败
+    let empty_store = encryption::CredentialStore { credentials: Vec::new() };
+    encryption::save_encrypted_credentials(&app, &empty_store, &password)
+        .map_err(|e| format!("Failed to initialize credential store: {}", e))?;
+
+    // 缓存到会话状态，避免后续每次操作都需要重新提示
+    master_state.set(password);
+    Ok(())
+}
+
+#[command]
+fn verify_master_password(
+    app: AppHandle,
+    password: String,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<bool, String> {
+    let settings = settings::get_settings(app)?;
+
+    let Some(stored_hash) = settings.master_password_hash else {
+        return Err("Master password not set".to_string());
+    };
+
+    let ok = encryption::verify_master_password(&password, &stored_hash)?;
+    if ok {
+        master_state.set(password);
+    }
+    Ok(ok)
+}
+
+/// 查询当前会话主密码是否已解锁。
+/// 主要用于前端在路由切换或重新挂载时判断是否需要再次提示用户输入。
+#[command]
+fn is_master_password_unlocked(
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<bool, String> {
+    Ok(master_state.is_unlocked())
+}
+
+/// 锁定主密码（清除会话缓存），下次访问凭据需要重新输入主密码。
+#[command]
+fn lock_master_password(
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<(), String> {
+    master_state.clear();
+    Ok(())
+}
+
+#[command]
+fn export_connections(app: AppHandle, password: String) -> Result<String, String> {
+    encryption::export_credentials_backup(&app, &password)
+}
+
+#[command]
+fn import_connections(
+    app: AppHandle,
+    password: String,
+    encrypted_data: String,
+) -> Result<(), String> {
+    encryption::import_credentials_backup(&app, &password, &encrypted_data)
+}
+
+#[command]
 fn append_to_log(path: String, content: String) -> Result<(), String> {
     let expanded = expand_tilde_path(&path);
 
@@ -788,6 +875,7 @@ fn main() {
         .manage(ssh::SshState::default())
         .manage(telnet::TelnetState::default())
         .manage(serial::SerialState::default())
+        .manage(encryption::MasterPasswordState::default())
         .invoke_handler(tauri::generate_handler![
             get_version_info,
             get_startup_dir,
@@ -820,6 +908,12 @@ fn main() {
             serial::close_serial_session,
             settings::get_settings,
             settings::save_settings,
+            set_master_password,
+            verify_master_password,
+            is_master_password_unlocked,
+            lock_master_password,
+            export_connections,
+            import_connections,
             connections::get_connections,
             connections::save_connection,
             connections::delete_connection,
