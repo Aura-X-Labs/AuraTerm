@@ -401,6 +401,7 @@ async function reconnectSshSession() {
   }
 
   manualReconnectPending.value = false;
+  ptyId.value = props.sessionId;
   terminal.writeln("\r\n[Reconnecting...]");
 
   try {
