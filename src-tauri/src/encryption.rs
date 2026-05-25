@@ -15,6 +15,7 @@ const CREDENTIALS_FILE: &str = "credentials.enc";
 const MAGIC: &[u8; 8] = b"AURAENC\0";
 const VERSION: u32 = 1;
 const SALT_SIZE: usize = 32;
+const HEADER_SIZE: usize = 64;
 
 /// 应用会话级主密码缓存。
 ///
@@ -75,19 +76,19 @@ struct EncryptedFileHeader {
 
 impl EncryptedFileHeader {
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(64);
+        let mut bytes = Vec::with_capacity(HEADER_SIZE);
         bytes.extend_from_slice(&self.magic);
         bytes.extend_from_slice(&self.version.to_le_bytes());
         bytes.extend_from_slice(&self.salt);
         bytes.extend_from_slice(&self.reserved);
-        // Pad to exactly 64 bytes so the ciphertext starts at the same offset
+        // Pad to exactly HEADER_SIZE bytes so ciphertext starts at a stable offset.
         // that from_bytes() expects (&bytes[64..]).
-        bytes.resize(64, 0);
+        bytes.resize(HEADER_SIZE, 0);
         bytes
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
-        if bytes.len() < 64 {
+        if bytes.len() < HEADER_SIZE {
             return Err("Invalid file header: too short".to_string());
         }
 
@@ -117,7 +118,7 @@ impl EncryptedFileHeader {
                 salt,
                 reserved,
             },
-            &bytes[64..],
+            &bytes[HEADER_SIZE..],
         ))
     }
 }
@@ -553,9 +554,14 @@ mod tests {
             reserved: [0u8; 12],
         };
         let bytes = header.to_bytes();
-        // magic(8) + version(4) + salt(32) + reserved(12) = 56；but parser expects >=64
-        // 因此需要填充到 64 字节才能成功（或验证现状）
-        assert_eq!(bytes.len(), 8 + 4 + SALT_SIZE + 12, "Header bytes size = magic+version+salt+reserved");
+        assert_eq!(bytes.len(), HEADER_SIZE, "Header must be padded to fixed size");
+
+        let (parsed, remainder) = EncryptedFileHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.magic, *MAGIC);
+        assert_eq!(parsed.version, VERSION);
+        assert_eq!(parsed.salt, vec![7u8; SALT_SIZE]);
+        assert_eq!(parsed.reserved, [0u8; 12]);
+        assert!(remainder.is_empty(), "No payload should remain for header-only input");
     }
 
     #[test]
