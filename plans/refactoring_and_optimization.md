@@ -172,8 +172,8 @@
 
 | 编号 | 项目 | 状态 |
 |---|---|---|
-| 1 | UTF-8 边界截断 | ✅ 已完成（2026-06-17） |
-| 2 | settings 原子写 | ✅ 已完成（2026-06-17） |
+| 1 | UTF-8 边界截断 | ✅ 已完成（2026-06-17，PR #23） |
+| 2 | settings 原子写 | ✅ 已完成（2026-06-17，PR #23） |
 | 3 | zeroize 擦除 | ⬜ 待处理 |
 | 4 | KDF 收口 | ⬜ 待处理 |
 | 5 | 拆分 App.vue | ⬜ 待处理 |
@@ -195,3 +195,4 @@
 - §1 接入四处读取循环：`main.rs`（本地 PTY）、`serial.rs`、`telnet.rs`、`ssh/mod.rs`（Data / ExtendedData 各用独立 decoder，避免 stdout/stderr 串扰）。空字符串结果跳过 emit。
 - §2 `settings.rs::save_settings` 改用 `util::write_atomic`；`connections.rs` 删除本地副本改调共享实现（移除已无用的 `std::io::Write` 导入）。
 - 验证：`cargo check` 通过；`cargo test` 全部 51 项通过（含 6 项新解码测试）。
+- 提交：分支 `fix/utf8-stream-decode-and-atomic-settings`，PR https://github.com/Aura-X-Labs/AuraTerm/pull/23 （fix + docs 两个 commit）。
