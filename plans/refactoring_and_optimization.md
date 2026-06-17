@@ -179,7 +179,7 @@
 | 5 | 拆分 App.vue | ⬜ 待处理 |
 | 6 | 统一 stream_pump | 🟡 部分完成：UTF-8 解码已抽到 `util::Utf8StreamDecoder` 共享；session 注册表与读取循环的统一仍待做 |
 | 7 | per-session 事件/Channel | ⬜ 待处理 |
-| 8 | logBuffer 优化 | ⬜ 待处理 |
+| 8 | logBuffer 优化 | ✅ 已完成（2026-06-17，PR #24） |
 | 9 | get_connections 缓存 | ⬜ 待处理 |
 | 10 | ssh-debug 日志门控 | ⬜ 待处理 |
 | 11 | 补单测 | 🟡 部分完成：新增 `util` 模块 6 个 UTF-8 解码单测 + 3 个 KDF/迁移单测 |
@@ -215,3 +215,10 @@
   - 主密码**验证哈希**（settings.json 的 PHC 串）不受影响，无需迁移。
   - 注意：`credentials.enc` 仍用 `fs::write`（非原子），未在本次范围内——可后续做二进制版 `write_atomic`。
 - 验证：`cargo check` 通过；`cargo test` 全部 54 项通过（新增 `test_derive_key_v1_and_v2_differ`、`test_derive_key_dispatch_matches_explicit_versions`、`test_v1_blob_decrypts_only_via_version_dispatch`）。
+
+### §8 实现说明（2026-06-17，随 PR #24 一起提交）
+
+- `src/TerminalComponent.vue`：`logBuffer` 由响应式 `ref("")` 改为普通 `let` 字符串（无人渲染它，去掉每个 chunk 的响应式 setter 开销）。
+- 加上限：保留最近 `SAVED_LOG_MAX_CHARS`（~4M 字符），超过 cap + 1M slack 时裁掉最旧部分（slack 避免每个 chunk 都 slice 多 MB 字符串）。
+- 权衡：超长会话的"保存日志"只含最近窗口；持续落盘日志（配置了 logPath）走独立的 `pendingLogBuffer`/`appendToLog` 路径，不受影响。
+- 验证：`npm run build`（vue-tsc + vite）通过；`npm test`（Vitest）48 项全过。
