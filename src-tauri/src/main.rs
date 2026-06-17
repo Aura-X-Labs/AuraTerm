@@ -25,6 +25,7 @@ mod serial;
 mod settings;
 mod ssh;
 mod telnet;
+mod util;
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -393,6 +394,7 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
     let pty_id = id.clone();
     thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
+        let mut decoder = util::Utf8StreamDecoder::new();
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
@@ -406,7 +408,10 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
                     break;
                 }
                 Ok(size) => {
-                    let output = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    let output = decoder.push(&buffer[..size]);
+                    if output.is_empty() {
+                        continue;
+                    }
                     let _ = app_handle.emit(
                         "pty-output",
                         PtyOutputEvent {

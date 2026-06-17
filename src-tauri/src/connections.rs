@@ -1,7 +1,6 @@
 use crate::encryption::{self, CredentialStore, MasterPasswordState, StoredCredential};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use tauri::{AppHandle, Manager, State};
 
 fn default_protocol() -> String {
@@ -162,52 +161,13 @@ fn load_connections(app: &AppHandle) -> Result<Vec<SavedConnection>, String> {
     Ok(connections)
 }
 
-fn write_file_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Invalid connections file path".to_string())?;
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "Invalid connections file name".to_string())?;
-
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let tmp_path = parent.join(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
-
-    let mut tmp_file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&tmp_path)
-        .map_err(|error| format!("Failed to open temp connections file: {error}"))?;
-
-    tmp_file
-        .write_all(content.as_bytes())
-        .map_err(|error| format!("Failed to write temp connections file: {error}"))?;
-    tmp_file
-        .sync_all()
-        .map_err(|error| format!("Failed to flush temp connections file: {error}"))?;
-
-    drop(tmp_file);
-
-    fs::rename(&tmp_path, path).map_err(|error| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to atomically replace connections file: {error}")
-    })?;
-
-    Ok(())
-}
-
 fn write_connections(app: &AppHandle, connections: &Vec<SavedConnection>) -> Result<(), String> {
     let path = connections_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let content = serde_json::to_string_pretty(connections).map_err(|e| e.to_string())?;
-    write_file_atomic(&path, &content)?;
+    crate::util::write_atomic(&path, &content)?;
     Ok(())
 }
 

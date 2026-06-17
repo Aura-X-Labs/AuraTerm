@@ -152,11 +152,15 @@ pub async fn start_serial_session(
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buffer = [0_u8; 4096];
+        let mut decoder = crate::util::Utf8StreamDecoder::new();
 
         while !stop_flag.load(Ordering::Relaxed) {
             match reader.read(&mut buffer) {
                 Ok(size) if size > 0 => {
-                    let output = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    let output = decoder.push(&buffer[..size]);
+                    if output.is_empty() {
+                        continue;
+                    }
                     let _ = app_handle.emit(
                         "pty-output",
                         PtyOutputEvent {
