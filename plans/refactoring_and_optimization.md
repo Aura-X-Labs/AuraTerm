@@ -174,15 +174,15 @@
 |---|---|---|
 | 1 | UTF-8 边界截断 | ✅ 已完成（2026-06-17，PR #23） |
 | 2 | settings 原子写 | ✅ 已完成（2026-06-17，PR #23） |
-| 3 | zeroize 擦除 | ⬜ 待处理 |
-| 4 | KDF 收口 | ⬜ 待处理 |
+| 3 | zeroize 擦除 | ✅ 已完成（2026-06-17） |
+| 4 | KDF 收口 | ✅ 已完成（2026-06-17，含 v1→v2 透明迁移） |
 | 5 | 拆分 App.vue | ⬜ 待处理 |
 | 6 | 统一 stream_pump | 🟡 部分完成：UTF-8 解码已抽到 `util::Utf8StreamDecoder` 共享；session 注册表与读取循环的统一仍待做 |
 | 7 | per-session 事件/Channel | ⬜ 待处理 |
 | 8 | logBuffer 优化 | ⬜ 待处理 |
 | 9 | get_connections 缓存 | ⬜ 待处理 |
 | 10 | ssh-debug 日志门控 | ⬜ 待处理 |
-| 11 | 补单测 | 🟡 部分完成：新增 `util` 模块 6 个 UTF-8 解码单测 |
+| 11 | 补单测 | 🟡 部分完成：新增 `util` 模块 6 个 UTF-8 解码单测 + 3 个 KDF/迁移单测 |
 | 12 | App.css 拆分 | ⬜ 待处理 |
 | 13 | Telnet IAC 说明 | ⬜ 待处理 |
 | 14 | unwrap/expect 收敛 | ⬜ 待处理 |
@@ -196,3 +196,22 @@
 - §2 `settings.rs::save_settings` 改用 `util::write_atomic`；`connections.rs` 删除本地副本改调共享实现（移除已无用的 `std::io::Write` 导入）。
 - 验证：`cargo check` 通过；`cargo test` 全部 51 项通过（含 6 项新解码测试）。
 - 提交：分支 `fix/utf8-stream-decode-and-atomic-settings`，PR https://github.com/Aura-X-Labs/AuraTerm/pull/23 （fix + docs 两个 commit）。
+
+### §3 / §4 实现说明（2026-06-17）
+
+均在 `src-tauri/src/encryption.rs`（+ `Cargo.toml` 启用 `zeroize` 的 `derive` 特性）：
+
+- **§3 zeroize**：
+  - `MasterPasswordState` 改为 `Mutex<Option<Zeroizing<String>>>`，`get()` 返回 `Zeroizing<String>`，缓存清除/覆盖时自动擦除明文。
+  - `derive_key_*` 返回 `Zeroizing<[u8;32]>`；解密明文、序列化 JSON 用 `Zeroizing<Vec<u8>>` 包裹；v1 路径的 PHC 串用后 `.zeroize()`。
+  - `CredentialStore` / `StoredCredential` 派生 `ZeroizeOnDrop`（导入合并循环改用 `drain` 以避免 move out of Drop 类型）。
+  - 边界：主密码经 Tauri IPC / 前端 JS 的副本不在 zeroize 覆盖范围内（纵深防御，非端到端）。
+- **§4 KDF 收口 + 迁移**：
+  - 新 `derive_key_v2` 用 `Argon2id::hash_password_into` 直接派生 32 字节，去掉 PHC 串 + SHA-256。
+  - 保留 `derive_key_v1`（逐字节等价旧实现）仅用于解密旧文件；`derive_key(version)` 按文件头版本调度。
+  - 文件头版本：`1`=legacy，`2`=current；`from_bytes` 同时接受两者。
+  - **透明迁移**：`load_encrypted_credentials` 读到 v1 文件后用 v2 重新加密回写（尽力而为，不阻断读取）。
+  - 备份格式加 1 字节版本前缀（`BACKUP_VERSION=2`）；旧备份串需重新导出（特性刚落地，影响面可忽略）。
+  - 主密码**验证哈希**（settings.json 的 PHC 串）不受影响，无需迁移。
+  - 注意：`credentials.enc` 仍用 `fs::write`（非原子），未在本次范围内——可后续做二进制版 `write_atomic`。
+- 验证：`cargo check` 通过；`cargo test` 全部 54 项通过（新增 `test_derive_key_v1_and_v2_differ`、`test_derive_key_dispatch_matches_explicit_versions`、`test_v1_blob_decrypts_only_via_version_dispatch`）。
