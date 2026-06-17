@@ -38,6 +38,7 @@ pub async fn start_telnet_session(
     let read_id = id.clone();
     let reader_task = tokio::spawn(async move {
         let mut buffer = [0_u8; 4096];
+        let mut decoder = crate::util::Utf8StreamDecoder::new();
         loop {
             match reader.read(&mut buffer).await {
                 Ok(0) => {
@@ -51,7 +52,10 @@ pub async fn start_telnet_session(
                     break;
                 }
                 Ok(size) => {
-                    let output = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    let output = decoder.push(&buffer[..size]);
+                    if output.is_empty() {
+                        continue;
+                    }
                     let _ = read_app.emit(
                         "pty-output",
                         PtyOutputEvent {

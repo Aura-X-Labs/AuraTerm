@@ -1326,6 +1326,11 @@ async fn run_channel_io_loop(
     let loop_started_at = std::time::Instant::now();
     let mut data_bytes_total: u64 = 0;
     let mut data_msg_count: u64 = 0;
+    // Separate decoders for stdout (Data) and stderr (ExtendedData) so an
+    // incomplete multi-byte sequence on one stream is never spliced onto the
+    // other. Each buffers trailing bytes of a UTF-8 char split across packets.
+    let mut stdout_decoder = crate::util::Utf8StreamDecoder::new();
+    let mut stderr_decoder = crate::util::Utf8StreamDecoder::new();
 
     eprintln!("[ssh-debug] {} run_channel_io_loop started", id);
 
@@ -1336,13 +1341,16 @@ async fn run_channel_io_loop(
                     Some(ChannelMsg::Data { ref data }) => {
                         data_msg_count += 1;
                         data_bytes_total += data.len() as u64;
-                        let _ = app.emit(
-                            "pty-output",
-                            TerminalDataPayload {
-                                id: id.clone(),
-                                data: String::from_utf8_lossy(data).to_string(),
-                            },
-                        );
+                        let output = stdout_decoder.push(data);
+                        if !output.is_empty() {
+                            let _ = app.emit(
+                                "pty-output",
+                                TerminalDataPayload {
+                                    id: id.clone(),
+                                    data: output,
+                                },
+                            );
+                        }
                     }
                     Some(ChannelMsg::ExtendedData { ref data, ext }) => {
                         data_msg_count += 1;
@@ -1351,13 +1359,16 @@ async fn run_channel_io_loop(
                             "[ssh-debug] {} ExtendedData ext={} ({} bytes)",
                             id, ext, data.len()
                         );
-                        let _ = app.emit(
-                            "pty-output",
-                            TerminalDataPayload {
-                                id: id.clone(),
-                                data: String::from_utf8_lossy(data).to_string(),
-                            },
-                        );
+                        let output = stderr_decoder.push(data);
+                        if !output.is_empty() {
+                            let _ = app.emit(
+                                "pty-output",
+                                TerminalDataPayload {
+                                    id: id.clone(),
+                                    data: output,
+                                },
+                            );
+                        }
                     }
                     Some(ChannelMsg::Eof) => {
                         eprintln!(

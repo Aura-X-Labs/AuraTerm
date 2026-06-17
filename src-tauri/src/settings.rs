@@ -219,7 +219,7 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(&path, content).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&path, &content)?;
     Ok(())
 }
 
