@@ -286,7 +286,7 @@ pub(super) async fn prompt_for_host_key_override(
         .await;
 
     let emitted = app.emit(
-        "ssh-host-key-mismatch-prompt",
+        &crate::util::session_event("ssh-host-key-mismatch-prompt", id),
         SshHostKeyMismatchPromptPayload {
             id: id.to_string(),
             host: host.to_string(),

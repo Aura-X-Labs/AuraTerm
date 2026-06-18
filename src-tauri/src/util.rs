@@ -124,9 +124,33 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the per-session name for a streaming Tauri event (`<base>:<id>`).
+///
+/// Per-session events (`pty-output`, `pty-exit`, `ssh-connected`, …) used to be
+/// emitted under a single global name, so every mounted `TerminalComponent`
+/// received every event and discarded the ones whose `id` did not match. With N
+/// open panes/tabs that is an O(N) wake-up for *every* output chunk on the hot
+/// path. Suffixing the session id makes each event reach only the owning
+/// component's listener, which subscribes to `<base>:<its-own-id>`.
+///
+/// The session id is the frontend tab id (`tab-0`, …), which only contains
+/// alphanumerics and `-`, so the resulting name is always a valid Tauri event
+/// name (`:` is permitted). Keep this `:` separator in sync with the frontend
+/// listener names in `TerminalComponent.vue`.
+pub fn session_event(base: &str, id: &str) -> String {
+    format!("{base}:{id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::Utf8StreamDecoder;
+    use super::session_event;
+
+    #[test]
+    fn session_event_appends_id_suffix() {
+        assert_eq!(session_event("pty-output", "tab-0"), "pty-output:tab-0");
+        assert_eq!(session_event("pty-exit", "tab-12"), "pty-exit:tab-12");
+    }
 
     #[test]
     fn decodes_ascii_in_one_chunk() {

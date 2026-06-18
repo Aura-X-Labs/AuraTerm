@@ -231,7 +231,7 @@ describe("TerminalComponent", () => {
     expect(terminal).toBeDefined();
     expect(mockState.startSshSession).toHaveBeenCalledTimes(1);
 
-    mockState.emitEvent("pty-exit", {
+    mockState.emitEvent("pty-exit:ssh-session-1", {
       id: "ssh-session-1",
       message: "Connection dropped",
     });
@@ -245,7 +245,7 @@ describe("TerminalComponent", () => {
     expect(mockState.startSshSession).toHaveBeenCalledTimes(2);
     expect(terminal.writtenLines).toContain("\r\n[Reconnecting...]");
 
-    mockState.emitEvent("ssh-connected", { id: "ssh-session-1" });
+    mockState.emitEvent("ssh-connected:ssh-session-1", { id: "ssh-session-1" });
     await flushPromises();
 
     expect(terminal.writtenLines).toContain("\r\n[Connected]");

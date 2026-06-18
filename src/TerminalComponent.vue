@@ -695,8 +695,11 @@ onMounted(() => {
       }
 
 
-      unlistenOutput = await listen<PtyOutputEvent>("pty-output", (event) => {
-        if (event.payload.id !== ptyId.value || !terminal) {
+      // Per-session event names (see `util::session_event` on the Rust side):
+      // the backend emits to `pty-output:<sessionId>`, so only this component's
+      // listener is woken — no global broadcast + id-filter fan-out across panes.
+      unlistenOutput = await listen<PtyOutputEvent>(`pty-output:${props.sessionId}`, (event) => {
+        if (!terminal) {
           return;
         }
         terminal.write(event.payload.data);
@@ -711,8 +714,8 @@ onMounted(() => {
         }
       });
 
-      unlistenExit = await listen<PtyExitEvent>("pty-exit", (event) => {
-        if (event.payload.id !== ptyId.value || !terminal) {
+      unlistenExit = await listen<PtyExitEvent>(`pty-exit:${props.sessionId}`, (event) => {
+        if (!terminal) {
           return;
         }
         const message = event.payload.message;
@@ -736,42 +739,27 @@ onMounted(() => {
         }
       });
 
-      unlistenSshConnected = await listen<{ id: string }>("ssh-connected", (event) => {
-        if (event.payload.id === ptyId.value) {
-          terminal?.writeln("\r\n[Connected]");
-        }
+      unlistenSshConnected = await listen<{ id: string }>(`ssh-connected:${props.sessionId}`, () => {
+        terminal?.writeln("\r\n[Connected]");
       });
 
-      unlistenSerialConnected = await listen<{ id: string }>("serial-connected", (event) => {
-        if (event.payload.id === ptyId.value) {
-          notifySerialConnectionStateChange("connected");
-          terminal?.writeln("\r\n[Connected]");
-        }
+      unlistenSerialConnected = await listen<{ id: string }>(`serial-connected:${props.sessionId}`, () => {
+        notifySerialConnectionStateChange("connected");
+        terminal?.writeln("\r\n[Connected]");
       });
 
-      unlistenMfa = await listen<SshMfaPromptEvent>("ssh-mfa-prompt", (event) => {
-        if (event.payload.id !== ptyId.value) {
-          return;
-        }
+      unlistenMfa = await listen<SshMfaPromptEvent>(`ssh-mfa-prompt:${props.sessionId}`, (event) => {
         mfaEvent.value = event.payload;
         mfaResponses.value = new Array(event.payload.prompts.length).fill("");
         showMfaOverlay.value = true;
       });
 
-      unlistenReconnectPrompt = await listen<SshReconnectSessionPromptEvent>("ssh-reconnect-session-prompt", (event) => {
-        if (event.payload.id !== ptyId.value) {
-          return;
-        }
-
+      unlistenReconnectPrompt = await listen<SshReconnectSessionPromptEvent>(`ssh-reconnect-session-prompt:${props.sessionId}`, (event) => {
         reconnectPrompt.value = event.payload;
         selectedReconnectSession.value = event.payload.sessions[0] ?? "";
       });
 
-      unlistenHostKeyMismatch = await listen<SshHostKeyMismatchPromptEvent>("ssh-host-key-mismatch-prompt", (event) => {
-        if (event.payload.id !== props.sessionId) {
-          return;
-        }
-
+      unlistenHostKeyMismatch = await listen<SshHostKeyMismatchPromptEvent>(`ssh-host-key-mismatch-prompt:${props.sessionId}`, (event) => {
         hostKeyPrompt.value = event.payload;
         showHostKeyOverlay.value = true;
       });

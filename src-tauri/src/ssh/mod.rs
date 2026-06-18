@@ -440,7 +440,7 @@ pub async fn write_ssh_pty_input(
         if tx.send(data).await.is_err() {
             let message = "SSH connection lost; input was not sent".to_string();
             let _ = app.emit(
-                "pty-output",
+                &crate::util::session_event("pty-output", &id),
                 TerminalDataPayload {
                     id,
                     data: format!("\r\n\x1b[31m[{message}]\x1b[0m\r\n"),
@@ -657,7 +657,7 @@ async fn authenticate_ssh(
                         instruction: instructions.clone(),
                         prompts: prompts.iter().map(|p| SshMfaPrompt { text: p.prompt.clone(), echo: p.echo }).collect(),
                     };
-                    let _ = app.emit("ssh-mfa-prompt", payload);
+                    let _ = app.emit(&crate::util::session_event("ssh-mfa-prompt", id), payload);
 
                     let mut answers = Vec::new();
                     for _ in &prompts {
@@ -797,7 +797,7 @@ async fn prompt_for_existing_reconnect_session(
 
     if app
         .emit(
-            "ssh-reconnect-session-prompt",
+            &crate::util::session_event("ssh-reconnect-session-prompt", id),
             ReconnectSessionPromptPayload {
                 id: id.to_string(),
                 tool: tool.to_string(),
@@ -1031,7 +1031,7 @@ async fn run_reconnect_loop(
 
             // Emit a notice to the terminal.
             let _ = app.emit(
-                "pty-output",
+                &crate::util::session_event("pty-output", &id),
                 TerminalDataPayload {
                     id: id.clone(),
                     data: notice,
@@ -1109,7 +1109,7 @@ async fn run_reconnect_loop(
                 if is_auth_error(&err) {
                     cleanup_ssh_session(&state, &id).await;
                     let _ = app.emit(
-                        "pty-exit",
+                        &crate::util::session_event("pty-exit", &id),
                         PtyExitPayload {
                             id: id.clone(),
                             message: err,
@@ -1119,7 +1119,7 @@ async fn run_reconnect_loop(
                 }
 
                 let _ = app.emit(
-                    "pty-output",
+                    &crate::util::session_event("pty-output", &id),
                     TerminalDataPayload {
                         id: id.clone(),
                         data: format!("\r\n\x1b[31m[Reconnect failed: {}]\x1b[0m\r\n", err),
@@ -1132,7 +1132,7 @@ async fn run_reconnect_loop(
     // Loop exited — do final cleanup.
     cleanup_ssh_session(&state, &id).await;
     let _ = app.emit(
-        "pty-exit",
+        &crate::util::session_event("pty-exit", &id),
         PtyExitPayload {
             id: id.clone(),
             message: "SSH session ended".to_string(),
@@ -1258,7 +1258,7 @@ async fn do_single_ssh_connect(
     }
 
     let _ = app.emit(
-        "ssh-connected",
+        &crate::util::session_event("ssh-connected", id),
         TerminalDataPayload { id: id.to_string(), data: String::new() },
     );
 
@@ -1272,7 +1272,7 @@ async fn do_single_ssh_connect(
             };
             if let Some(tool_name) = tool {
                 let _ = app.emit(
-                    "pty-output",
+                    &crate::util::session_event("pty-output", id),
                     TerminalDataPayload {
                         id: id.to_string(),
                         data: format!(
@@ -1344,7 +1344,7 @@ async fn run_channel_io_loop(
                         let output = stdout_decoder.push(data);
                         if !output.is_empty() {
                             let _ = app.emit(
-                                "pty-output",
+                                &crate::util::session_event("pty-output", &id),
                                 TerminalDataPayload {
                                     id: id.clone(),
                                     data: output,
@@ -1362,7 +1362,7 @@ async fn run_channel_io_loop(
                         let output = stderr_decoder.push(data);
                         if !output.is_empty() {
                             let _ = app.emit(
-                                "pty-output",
+                                &crate::util::session_event("pty-output", &id),
                                 TerminalDataPayload {
                                     id: id.clone(),
                                     data: output,
@@ -1443,7 +1443,7 @@ async fn run_channel_io_loop(
                         if should_emit {
                             last_write_error_notice_at = Some(std::time::Instant::now());
                             let _ = app.emit(
-                                "pty-output",
+                                &crate::util::session_event("pty-output", &id),
                                 TerminalDataPayload {
                                     id: id.clone(),
                                     data: format!("\r\n\x1b[33m[{message}]\x1b[0m\r\n"),
@@ -1503,7 +1503,7 @@ async fn run_channel_io_loop(
     };
     if !has_reconnect {
         let _ = app.emit(
-            "pty-exit",
+            &crate::util::session_event("pty-exit", &id),
             PtyExitPayload {
                 id: id.clone(),
                 message: final_exit_message.unwrap_or_else(|| "SSH connection closed".to_string()),
