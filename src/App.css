@@ -2681,6 +2681,22 @@
   color: var(--ui-text-muted, rgba(213, 219, 229, 0.5));
 }
 
+.settings-remember-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ui-text, #d5dbe5);
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.settings-remember-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+
 .settings-security-success {
   color: #7daa78;
   font-size: 12px;

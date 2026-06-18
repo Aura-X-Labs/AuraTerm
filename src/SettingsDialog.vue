@@ -250,6 +250,7 @@ watch(
   (tab) => {
     if (tab === "security") {
       void refreshTrustedHostKeys();
+      void refreshCredentialState();
     }
   },
   { immediate: false },
@@ -377,7 +378,7 @@ async function importCredentials() {
   importLoading.value = true;
   try {
     await invoke("import_connections", {
-      backupContent: pendingImportContent.value,
+      encryptedData: pendingImportContent.value,
       password: importPassword.value,
     });
     importSuccess.value = "Credentials imported successfully.";
@@ -407,6 +408,139 @@ async function lockMasterPasswordNow() {
     window.alert(`Failed to lock master password: ${message}`);
   } finally {
     lockingMasterPassword.value = false;
+  }
+}
+
+// ---------- Master password mode (optional password / keychain remember) ----------
+
+interface CredentialSecurityState {
+  passwordEnabled: boolean;
+  unlocked: boolean;
+  rememberEnabled: boolean;
+  rememberAvailable: boolean;
+}
+
+const credentialState = ref<CredentialSecurityState>({
+  passwordEnabled: false,
+  unlocked: false,
+  rememberEnabled: false,
+  rememberAvailable: false,
+});
+const mpBusy = ref(false);
+const mpError = ref("");
+const mpSuccess = ref("");
+const enableNewPassword = ref("");
+const enableConfirm = ref("");
+const enableRemember = ref(false);
+const changeCurrent = ref("");
+const changeNew = ref("");
+const changeConfirm = ref("");
+const disableCurrent = ref("");
+
+function errMsg(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function refreshCredentialState() {
+  try {
+    credentialState.value = await invoke<CredentialSecurityState>("get_credential_security_state");
+  } catch (error) {
+    console.error("Failed to load credential security state", error);
+  }
+}
+
+async function enableMasterPassword() {
+  mpError.value = "";
+  mpSuccess.value = "";
+  if (enableNewPassword.value.length < 8) {
+    mpError.value = "Password must be at least 8 characters.";
+    return;
+  }
+  if (enableNewPassword.value !== enableConfirm.value) {
+    mpError.value = "Passwords do not match.";
+    return;
+  }
+  mpBusy.value = true;
+  try {
+    await invoke("set_master_password", {
+      password: enableNewPassword.value,
+      remember: enableRemember.value && credentialState.value.rememberAvailable,
+    });
+    enableNewPassword.value = "";
+    enableConfirm.value = "";
+    enableRemember.value = false;
+    mpSuccess.value = "Master password enabled.";
+    await refreshCredentialState();
+  } catch (error) {
+    mpError.value = `Failed: ${errMsg(error)}`;
+  } finally {
+    mpBusy.value = false;
+  }
+}
+
+async function changeMasterPassword() {
+  mpError.value = "";
+  mpSuccess.value = "";
+  if (changeNew.value.length < 8) {
+    mpError.value = "New password must be at least 8 characters.";
+    return;
+  }
+  if (changeNew.value !== changeConfirm.value) {
+    mpError.value = "New passwords do not match.";
+    return;
+  }
+  mpBusy.value = true;
+  try {
+    await invoke("change_master_password", {
+      currentPassword: changeCurrent.value,
+      newPassword: changeNew.value,
+      remember: credentialState.value.rememberEnabled && credentialState.value.rememberAvailable,
+    });
+    changeCurrent.value = "";
+    changeNew.value = "";
+    changeConfirm.value = "";
+    mpSuccess.value = "Master password changed.";
+    await refreshCredentialState();
+  } catch (error) {
+    mpError.value = `Failed: ${errMsg(error)}`;
+  } finally {
+    mpBusy.value = false;
+  }
+}
+
+async function disableMasterPassword() {
+  mpError.value = "";
+  mpSuccess.value = "";
+  const confirmed = window.confirm(
+    "Remove the master password? Credentials will be re-encrypted with a device-local key and you'll no longer be prompted on startup.",
+  );
+  if (!confirmed) {
+    return;
+  }
+  mpBusy.value = true;
+  try {
+    await invoke("disable_master_password", { currentPassword: disableCurrent.value });
+    disableCurrent.value = "";
+    mpSuccess.value = "Master password removed. Credentials are now protected by a device-local key.";
+    await refreshCredentialState();
+  } catch (error) {
+    mpError.value = `Failed: ${errMsg(error)}`;
+  } finally {
+    mpBusy.value = false;
+  }
+}
+
+async function toggleRememberMasterPassword(enabled: boolean) {
+  mpError.value = "";
+  mpSuccess.value = "";
+  mpBusy.value = true;
+  try {
+    await invoke("set_remember_master_password", { enabled });
+  } catch (error) {
+    mpError.value = `Failed: ${errMsg(error)}`;
+  } finally {
+    await refreshCredentialState();
+    mpBusy.value = false;
   }
 }
 </script>
@@ -728,7 +862,101 @@ async function lockMasterPasswordNow() {
 
         <!-- Security Tab -->
         <div v-show="activeTab === 'security'" class="settings-section">
+          <!-- Master Password -->
           <div class="settings-security-header">
+            <div>
+              <div class="settings-security-title">Master Password</div>
+              <div class="settings-security-subtitle">
+                <template v-if="credentialState.passwordEnabled">
+                  A master password is set; saved credentials are encrypted with it.
+                </template>
+                <template v-else>
+                  No master password — credentials are encrypted with a device-local key and the
+                  app never prompts on startup. Anyone able to sign in as you can read them, so keep
+                  an encrypted backup (below).
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="mpError" class="settings-security-error">{{ mpError }}</div>
+          <div v-if="mpSuccess" class="settings-security-success">{{ mpSuccess }}</div>
+
+          <!-- No password: offer to enable one -->
+          <div v-if="!credentialState.passwordEnabled" class="settings-backup-card" style="margin-top: 12px;">
+            <div class="settings-backup-card-title">Set a master password</div>
+            <div class="settings-backup-card-desc">
+              You'll enter it on launch (or have it remembered on this device).
+            </div>
+            <div class="settings-form-row">
+              <label>New password (min 8 chars)</label>
+              <input v-model="enableNewPassword" type="password" autocomplete="new-password" :disabled="mpBusy" />
+            </div>
+            <div class="settings-form-row">
+              <label>Confirm password</label>
+              <input v-model="enableConfirm" type="password" autocomplete="new-password" :disabled="mpBusy" />
+            </div>
+            <label v-if="credentialState.rememberAvailable" class="settings-remember-row">
+              <input v-model="enableRemember" type="checkbox" :disabled="mpBusy" />
+              <span>Remember on this device (auto-unlock via system keychain)</span>
+            </label>
+            <button class="settings-btn-primary" type="button" :disabled="mpBusy" @click="enableMasterPassword">
+              {{ mpBusy ? 'Working...' : 'Enable Master Password' }}
+            </button>
+          </div>
+
+          <!-- Password set: remember toggle + change + remove -->
+          <template v-else>
+            <label v-if="credentialState.rememberAvailable" class="settings-remember-row" style="margin: 12px 0 16px;">
+              <input
+                type="checkbox"
+                :checked="credentialState.rememberEnabled"
+                :disabled="mpBusy"
+                @change="toggleRememberMasterPassword(($event.target as HTMLInputElement).checked)"
+              />
+              <span>Remember on this device (auto-unlock via system keychain)</span>
+            </label>
+            <div v-else class="settings-backup-card-desc" style="margin: 12px 0 16px;">
+              Auto-unlock via the system keychain is available on macOS and Windows only.
+            </div>
+
+            <div class="settings-backup-grid">
+              <div class="settings-backup-card">
+                <div class="settings-backup-card-title">Change Password</div>
+                <div class="settings-form-row">
+                  <label>Current password</label>
+                  <input v-model="changeCurrent" type="password" autocomplete="off" :disabled="mpBusy" />
+                </div>
+                <div class="settings-form-row">
+                  <label>New password (min 8 chars)</label>
+                  <input v-model="changeNew" type="password" autocomplete="new-password" :disabled="mpBusy" />
+                </div>
+                <div class="settings-form-row">
+                  <label>Confirm new password</label>
+                  <input v-model="changeConfirm" type="password" autocomplete="new-password" :disabled="mpBusy" />
+                </div>
+                <button class="settings-btn-primary" type="button" :disabled="mpBusy" @click="changeMasterPassword">
+                  {{ mpBusy ? 'Working...' : 'Change Password' }}
+                </button>
+              </div>
+
+              <div class="settings-backup-card">
+                <div class="settings-backup-card-title">Remove Password</div>
+                <div class="settings-backup-card-desc">
+                  Switch back to a device-local key (no prompt on startup).
+                </div>
+                <div class="settings-form-row">
+                  <label>Current password</label>
+                  <input v-model="disableCurrent" type="password" autocomplete="off" :disabled="mpBusy" />
+                </div>
+                <button class="settings-btn-secondary settings-btn-danger" type="button" :disabled="mpBusy" @click="disableMasterPassword">
+                  {{ mpBusy ? 'Working...' : 'Remove Master Password' }}
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <div class="settings-security-header" style="margin-top: 32px;">
             <div>
               <div class="settings-security-title">Trusted SSH Host Fingerprints</div>
               <div class="settings-security-subtitle">
@@ -865,8 +1093,8 @@ async function lockMasterPasswordNow() {
             </div>
           </div>
 
-          <!-- Lock master password -->
-          <div class="settings-security-header" style="margin-top: 32px;">
+          <!-- Lock master password (only relevant when one is set) -->
+          <div v-if="credentialState.passwordEnabled" class="settings-security-header" style="margin-top: 32px;">
             <div>
               <div class="settings-security-title">Lock Master Password</div>
               <div class="settings-security-subtitle">
