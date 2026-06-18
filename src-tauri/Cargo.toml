@@ -33,6 +33,15 @@ zeroize = { version = "1.6", features = ["derive"] }
 base64 = "0.21"
 rand = "0.8"
 
+# OS keychain for opt-in "remember master password" auto-unlock.
+# Scoped to macOS/Windows native backends so Linux does not pull in
+# secret-service / DBus (the dependency the app deliberately shed earlier).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

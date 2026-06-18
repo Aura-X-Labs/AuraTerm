@@ -129,6 +129,8 @@ export interface AppSettings {
   masterPasswordSalt?: string | null;
   /** Whether credentials have been initialized with encryption */
   credentialsInitialized?: boolean;
+  /** When a master password is set, cache it in the OS keychain for auto-unlock (macOS/Windows) */
+  rememberMasterPassword?: boolean;
 }
 
 const LEGACY_DEFAULT_THEME: TerminalTheme = {
@@ -449,6 +451,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   masterPasswordHash: null,
   masterPasswordSalt: null,
   credentialsInitialized: false,
+  rememberMasterPassword: false,
 };
 
 export const MAX_INPUT_HISTORY = 100;
@@ -498,6 +501,7 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     masterPasswordHash: value?.masterPasswordHash ?? DEFAULT_SETTINGS.masterPasswordHash,
     masterPasswordSalt: value?.masterPasswordSalt ?? DEFAULT_SETTINGS.masterPasswordSalt,
     credentialsInitialized: value?.credentialsInitialized ?? DEFAULT_SETTINGS.credentialsInitialized,
+    rememberMasterPassword: value?.rememberMasterPassword ?? DEFAULT_SETTINGS.rememberMasterPassword,
   };
 }
 

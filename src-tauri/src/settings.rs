@@ -153,6 +153,10 @@ pub struct Settings {
     /// Whether credentials have been initialized with encryption
     #[serde(default)]
     pub credentials_initialized: bool,
+    /// When a master password is set, whether to cache it in the OS keychain
+    /// for silent auto-unlock on the next launch (macOS / Windows only).
+    #[serde(default)]
+    pub remember_master_password: bool,
 }
 
 fn default_true() -> bool { true }
@@ -186,6 +190,7 @@ impl Default for Settings {
             master_password_hash: None,
             master_password_salt: None,
             credentials_initialized: false,
+            remember_master_password: false,
         }
     }
 }

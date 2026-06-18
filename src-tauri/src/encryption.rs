@@ -13,13 +13,20 @@ use tauri::{AppHandle, Manager};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const CREDENTIALS_FILE: &str = "credentials.enc";
+/// Device-local random AES key used when no master password is set (the
+/// "no master password" / MobaXterm-style mode). Protected by filesystem
+/// permissions (0600 on unix) rather than a user-supplied secret.
+const LOCAL_KEY_FILE: &str = "credentials.key";
 const MAGIC: &[u8; 8] = b"AURAENC\0";
 /// Legacy credential KDF (Argon2id -> PHC string -> SHA-256). Retained only to
 /// decrypt files written before the v2 migration; never used for new writes.
 const VERSION_V1_LEGACY: u32 = 1;
-/// Current credential KDF: Argon2id derived directly into a 32-byte key.
+/// Password-derived credential KDF: Argon2id derived directly into a 32-byte key.
 const VERSION_V2: u32 = 2;
-/// Version stamped into newly written credential files.
+/// Device-local-key mode: the 32-byte AES key comes straight from
+/// `credentials.key`; no password / Argon2 / salt involved.
+const VERSION_V3_LOCAL_KEY: u32 = 3;
+/// Version stamped into newly written *password-protected* credential files.
 const CURRENT_VERSION: u32 = VERSION_V2;
 /// Version byte prefixed to exported backup blobs.
 const BACKUP_VERSION: u8 = 2;
@@ -60,6 +67,108 @@ impl MasterPasswordState {
             .lock()
             .map(|guard| guard.is_some())
             .unwrap_or(false)
+    }
+}
+
+/// What unlocks the credential store, and thus how the AES-256-GCM key is
+/// obtained:
+/// - [`CredentialSecret::Password`]: master-password mode — Argon2id derives the
+///   key (file versions v1/v2).
+/// - [`CredentialSecret::LocalKey`]: no-master-password mode — the key is read
+///   straight from `credentials.key` (file version v3).
+pub enum CredentialSecret {
+    Password(Zeroizing<String>),
+    LocalKey(Zeroizing<[u8; 32]>),
+}
+
+/// Path to the device-local AES key file.
+fn local_key_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(config_dir.join(LOCAL_KEY_FILE))
+}
+
+/// Read the device-local key, generating and persisting a fresh random one on
+/// first use. Used in no-master-password mode.
+pub fn load_or_create_local_key(app: &AppHandle) -> Result<Zeroizing<[u8; 32]>, String> {
+    let path = local_key_path(app)?;
+
+    if path.exists() {
+        let raw = Zeroizing::new(
+            fs::read(&path).map_err(|e| format!("Failed to read local key: {}", e))?,
+        );
+        if raw.len() != 32 {
+            return Err("credentials.key is corrupt (expected 32 bytes)".to_string());
+        }
+        let mut key = Zeroizing::new([0u8; 32]);
+        key.copy_from_slice(&raw);
+        return Ok(key);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create config directory: {}", e))?;
+    }
+
+    let mut key = Zeroizing::new([0u8; 32]);
+    rand::thread_rng().fill(&mut key[..]);
+    fs::write(&path, &key[..]).map_err(|e| format!("Failed to write local key: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, permissions)
+            .map_err(|e| format!("Failed to set local key permissions: {}", e))?;
+    }
+
+    Ok(key)
+}
+
+/// Resolve the secret that unlocks the credential store for the *current* mode:
+/// `Password` when a master password is configured, `LocalKey` otherwise.
+pub fn resolve_secret(
+    app: &AppHandle,
+    master_state: &MasterPasswordState,
+) -> Result<CredentialSecret, String> {
+    let settings = crate::settings::get_settings(app.clone())?;
+    if settings.master_password_hash.is_some() {
+        Ok(CredentialSecret::Password(master_state.get()?))
+    } else {
+        Ok(CredentialSecret::LocalKey(load_or_create_local_key(app)?))
+    }
+}
+
+/// Whether credentials can be read right now without prompting: always true in
+/// local-key mode, and only when unlocked in master-password mode.
+pub fn credentials_accessible(app: &AppHandle, master_state: &MasterPasswordState) -> bool {
+    let password_mode = crate::settings::get_settings(app.clone())
+        .map(|s| s.master_password_hash.is_some())
+        .unwrap_or(false);
+    !password_mode || master_state.is_unlocked()
+}
+
+/// Derive the AES key for an existing file given its header version and the
+/// caller's secret, enforcing that the secret matches the file's mode.
+fn aes_key_for_header(
+    secret: &CredentialSecret,
+    header: &EncryptedFileHeader,
+) -> Result<Zeroizing<[u8; 32]>, String> {
+    match header.version {
+        VERSION_V1_LEGACY | VERSION_V2 => match secret {
+            CredentialSecret::Password(password) => {
+                derive_key(password, &header.salt, header.version)
+            }
+            CredentialSecret::LocalKey(_) => Err(
+                "Credential store is password-protected; a master password is required".to_string(),
+            ),
+        },
+        VERSION_V3_LOCAL_KEY => match secret {
+            CredentialSecret::LocalKey(key) => Ok(key.clone()),
+            CredentialSecret::Password(_) => Err(
+                "Credential store uses a device-local key; no master password is set".to_string(),
+            ),
+        },
+        other => Err(format!("Unsupported credential KDF version: {}", other)),
     }
 }
 
@@ -118,7 +227,10 @@ impl EncryptedFileHeader {
             <[u8; 4]>::try_from(&bytes[8..12]).map_err(|_| "Version parse failed".to_string())?,
         );
 
-        if version != VERSION_V1_LEGACY && version != VERSION_V2 {
+        if version != VERSION_V1_LEGACY
+            && version != VERSION_V2
+            && version != VERSION_V3_LOCAL_KEY
+        {
             return Err(format!("Unsupported file version: {}", version));
         }
 
@@ -272,7 +384,7 @@ pub fn decrypt_data(encrypted: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String>
 /// 从文件系统加载并解密凭据
 pub fn load_encrypted_credentials(
     app: &AppHandle,
-    password: &str,
+    secret: &CredentialSecret,
 ) -> Result<CredentialStore, String> {
     let credentials_path = get_credentials_path(app)?;
 
@@ -288,8 +400,8 @@ pub fn load_encrypted_credentials(
 
     let (header, encrypted_data) = EncryptedFileHeader::from_bytes(&file_data)?;
 
-    // 按文件版本派生密钥
-    let key = derive_key(password, &header.salt, header.version)?;
+    // 按文件版本 + secret 解析出 AES 密钥（并校验模式匹配）
+    let key = aes_key_for_header(secret, &header)?;
 
     // 解密数据（明文含密码/私钥，用 Zeroizing 包裹以便用后擦除）
     let decrypted = Zeroizing::new(decrypt_data(encrypted_data, &key)?);
@@ -299,9 +411,9 @@ pub fn load_encrypted_credentials(
         .map_err(|e| format!("Failed to parse credentials JSON: {}", e))?;
 
     // 透明迁移：首次读取到旧版 (v1) 文件时，用 v2 KDF 重新加密回写，逐步淘汰遗留派生方式。
-    // 尽力而为——回写失败不应影响本次读取已成功解密的凭据。
+    // 仅在密码模式发生（v1 永远是密码派生）。尽力而为——回写失败不应影响本次读取。
     if header.version == VERSION_V1_LEGACY {
-        let _ = save_encrypted_credentials(app, &store, password);
+        let _ = save_encrypted_credentials(app, &store, secret);
     }
 
     Ok(store)
@@ -311,7 +423,7 @@ pub fn load_encrypted_credentials(
 pub fn save_encrypted_credentials(
     app: &AppHandle,
     store: &CredentialStore,
-    password: &str,
+    secret: &CredentialSecret,
 ) -> Result<(), String> {
     let credentials_path = get_credentials_path(app)?;
 
@@ -320,12 +432,20 @@ pub fn save_encrypted_credentials(
             .map_err(|e| format!("Failed to create credentials directory: {}", e))?;
     }
 
-    // 生成随机盐值
-    let mut rng = rand::thread_rng();
-    let salt: Vec<u8> = (0..SALT_SIZE).map(|_| rng.gen()).collect();
-
-    // 派生密钥（始终使用当前 v2 KDF）
-    let key = derive_key_v2(password, &salt)?;
+    // 选择文件版本与 AES 密钥：
+    // - Password → v2（每次写入随机盐 + Argon2id 派生）
+    // - LocalKey → v3（直接用设备本地密钥，盐位写零、被忽略）
+    let (version, key, salt) = match secret {
+        CredentialSecret::Password(password) => {
+            let mut rng = rand::thread_rng();
+            let salt: Vec<u8> = (0..SALT_SIZE).map(|_| rng.gen()).collect();
+            let key = derive_key_v2(password, &salt)?;
+            (CURRENT_VERSION, key, salt)
+        }
+        CredentialSecret::LocalKey(local_key) => {
+            (VERSION_V3_LOCAL_KEY, local_key.clone(), vec![0u8; SALT_SIZE])
+        }
+    };
 
     // 序列化凭据为 JSON（含明文，用 Zeroizing 包裹以便用后擦除）
     let json_data = Zeroizing::new(
@@ -338,7 +458,7 @@ pub fn save_encrypted_credentials(
     // 构建文件头
     let header = EncryptedFileHeader {
         magic: *MAGIC,
-        version: CURRENT_VERSION,
+        version,
         salt,
         reserved: [0u8; 12],
     };
@@ -374,16 +494,20 @@ fn get_credentials_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 /// 导出凭据为加密备份字符串（Base64 编码）
 pub fn export_credentials_backup(
     app: &AppHandle,
-    password: &str,
+    backup_password: &str,
+    current_secret: &CredentialSecret,
 ) -> Result<String, String> {
-    let store = load_encrypted_credentials(app, password)?;
+    // Read the live store with whatever currently unlocks it (master password or
+    // device-local key); encrypt the portable backup under the user-chosen
+    // backup password, which is independent of the current unlock mode.
+    let store = load_encrypted_credentials(app, current_secret)?;
 
     // 生成随机盐值用于导出加密
     let mut rng = rand::thread_rng();
     let export_salt: Vec<u8> = (0..SALT_SIZE).map(|_| rng.gen()).collect();
 
     // 派生导出密钥（v2）
-    let export_key = derive_key_v2(password, &export_salt)?;
+    let export_key = derive_key_v2(backup_password, &export_salt)?;
 
     // 序列化（含明文，用 Zeroizing 包裹）
     let json_data = Zeroizing::new(
@@ -407,8 +531,9 @@ pub fn export_credentials_backup(
 /// 从备份字符串导入凭据
 pub fn import_credentials_backup(
     app: &AppHandle,
-    password: &str,
+    backup_password: &str,
     backup_data: &str,
+    current_secret: &CredentialSecret,
 ) -> Result<(), String> {
     // Base64 解码
     let decoded = STANDARD
@@ -433,8 +558,8 @@ pub fn import_credentials_backup(
     let import_salt = body[0..SALT_SIZE].to_vec();
     let encrypted_data = &body[SALT_SIZE..];
 
-    // 派生导入密钥（v2）
-    let import_key = derive_key_v2(password, &import_salt)?;
+    // 派生导入密钥（v2，用备份密码）
+    let import_key = derive_key_v2(backup_password, &import_salt)?;
 
     // 解密（含明文，用 Zeroizing 包裹）
     let decrypted = Zeroizing::new(decrypt_data(encrypted_data, &import_key)?);
@@ -443,10 +568,11 @@ pub fn import_credentials_backup(
     let mut imported_store: CredentialStore = serde_json::from_slice(&decrypted)
         .map_err(|e| format!("Failed to parse imported credentials: {}", e))?;
 
-    // 加载现有凭据
-    let mut current_store = load_encrypted_credentials(app, password).unwrap_or(CredentialStore {
-        credentials: Vec::new(),
-    });
+    // 加载现有凭据（用当前解锁方式）
+    let mut current_store =
+        load_encrypted_credentials(app, current_secret).unwrap_or(CredentialStore {
+            credentials: Vec::new(),
+        });
 
     // 合并：导入的凭据覆盖现有的同 ID 凭据。
     // 用 drain 取出元素，避免 move out（CredentialStore 因 ZeroizeOnDrop 实现了 Drop）。
@@ -462,8 +588,8 @@ pub fn import_credentials_backup(
         }
     }
 
-    // 保存合并后的凭据
-    save_encrypted_credentials(app, &current_store, password)?;
+    // 保存合并后的凭据（用当前解锁方式）
+    save_encrypted_credentials(app, &current_store, current_secret)?;
 
     Ok(())
 }
@@ -931,5 +1057,89 @@ mod tests {
 
         let key_wrong = derive_key_v2("wrong-pw", &salt).unwrap();
         assert!(decrypt_data(&encrypted, &key_wrong).is_err());
+    }
+
+    // ========== 本地密钥模式 (v3) ==========
+
+    #[test]
+    fn test_header_accepts_v3() {
+        let mut bytes = vec![0u8; HEADER_SIZE];
+        bytes[0..8].copy_from_slice(MAGIC);
+        bytes[8..12].copy_from_slice(&VERSION_V3_LOCAL_KEY.to_le_bytes());
+        assert!(
+            EncryptedFileHeader::from_bytes(&bytes).is_ok(),
+            "Header parser must accept the v3 local-key version"
+        );
+    }
+
+    /// LocalKey 模式端到端：v3 头部 + 直接用本地密钥 AES-GCM，再经版本调度解回。
+    #[test]
+    fn test_v3_local_key_blob_roundtrip() {
+        let local_key = Zeroizing::new([0x5Cu8; 32]);
+        let secret = CredentialSecret::LocalKey(local_key.clone());
+
+        let store = CredentialStore {
+            credentials: vec![StoredCredential {
+                connection_id: "lk-host".to_string(),
+                password: Some("local-secret".to_string()),
+                private_key: None,
+            }],
+        };
+
+        // save 路径（LocalKey 分支）：version=v3，盐写零，密钥即本地密钥。
+        let key = match &secret {
+            CredentialSecret::LocalKey(k) => k.clone(),
+            _ => unreachable!(),
+        };
+        let json = serde_json::to_vec(&store).unwrap();
+        let encrypted = encrypt_data(&json, &key).unwrap();
+        let header = EncryptedFileHeader {
+            magic: *MAGIC,
+            version: VERSION_V3_LOCAL_KEY,
+            salt: vec![0u8; SALT_SIZE],
+            reserved: [0u8; 12],
+        };
+        let mut blob = header.to_bytes();
+        blob.extend_from_slice(&encrypted);
+
+        // load 路径：解析头部 -> aes_key_for_header(LocalKey) -> 解密。
+        let (parsed, ciphertext) = EncryptedFileHeader::from_bytes(&blob).unwrap();
+        assert_eq!(parsed.version, VERSION_V3_LOCAL_KEY);
+        let resolved = aes_key_for_header(&secret, &parsed).unwrap();
+        assert_eq!(*resolved, *local_key, "v3 key must be the raw local key");
+        let decrypted = decrypt_data(ciphertext, &resolved).unwrap();
+        let parsed_store: CredentialStore = serde_json::from_slice(&decrypted).unwrap();
+        assert_eq!(parsed_store.credentials[0].password.as_deref(), Some("local-secret"));
+    }
+
+    /// secret 模式必须与文件版本匹配，否则报错（防止密码模式去解本地密钥文件，反之亦然）。
+    #[test]
+    fn test_aes_key_for_header_rejects_mode_mismatch() {
+        let password_secret = CredentialSecret::Password(Zeroizing::new("pw".to_string()));
+        let local_secret = CredentialSecret::LocalKey(Zeroizing::new([1u8; 32]));
+
+        let v2_header = EncryptedFileHeader {
+            magic: *MAGIC,
+            version: VERSION_V2,
+            salt: vec![0u8; SALT_SIZE],
+            reserved: [0u8; 12],
+        };
+        let v3_header = EncryptedFileHeader {
+            magic: *MAGIC,
+            version: VERSION_V3_LOCAL_KEY,
+            salt: vec![0u8; SALT_SIZE],
+            reserved: [0u8; 12],
+        };
+
+        assert!(
+            aes_key_for_header(&local_secret, &v2_header).is_err(),
+            "LocalKey secret must not open a password-protected (v2) file"
+        );
+        assert!(
+            aes_key_for_header(&password_secret, &v3_header).is_err(),
+            "Password secret must not open a device-local-key (v3) file"
+        );
+        assert!(aes_key_for_header(&password_secret, &v2_header).is_ok());
+        assert!(aes_key_for_header(&local_secret, &v3_header).is_ok());
     }
 }

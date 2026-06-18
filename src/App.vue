@@ -90,6 +90,7 @@ const terminalSearchQuery = ref("");
 const showMasterPasswordDialog = ref(false);
 const masterPasswordDialogMode = ref<'setup' | 'unlock'>('setup');
 const masterPasswordVerified = ref(false);
+const masterPasswordRememberAvailable = ref(false);
 const terminalSearchOptions = ref<Required<Pick<TerminalSearchOptions, TerminalSearchToggleKey>>>({
   caseSensitive: false,
   wholeWord: false,
@@ -382,16 +383,29 @@ onMounted(async () => {
 
   hasLoadedSettings.value = true;
 
-  // 检查主密码是否已设置
-  const credentialsInitialized = settings.value.credentialsInitialized ?? false;
-  if (!credentialsInitialized) {
-    // 首次使用，显示主密码设置对话框
-    masterPasswordDialogMode.value = 'setup';
-    showMasterPasswordDialog.value = true;
-  } else if (!masterPasswordVerified.value) {
-    // 已设置过主密码，显示解锁对话框
-    masterPasswordDialogMode.value = 'unlock';
-    showMasterPasswordDialog.value = true;
+  // 凭据保护状态:
+  //  - 无主密码(本地密钥模式,默认):不弹窗;
+  //  - 有主密码:先尝试钥匙串静默自动解锁,失败再弹解锁框。
+  // 全新安装默认无主密码,因此不再强制首次设置(可在 设置→Security 里启用)。
+  try {
+    const sec = await invoke<{
+      passwordEnabled: boolean;
+      unlocked: boolean;
+      rememberEnabled: boolean;
+      rememberAvailable: boolean;
+    }>("get_credential_security_state");
+    masterPasswordRememberAvailable.value = sec.rememberAvailable;
+
+    if (!sec.passwordEnabled || sec.unlocked) {
+      masterPasswordVerified.value = true;
+    } else if (await invoke<boolean>("try_auto_unlock")) {
+      masterPasswordVerified.value = true;
+    } else {
+      masterPasswordDialogMode.value = 'unlock';
+      showMasterPasswordDialog.value = true;
+    }
+  } catch (error) {
+    console.error("Failed to resolve credential security state", error);
   }
 
   cleanupFns.push(await registerAppEventListeners());
@@ -1781,6 +1795,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
     <MasterPasswordDialog
       :is-open="showMasterPasswordDialog"
       :mode="masterPasswordDialogMode"
+      :remember-available="masterPasswordRememberAvailable"
       @success="handleMasterPasswordSuccess"
       @unlocked="handleMasterPasswordUnlocked"
       @cancel="handleMasterPasswordCancel"

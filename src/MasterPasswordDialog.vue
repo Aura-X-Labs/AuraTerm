@@ -67,6 +67,11 @@
               {{ errorMessage }}
             </div>
           </div>
+
+          <label v-if="rememberAvailable" class="remember-row">
+            <input v-model="remember" type="checkbox" />
+            <span>在此设备记住（下次启动自动解锁）</span>
+          </label>
         </template>
       </div>
 
@@ -103,6 +108,8 @@ type Mode = 'setup' | 'unlock'
 interface Props {
   isOpen: boolean
   mode: Mode
+  /** Whether the OS keychain "remember" option is supported (macOS/Windows). */
+  rememberAvailable?: boolean
 }
 
 interface Emits {
@@ -118,6 +125,7 @@ const password = ref('')
 const passwordConfirm = ref('')
 const errorMessage = ref('')
 const isLoading = ref(false)
+const remember = ref(false)
 
 const passwordStrength = computed(() => {
   const pwd = password.value
@@ -165,7 +173,7 @@ const handleSetup = async () => {
   errorMessage.value = ''
 
   try {
-    await invoke('set_master_password', { password: password.value })
+    await invoke('set_master_password', { password: password.value, remember: false })
     emit('success')
     resetForm()
   } catch (error) {
@@ -187,6 +195,7 @@ const handleUnlock = async () => {
   try {
     const verified = await invoke<boolean>('verify_master_password', {
       password: password.value,
+      remember: remember.value,
     })
 
     if (verified) {
@@ -211,6 +220,7 @@ const resetForm = () => {
   password.value = ''
   passwordConfirm.value = ''
   errorMessage.value = ''
+  remember.value = false
 }
 
 watch(() => passwordConfirm.value, () => {
@@ -391,6 +401,22 @@ watch(() => passwordConfirm.value, () => {
   margin-top: 4px;
   font-size: 12px;
   color: #f44747;
+}
+
+.remember-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--vscode-foreground, #e0e0e0);
+  cursor: pointer;
+}
+
+.remember-row input {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
 }
 
 .dialog-footer {

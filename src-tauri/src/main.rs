@@ -21,6 +21,7 @@ use tauri::{
 
 mod connections;
 mod encryption;
+mod keychain;
 mod serial;
 mod settings;
 mod ssh;
@@ -482,37 +483,213 @@ fn close_pty(state: State<'_, AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Credential-protection state the frontend queries on startup to decide
+/// whether to prompt for a master password.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialSecurityState {
+    /// A master password is configured (vs. the device-local-key default).
+    password_enabled: bool,
+    /// Credentials are accessible right now without prompting.
+    unlocked: bool,
+    /// The master password is cached in the OS keychain for auto-unlock.
+    remember_enabled: bool,
+    /// This platform supports keychain storage (macOS / Windows).
+    remember_available: bool,
+}
+
+#[command]
+fn get_credential_security_state(
+    app: AppHandle,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<CredentialSecurityState, String> {
+    let settings = settings::get_settings(app)?;
+    let password_enabled = settings.master_password_hash.is_some();
+    Ok(CredentialSecurityState {
+        password_enabled,
+        unlocked: !password_enabled || master_state.is_unlocked(),
+        remember_enabled: settings.remember_master_password,
+        remember_available: keychain::is_available(),
+    })
+}
+
+/// Try to unlock silently from the OS keychain (the "remember" feature).
+/// Returns whether credentials are now accessible. Local-key mode is always
+/// accessible, so it returns `true` with nothing to do.
+#[command]
+fn try_auto_unlock(
+    app: AppHandle,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<bool, String> {
+    if master_state.is_unlocked() {
+        return Ok(true);
+    }
+    let settings = settings::get_settings(app)?;
+    let Some(stored_hash) = settings.master_password_hash else {
+        return Ok(true); // 无密码模式，无需解锁
+    };
+    if !settings.remember_master_password || !keychain::is_available() {
+        return Ok(false);
+    }
+    let Some(password) = keychain::load_password()? else {
+        return Ok(false);
+    };
+    if encryption::verify_master_password(&password, &stored_hash)? {
+        master_state.set(password);
+        Ok(true)
+    } else {
+        // 钥匙串里的密码已失效（例如主密码被改），清掉避免反复失败。
+        let _ = keychain::clear();
+        Ok(false)
+    }
+}
+
+/// Enable a master password from the default no-password (local-key) mode.
+/// Existing credentials are re-encrypted under the new password — never wiped.
 #[command]
 fn set_master_password(
     app: AppHandle,
     password: String,
+    remember: bool,
     master_state: State<'_, encryption::MasterPasswordState>,
 ) -> Result<(), String> {
     use rand::Rng;
 
-    // 生成随机盐值
+    let mut settings = settings::get_settings(app.clone())?;
+    if settings.master_password_hash.is_some() {
+        return Err("A master password is already set; use change_master_password.".to_string());
+    }
+
+    // 迁移而非清空：用当前的本地密钥解出现有凭据，再用新主密码重加密。
+    let local_secret =
+        encryption::CredentialSecret::LocalKey(encryption::load_or_create_local_key(&app)?);
+    let store = encryption::load_encrypted_credentials(&app, &local_secret)
+        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+
     let mut rng = rand::thread_rng();
     let salt: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
-
-    // 生成主密码哈希
     let password_hash = encryption::hash_master_password(&password, &salt)
         .map_err(|e| format!("Failed to hash password: {}", e))?;
+    let pw_secret =
+        encryption::CredentialSecret::Password(zeroize::Zeroizing::new(password.clone()));
+    encryption::save_encrypted_credentials(&app, &store, &pw_secret)?;
 
-    // 保存到 settings.json
-    let mut settings = settings::get_settings(app.clone())?;
+    let remember = remember && keychain::is_available();
     settings.master_password_hash = Some(password_hash);
     settings.master_password_salt = Some(base64::engine::general_purpose::STANDARD.encode(&salt));
     settings.credentials_initialized = true;
-
+    settings.remember_master_password = remember;
     settings::save_settings(app.clone(), settings)?;
 
-    // 用新密码重建 credentials.enc，避免遗留旧密码加密的文件导致后续解密失败
-    let empty_store = encryption::CredentialStore { credentials: Vec::new() };
-    encryption::save_encrypted_credentials(&app, &empty_store, &password)
-        .map_err(|e| format!("Failed to initialize credential store: {}", e))?;
-
-    // 缓存到会话状态，避免后续每次操作都需要重新提示
+    if remember {
+        keychain::store_password(&password)?;
+    }
     master_state.set(password);
+    Ok(())
+}
+
+/// Change an existing master password (re-encrypts the credential store).
+#[command]
+fn change_master_password(
+    app: AppHandle,
+    current_password: String,
+    new_password: String,
+    remember: bool,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<(), String> {
+    use rand::Rng;
+
+    let mut settings = settings::get_settings(app.clone())?;
+    let Some(stored_hash) = settings.master_password_hash.clone() else {
+        return Err("No master password is set.".to_string());
+    };
+    if !encryption::verify_master_password(&current_password, &stored_hash)? {
+        return Err("Incorrect master password".to_string());
+    }
+
+    let old_secret =
+        encryption::CredentialSecret::Password(zeroize::Zeroizing::new(current_password));
+    let store = encryption::load_encrypted_credentials(&app, &old_secret)
+        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+
+    let mut rng = rand::thread_rng();
+    let salt: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+    let new_hash = encryption::hash_master_password(&new_password, &salt)?;
+    let new_secret =
+        encryption::CredentialSecret::Password(zeroize::Zeroizing::new(new_password.clone()));
+    encryption::save_encrypted_credentials(&app, &store, &new_secret)?;
+
+    let remember = remember && keychain::is_available();
+    settings.master_password_hash = Some(new_hash);
+    settings.master_password_salt = Some(base64::engine::general_purpose::STANDARD.encode(&salt));
+    settings.remember_master_password = remember;
+    settings::save_settings(app.clone(), settings)?;
+
+    if remember {
+        keychain::store_password(&new_password)?;
+    } else {
+        let _ = keychain::clear();
+    }
+    master_state.set(new_password);
+    Ok(())
+}
+
+/// Remove the master password, switching back to device-local-key mode.
+/// Existing credentials are re-encrypted under the local key — never wiped.
+#[command]
+fn disable_master_password(
+    app: AppHandle,
+    current_password: String,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(app.clone())?;
+    let Some(stored_hash) = settings.master_password_hash.clone() else {
+        return Ok(()); // 已是无密码模式
+    };
+    if !encryption::verify_master_password(&current_password, &stored_hash)? {
+        return Err("Incorrect master password".to_string());
+    }
+
+    let pw_secret =
+        encryption::CredentialSecret::Password(zeroize::Zeroizing::new(current_password));
+    let store = encryption::load_encrypted_credentials(&app, &pw_secret)
+        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    let local_secret =
+        encryption::CredentialSecret::LocalKey(encryption::load_or_create_local_key(&app)?);
+    encryption::save_encrypted_credentials(&app, &store, &local_secret)?;
+
+    settings.master_password_hash = None;
+    settings.master_password_salt = None;
+    settings.remember_master_password = false;
+    settings::save_settings(app.clone(), settings)?;
+    let _ = keychain::clear();
+    master_state.clear();
+    Ok(())
+}
+
+/// Toggle whether the master password is cached in the OS keychain.
+#[command]
+fn set_remember_master_password(
+    app: AppHandle,
+    enabled: bool,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(app.clone())?;
+    if settings.master_password_hash.is_none() {
+        return Err("No master password is set.".to_string());
+    }
+    if enabled {
+        if !keychain::is_available() {
+            return Err("Keychain is not available on this platform.".to_string());
+        }
+        let password = master_state.get()?;
+        keychain::store_password(&password)?;
+        settings.remember_master_password = true;
+    } else {
+        let _ = keychain::clear();
+        settings.remember_master_password = false;
+    }
+    settings::save_settings(app.clone(), settings)?;
     Ok(())
 }
 
@@ -520,16 +697,22 @@ fn set_master_password(
 fn verify_master_password(
     app: AppHandle,
     password: String,
+    remember: bool,
     master_state: State<'_, encryption::MasterPasswordState>,
 ) -> Result<bool, String> {
-    let settings = settings::get_settings(app)?;
+    let mut settings = settings::get_settings(app.clone())?;
 
-    let Some(stored_hash) = settings.master_password_hash else {
+    let Some(stored_hash) = settings.master_password_hash.clone() else {
         return Err("Master password not set".to_string());
     };
 
     let ok = encryption::verify_master_password(&password, &stored_hash)?;
     if ok {
+        if remember && keychain::is_available() {
+            let _ = keychain::store_password(&password);
+            settings.remember_master_password = true;
+            let _ = settings::save_settings(app.clone(), settings);
+        }
         master_state.set(password);
     }
     Ok(ok)
@@ -554,8 +737,14 @@ fn lock_master_password(
 }
 
 #[command]
-fn export_connections(app: AppHandle, password: String) -> Result<String, String> {
-    encryption::export_credentials_backup(&app, &password)
+fn export_connections(
+    app: AppHandle,
+    password: String,
+    master_state: State<'_, encryption::MasterPasswordState>,
+) -> Result<String, String> {
+    // 备份用用户提供的备份密码加密；读取本地库用当前解锁方式（主密码或本地密钥）。
+    let secret = encryption::resolve_secret(&app, &master_state)?;
+    encryption::export_credentials_backup(&app, &password, &secret)
 }
 
 #[command]
@@ -563,8 +752,10 @@ fn import_connections(
     app: AppHandle,
     password: String,
     encrypted_data: String,
+    master_state: State<'_, encryption::MasterPasswordState>,
 ) -> Result<(), String> {
-    encryption::import_credentials_backup(&app, &password, &encrypted_data)
+    let secret = encryption::resolve_secret(&app, &master_state)?;
+    encryption::import_credentials_backup(&app, &password, &encrypted_data, &secret)
 }
 
 #[command]
@@ -913,7 +1104,12 @@ fn main() {
             serial::close_serial_session,
             settings::get_settings,
             settings::save_settings,
+            get_credential_security_state,
+            try_auto_unlock,
             set_master_password,
+            change_master_password,
+            disable_master_password,
+            set_remember_master_password,
             verify_master_password,
             is_master_password_unlocked,
             lock_master_password,

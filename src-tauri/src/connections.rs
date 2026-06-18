@@ -183,13 +183,13 @@ pub fn get_connections(
 ) -> Result<Vec<SavedConnection>, String> {
     let mut connections = load_connections(&app)?;
 
-    // 仅在主密码已解锁时尝试解密凭据；否则返回空凭据的连接元数据
-    if master_state.is_unlocked() {
-        let master_password = master_state.get()?;
+    // 本地密钥模式恒可访问；密码模式需已解锁。否则返回空凭据的连接元数据。
+    if encryption::credentials_accessible(&app, &master_state) {
         // If the credential store is unreadable (e.g. corrupted or wrong key),
         // degrade gracefully: return connection metadata without secrets rather
         // than propagating an error that would hide the whole bookmark list.
-        let credential_store = encryption::load_encrypted_credentials(&app, &master_password)
+        let credential_store = encryption::resolve_secret(&app, &master_state)
+            .and_then(|secret| encryption::load_encrypted_credentials(&app, &secret))
             .unwrap_or_else(|e| {
                 eprintln!("[get_connections] credential store unreadable ({}), returning empty credentials", e);
                 encryption::CredentialStore { credentials: Vec::new() }
@@ -222,11 +222,11 @@ pub fn save_connection(
     connection: SavedConnection,
     master_state: State<'_, MasterPasswordState>,
 ) -> Result<String, String> {
-    let master_password = master_state.get()?;
+    let secret = encryption::resolve_secret(&app, &master_state)?;
 
     // 加载现有凭据存储；若解密失败（如主密码曾被重置导致密文不兼容），则从空存储开始，
     // 避免因遗留文件阻断所有新连接的保存。
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &master_password)
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
         .unwrap_or_else(|e| {
             eprintln!("[save_connection] credential store unreadable ({}), resetting", e);
             encryption::CredentialStore { credentials: Vec::new() }
@@ -236,7 +236,7 @@ pub fn save_connection(
     persist_connection_secrets(&connection, &mut credential_store)?;
 
     // 保存加密的凭据存储
-    encryption::save_encrypted_credentials(&app, &credential_store, &master_password)?;
+    encryption::save_encrypted_credentials(&app, &credential_store, &secret)?;
 
     // 加载现有连接并保存元数据（凭据已从连接中移除）
     let mut connections = load_connections(&app)?;
@@ -260,15 +260,15 @@ pub fn delete_connection(
     id: String,
     master_state: State<'_, MasterPasswordState>,
 ) -> Result<(), String> {
-    let master_password = master_state.get()?;
+    let secret = encryption::resolve_secret(&app, &master_state)?;
 
     // 从凭据存储中移除；若旧文件解密失败则从空存储开始（相当于凭据已丢失，继续删除连接元数据）
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &master_password)
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
         .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
     credential_store
         .credentials
         .retain(|c| c.connection_id != id);
-    encryption::save_encrypted_credentials(&app, &credential_store, &master_password)?;
+    encryption::save_encrypted_credentials(&app, &credential_store, &secret)?;
 
     // 从连接列表中移除
     let mut connections = load_connections(&app)?;
