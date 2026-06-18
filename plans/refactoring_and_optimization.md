@@ -176,9 +176,9 @@
 | 2 | settings 原子写 | ✅ 已完成（2026-06-17，PR #23） |
 | 3 | zeroize 擦除 | ✅ 已完成（2026-06-17） |
 | 4 | KDF 收口 | ✅ 已完成（2026-06-17，含 v1→v2 透明迁移） |
-| 5 | 拆分 App.vue | ⬜ 待处理 |
+| 5 | 拆分 App.vue | ✅ 已完成（2026-06-18） |
 | 6 | 统一 stream_pump | 🟡 部分完成：UTF-8 解码已抽到 `util::Utf8StreamDecoder` 共享；session 注册表与读取循环的统一仍待做 |
-| 7 | per-session 事件/Channel | ⬜ 待处理 |
+| 7 | per-session 事件/Channel | ✅ 已完成（2026-06-18，按 id 事件名方案） |
 | 8 | logBuffer 优化 | ✅ 已完成（2026-06-17，PR #24） |
 | 9 | get_connections 缓存 | ⬜ 待处理 |
 | 10 | ssh-debug 日志门控 | ⬜ 待处理 |
@@ -215,6 +215,28 @@
   - 主密码**验证哈希**（settings.json 的 PHC 串）不受影响，无需迁移。
   - 注意：`credentials.enc` 仍用 `fs::write`（非原子），未在本次范围内——可后续做二进制版 `write_atomic`。
 - 验证：`cargo check` 通过；`cargo test` 全部 54 项通过（新增 `test_derive_key_v1_and_v2_differ`、`test_derive_key_dispatch_matches_explicit_versions`、`test_v1_blob_decrypts_only_via_version_dispatch`）。
+
+### §7 实现说明（2026-06-18，按 id 事件名方案）
+
+采用「per-session 事件名」而非 Tauri Channel——改动面小、风险低，且直接消除 O(N) 热路径，无需改 `invoke` 签名或跨线程持有 Channel 句柄。
+
+- 新增 `src-tauri/src/util.rs::session_event(base, id) -> "<base>:<id>"`（Tauri 2.10.3 的事件名校验允许 `:`，tab id 为 `tab-N` 全合法；新增 1 个单测）。
+- 后端 25 处 per-session emit 全部改为 `app.emit(&util::session_event("pty-output", &id), payload)`，覆盖 `main.rs`(本地 PTY)/`serial.rs`/`telnet.rs`/`ssh/mod.rs`/`ssh/known_hosts.rs` 的 `pty-output`、`pty-exit`、`ssh-connected`、`serial-connected`、`ssh-mfa-prompt`、`ssh-reconnect-session-prompt`、`ssh-host-key-mismatch-prompt`。payload 仍保留 `id` 字段（信息冗余但零改动，避免动 payload 结构体）。
+- 前端 `TerminalComponent.vue`：监听名改为 `` `<base>:${props.sessionId}` ``，删除原 `event.payload.id !== ptyId.value` 过滤（事件名已保证归属），保留 `!terminal` 守卫。每条高吞吐输出只唤醒归属组件，不再 O(N) 全广播 + 字符串比较。
+- `ssh-transfer-progress`（SFTP 面板，`RemoteFileManager.vue`）不在范围内——非每终端扇出，保持全局。
+- 测试：`TerminalComponent.test.ts` 改为向 `pty-exit:<id>` / `ssh-connected:<id>` 派发。
+- 验证：`cargo check` + `cargo test`（55 项，+1 `session_event`）通过；`npm run build`（vue-tsc + vite）+ `npm test`（48 项）通过。
+
+### §5 实现说明（2026-06-18，拆分 App.vue）
+
+`App.vue` 2215 → 1829 行（脚本 ~1538 → ~1152 行；模板未动）。抽出四个 composable，`App.vue` 退回「协调者」角色——仅声明状态、按依赖顺序装配 composable、保留编排型 handler（如 `handleConnectResult`、`handleCloseTab`、context-menu 动作）。
+
+- `src/composables/useTitlebarControls.ts`：独占 `appWindow` 句柄 + `isFullscreen`，含最小化/最大化/关闭/退出/全屏/拖拽/`stopDragPropagation`/`syncFullscreenState`。依赖注入 `closeOpenMenus`。
+- `src/composables/useTerminalFontSize.ts`：字号增/减/重置（含 clamp + 静默持久化）。注入 `settingsRef`、`persistSettingsSilently`、`closeOpenMenus`。
+- `src/composables/useAppMenus.ts`：菜单/子菜单/右键菜单/布局下拉的开关状态 + `closeOpenMenus`/`toggleMenu`/`toggleFileSubmenu`/`toggleLayoutMenu`/`handleOpenNewTabMenu` + 三个 outside-click/Escape watch。DOM 模板 ref（`menuBarRef`/`layoutMenuRef`/`tabContextMenuRef`）由组件持有并注入（`ref="…"` 绑定属组件；避免 vue-tsc `noUnusedLocals` 误报）。导出 `AppMenuId`/`FileSubmenuId`/`TabContextMenuState` 类型。
+- `src/composables/useTabManager.ts`：NATO 后缀去重标题生成、内联重命名状态机、单调 tab id 计数器（`mintTabId`/`syncTabIdCounter`）。注入 `tabs`、`activeTabId`（来自 usePaneLayout）、`closeTabContextMenu`。
+- 装配顺序（避免 TDZ + 满足依赖）：plain refs → `useAppMenus` → `usePaneLayout` → `useWorkspacePersistence` → `useTitlebarControls` → `useTerminalFontSize` → `useTabManager` → `useAppEventListeners`（后者构造选项对象时即读取 `syncFullscreenState`/字号 handler，故必须在其之前初始化）。
+- 验证：`npm run build`（vue-tsc + vite）通过；`npm test`（48 项）通过。
 
 ### §8 实现说明（2026-06-17，随 PR #24 一起提交）
 

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import TerminalComponent from "./TerminalComponent.vue";
@@ -14,12 +13,14 @@ import MasterPasswordDialog from "./MasterPasswordDialog.vue";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
 import { useAppEventListeners } from "./composables/useAppEventListeners";
 import { useWorkspacePersistence } from "./composables/useWorkspacePersistence";
+import { useAppMenus } from "./composables/useAppMenus";
+import { useTitlebarControls } from "./composables/useTitlebarControls";
+import { useTerminalFontSize } from "./composables/useTerminalFontSize";
+import { useTabManager } from "./composables/useTabManager";
 import {
   DEFAULT_SETTINGS,
   deriveUiTheme,
   MAX_INPUT_HISTORY,
-  MAX_TERMINAL_FONT_SIZE,
-  MIN_TERMINAL_FONT_SIZE,
   normalizeAppSettings,
   type AppSettings,
   type QuickButton,
@@ -47,14 +48,6 @@ import "./App.css";
 
 type Tab = PaneLayoutTab;
 
-interface TabContextMenuState {
-  x: number;
-  y: number;
-  tabId: string;
-}
-
-type AppMenuId = "file" | "view" | "help";
-type FileSubmenuId = "new-session" | "preferences";
 type TerminalSearchToggleKey = "caseSensitive" | "wholeWord" | "regex";
 
 const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
@@ -64,105 +57,8 @@ const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
   limitExceeded: false,
 };
 
-let nextTabId = 1;
-
-// NATO 字母表，用于生成唯一的标签页后缀
-const NATO_ALPHABET = [
-  "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
-  "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
-  "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey",
-  "xray", "yankee", "zulu",
-];
-const TAB_TITLE_SUFFIX_PATTERN = new RegExp(`^(.*) – ((?:${NATO_ALPHABET.join("|")})|\\d+)$`, "i");
-
-function stripGeneratedTabSuffix(title: string) {
-  const match = title.match(TAB_TITLE_SUFFIX_PATTERN);
-  return match ? match[1] : title;
-}
-
-/**
- * 生成唯一的标签页标题
- * 格式：优先使用书签名，其次回退到协议默认标题。
- */
-function generateUniqueTabTitle(bookmarkName: string | undefined, baseTitle: string): string {
-  const displayName = bookmarkName?.trim() || baseTitle;
-
-  // 找出所有同名标签页（不带后缀的）
-  const sameBaseTabs = tabs.value.filter(t => {
-    return stripGeneratedTabSuffix(t.title) === displayName;
-  });
-
-  // 如果没有同名，直接返回
-  if (sameBaseTabs.length === 0) {
-    return displayName;
-  }
-
-  // 找出已使用的后缀索引
-  const usedIndexes = new Set<number>();
-  const usedNumericSuffixes = new Set<number>();
-  for (const t of sameBaseTabs) {
-    const match = t.title.match(TAB_TITLE_SUFFIX_PATTERN);
-    if (match) {
-      const suffix = match[2].toLowerCase();
-      const idx = NATO_ALPHABET.indexOf(suffix);
-      if (idx >= 0) {
-        usedIndexes.add(idx);
-        continue;
-      }
-
-      const numericSuffix = Number.parseInt(suffix, 10);
-      if (Number.isFinite(numericSuffix)) {
-        usedNumericSuffixes.add(numericSuffix);
-      }
-    }
-  }
-
-  // 找到下一个可用的字母
-  for (let i = 0; i < NATO_ALPHABET.length; i++) {
-    if (!usedIndexes.has(i)) {
-      return `${displayName} – ${NATO_ALPHABET[i]}`;
-    }
-  }
-
-  // 如果26个字母用完了，回退到数字后缀
-  let nextNumericSuffix = 1;
-  while (usedNumericSuffixes.has(nextNumericSuffix)) {
-    nextNumericSuffix += 1;
-  }
-
-  return `${displayName} – ${nextNumericSuffix}`;
-}
-
-function buildBaseTabTitle(session: SessionConfig): string {
-  if (session.protocol === "serial") {
-    return `${session.serialConfig.portName} @ ${session.serialConfig.baudRate}`;
-  }
-  if (session.protocol === "telnet") {
-    return `telnet://${session.telnetConfig.host}:${session.telnetConfig.port}`;
-  }
-  if (session.protocol === "ssh") {
-    return `${session.sshConfig.user}@${session.sshConfig.host}`;
-  }
-  return "Local Shell";
-}
-
-function createSessionTab(tabId: string, session: SessionConfig, bookmarkName?: string, logPath?: string): Tab {
-  return {
-    id: tabId,
-    title: generateUniqueTabTitle(bookmarkName, buildBaseTabTitle(session)),
-    session,
-    logPath,
-  };
-}
-
-function formatSerialFrame(serialConfig: SerialConfig) {
-  const parity = serialConfig.parity === "none" ? "N" : serialConfig.parity === "even" ? "E" : "O";
-  return `${serialConfig.dataBits}${parity}${serialConfig.stopBits}`;
-}
-
 const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
-const appWindow = getCurrentWindow();
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
 const showConnectDialog = ref(false);
 const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
@@ -174,28 +70,21 @@ const showAbout = ref(false);
 const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
 const sidebarExpandGroup = ref<string | undefined>(undefined);
-const showNewTabMenu = ref(false);
 const showRemoteFileManager = ref(false);
-const showLayoutMenu = ref(false);
-const layoutMenuRef = ref<HTMLDivElement | null>(null);
-const layoutMenuPos = ref({ top: 0, right: 0 });
 const isWindowFocused = ref(true);
 // Immutable Record updates ({ ...obj, [k]: v }) pair best with shallowRef:
 // the whole map is swapped, so shallow reactivity is enough and skips per-key proxies.
 const serialConnectionStates = shallowRef<Record<string, SerialConnectionState>>({});
-const openMenuId = ref<AppMenuId | null>(null);
-const openFileSubmenuId = ref<FileSubmenuId | null>(null);
-const renamingTabId = ref<string | null>(null);
-const renamingTabTitle = ref("");
-const tabContextMenu = ref<TabContextMenuState | null>(null);
 const suppressTabClick = ref(false);
 const settingsRef = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const uiTheme = computed(() => deriveUiTheme(settings.value.theme, settings.value.uiThemeMode));
-const menuBarRef = ref<HTMLDivElement | null>(null);
-const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const terminalContainerRef = ref<HTMLDivElement | null>(null);
 const terminalSearchInputRef = ref<HTMLInputElement | null>(null);
-const isFullscreen = ref(false);
+// DOM refs the component binds via `ref="…"`; passed into useAppMenus so its
+// outside-click watchers can hit-test against them.
+const menuBarRef = ref<HTMLDivElement | null>(null);
+const layoutMenuRef = ref<HTMLDivElement | null>(null);
+const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const terminalSearchVisible = ref(false);
 const terminalSearchQuery = ref("");
 const showMasterPasswordDialog = ref(false);
@@ -209,6 +98,21 @@ const terminalSearchOptions = ref<Required<Pick<TerminalSearchOptions, TerminalS
 // Same immutable-swap pattern as serialConnectionStates.
 const terminalSearchResults = shallowRef<Record<string, TerminalSearchResults>>({});
 let searchDebounceTimer: number | null = null;
+
+// Menu / dropdown / context-menu open-close state and outside-click handling.
+const {
+  openMenuId,
+  openFileSubmenuId,
+  tabContextMenu,
+  showLayoutMenu,
+  showNewTabMenu,
+  layoutMenuPos,
+  closeOpenMenus,
+  toggleLayoutMenu,
+  toggleMenu,
+  toggleFileSubmenu,
+  handleOpenNewTabMenu,
+} = useAppMenus({ menuBarRef, layoutMenuRef, tabContextMenuRef });
 const {
   paneLayout,
   focusedPaneId,
@@ -271,6 +175,46 @@ const {
   createPersistedWorkspaceState,
 });
 
+// Custom-titlebar window controls + fullscreen state.
+const {
+  isFullscreen,
+  syncFullscreenState,
+  handleTitlebarMouseDown,
+  handleMinimize,
+  handleToggleMaximize,
+  handleClose,
+  handleExitApp,
+  handleToggleFullScreen,
+  stopDragPropagation,
+} = useTitlebarControls({ closeOpenMenus });
+
+// Terminal font-size zoom (View menu + Ctrl/Cmd +/-/0).
+const {
+  handleIncreaseTerminalFontSize,
+  handleDecreaseTerminalFontSize,
+  handleResetTerminalFontSize,
+} = useTerminalFontSize({ settingsRef, persistSettingsSilently, closeOpenMenus });
+
+// Tab title generation/de-dup, inline rename flow, and the tab-id counter.
+const {
+  renamingTabId,
+  renamingTabTitle,
+  createSessionTab,
+  formatSerialFrame,
+  mintTabId,
+  syncTabIdCounter,
+  startTabRename,
+  cancelTabRename,
+  commitTabRename,
+  handleTabRenameKeyDown,
+} = useTabManager({
+  tabs,
+  activeTabId,
+  closeTabContextMenu: () => {
+    tabContextMenu.value = null;
+  },
+});
+
 const { registerAppEventListeners } = useAppEventListeners({
   setWindowFocused: (focused) => {
     isWindowFocused.value = focused;
@@ -299,47 +243,12 @@ function createDefaultLocalShellTab(tabId = "tab-0"): Tab {
   };
 }
 
-function syncTabIdCounter(sourceTabs: Array<{ id: string }>) {
-  let maxTabIndex = -1;
-
-  for (const item of sourceTabs) {
-    const numericValue = item.id.startsWith("tab-") ? Number.parseInt(item.id.slice(4), 10) : Number.NaN;
-    maxTabIndex = Math.max(maxTabIndex, Number.isFinite(numericValue) ? numericValue : -1);
-  }
-
-  nextTabId = Math.max(nextTabId, maxTabIndex + 1);
-}
-
 function updateTabSession(tabId: string, session: SessionConfig) {
   tabs.value = tabs.value.map((tab) => (
     tab.id === tabId
       ? { ...tab, session }
       : tab
   ));
-}
-
-function closeOpenMenus() {
-  openMenuId.value = null;
-  openFileSubmenuId.value = null;
-  tabContextMenu.value = null;
-  showLayoutMenu.value = false;
-}
-
-function toggleLayoutMenu() {
-  if (showLayoutMenu.value) {
-    showLayoutMenu.value = false;
-    return;
-  }
-  // 计算按钮的 viewport 坐标，用于 fixed 定位
-  const container = layoutMenuRef.value;
-  if (container) {
-    const rect = container.getBoundingClientRect();
-    layoutMenuPos.value = {
-      top: rect.bottom + 4,
-      right: window.innerWidth - rect.right,
-    };
-  }
-  showLayoutMenu.value = true;
 }
 
 // settings is replaced wholesale; shallow watch suffices (no deep traversal).
@@ -357,110 +266,6 @@ watch(uiTheme, (value) => {
   document.body.style.backgroundColor = value.variables["--app-bg"];
   document.body.style.color = value.variables["--app-text"];
 }, { immediate: true });
-
-watch(openMenuId, (menuId, _previous, onCleanup) => {
-  if (menuId !== "file") {
-    openFileSubmenuId.value = null;
-  }
-
-  if (!menuId) {
-    return;
-  }
-
-  const handlePointerDown = (event: PointerEvent) => {
-    const target = event.target;
-    if (!(target instanceof Node)) {
-      return;
-    }
-    if (menuBarRef.value?.contains(target)) {
-      return;
-    }
-    openMenuId.value = null;
-  };
-
-  const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      openMenuId.value = null;
-    }
-  };
-
-  document.addEventListener("pointerdown", handlePointerDown);
-  window.addEventListener("keydown", handleKeyDown);
-
-  onCleanup(() => {
-    document.removeEventListener("pointerdown", handlePointerDown);
-    window.removeEventListener("keydown", handleKeyDown);
-  });
-});
-
-watch(tabContextMenu, (value, _previous, onCleanup) => {
-  if (!value) {
-    return;
-  }
-
-  const handlePointerDown = (event: PointerEvent) => {
-    const target = event.target;
-    if (!(target instanceof Node)) {
-      return;
-    }
-    if (tabContextMenuRef.value?.contains(target)) {
-      return;
-    }
-    tabContextMenu.value = null;
-  };
-
-  const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      tabContextMenu.value = null;
-    }
-  };
-
-  document.addEventListener("pointerdown", handlePointerDown);
-  window.addEventListener("keydown", handleKeyDown);
-
-  onCleanup(() => {
-    document.removeEventListener("pointerdown", handlePointerDown);
-    window.removeEventListener("keydown", handleKeyDown);
-  });
-});
-
-watch(showLayoutMenu, (value, _previous, onCleanup) => {
-  if (!value) {
-    return;
-  }
-
-  const handlePointerDown = (event: PointerEvent) => {
-    const target = event.target;
-    if (!(target instanceof Node)) {
-      return;
-    }
-    if (layoutMenuRef.value?.contains(target)) {
-      return;
-    }
-    showLayoutMenu.value = false;
-  };
-
-  const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      showLayoutMenu.value = false;
-    }
-  };
-
-  document.addEventListener("pointerdown", handlePointerDown);
-  window.addEventListener("keydown", handleKeyDown);
-
-  onCleanup(() => {
-    document.removeEventListener("pointerdown", handlePointerDown);
-    window.removeEventListener("keydown", handleKeyDown);
-  });
-});
-
-async function syncFullscreenState() {
-  isFullscreen.value = await appWindow.isFullscreen().catch((error) => {
-    console.error("isFullscreen failed", error);
-    return false;
-  });
-}
 
 function handleGlobalKeyDown(event: KeyboardEvent) {
   const hasPrimaryModifier = event.ctrlKey || event.metaKey;
@@ -1102,80 +907,6 @@ function handleTabClick(tabId: string) {
   selectTab(tabId);
 }
 
-function startTabRename(tabId: string) {
-  const tab = tabs.value.find((item) => item.id === tabId);
-  if (!tab) {
-    return;
-  }
-
-  tabContextMenu.value = null;
-  renamingTabId.value = tabId;
-  renamingTabTitle.value = tab.title;
-  activeTabId.value = tabId;
-
-  void nextTick(() => {
-    const input = document.querySelector<HTMLInputElement>(`.tab-item[data-tab-id="${tabId}"] .tab-title-input`);
-    input?.focus();
-    input?.select();
-  });
-}
-
-function cancelTabRename() {
-  renamingTabId.value = null;
-  renamingTabTitle.value = "";
-}
-
-function sanitizeSessionName(title: string): string {
-  return (
-    title
-      .trim()
-      .replace(/[^a-zA-Z0-9_-]/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-+|-+$/g, "")
-    || "session"
-  );
-}
-
-function commitTabRename() {
-  if (!renamingTabId.value) {
-    return;
-  }
-
-  const tabId = renamingTabId.value;
-  const nextTitle = renamingTabTitle.value.trim();
-  if (nextTitle) {
-    const tab = tabs.value.find((t) => t.id === tabId);
-    tabs.value = tabs.value.map((t) => (
-      t.id === tabId ? { ...t, title: nextTitle } : t
-    ));
-
-    if (tab?.session.protocol === "ssh") {
-      const reconnectType = tab.session.sshConfig.reconnectType;
-      if (reconnectType === "screen" || reconnectType === "tmux") {
-        const newSessionName = `at-${sanitizeSessionName(nextTitle)}`;
-        void invoke("rename_ssh_session", { id: tabId, newName: newSessionName }).catch((error) => {
-          console.warn("Failed to rename remote session:", error);
-        });
-      }
-    }
-  }
-
-  cancelTabRename();
-}
-
-function handleTabRenameKeyDown(event: KeyboardEvent) {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    commitTabRename();
-    return;
-  }
-
-  if (event.key === "Escape") {
-    event.preventDefault();
-    cancelTabRename();
-  }
-}
-
 function handleTabContextMenu(event: MouseEvent, tabId: string) {
   const target = event.target;
   if (target instanceof Element && target.closest(".tab-close-btn")) {
@@ -1241,53 +972,6 @@ function handleClosePaneFromContextMenu() {
   handleClosePane(pane.paneId);
 }
 
-function handleTitlebarMouseDown(event: MouseEvent) {
-  if (event.button !== 0) {
-    return;
-  }
-  if ((event.target as HTMLElement).closest("[data-no-drag='true']")) {
-    return;
-  }
-  void appWindow.startDragging().catch((error) => {
-    console.error("startDragging failed", error);
-  });
-}
-
-async function handleMinimize() {
-  await appWindow.minimize().catch((error) => {
-    console.error("minimize failed", error);
-  });
-}
-
-async function handleToggleMaximize() {
-  const isMaximized = await appWindow.isMaximized().catch((error) => {
-    console.error("isMaximized failed", error);
-    return false;
-  });
-  if (isMaximized) {
-    await appWindow.unmaximize().catch((error) => {
-      console.error("unmaximize failed", error);
-    });
-    return;
-  }
-  await appWindow.maximize().catch((error) => {
-    console.error("maximize failed", error);
-  });
-}
-
-async function handleClose() {
-  await appWindow.close().catch((error) => {
-    console.error("close failed", error);
-  });
-}
-
-async function handleExitApp() {
-  closeOpenMenus();
-  await appWindow.close().catch((error) => {
-    console.error("exit failed", error);
-  });
-}
-
 function handleOpenAbout() {
   closeOpenMenus();
   showAbout.value = true;
@@ -1298,64 +982,11 @@ function handleOpenSettings() {
   showSettings.value = true;
 }
 
-function adjustTerminalFontSize(delta: number) {
-  closeOpenMenus();
-  const nextFontSize = Math.min(
-    MAX_TERMINAL_FONT_SIZE,
-    Math.max(MIN_TERMINAL_FONT_SIZE, settingsRef.value.fontSize + delta),
-  );
-
-  if (nextFontSize === settingsRef.value.fontSize) {
-    return;
-  }
-
-  persistSettingsSilently({
-    ...settingsRef.value,
-    fontSize: nextFontSize,
-  });
-}
-
-function handleIncreaseTerminalFontSize() {
-  adjustTerminalFontSize(1);
-}
-
-function handleDecreaseTerminalFontSize() {
-  adjustTerminalFontSize(-1);
-}
-
-function handleResetTerminalFontSize() {
-  closeOpenMenus();
-  if (settingsRef.value.fontSize === DEFAULT_SETTINGS.fontSize) {
-    return;
-  }
-  persistSettingsSilently({
-    ...settingsRef.value,
-    fontSize: DEFAULT_SETTINGS.fontSize,
-  });
-}
-
-async function handleToggleFullScreen() {
-  closeOpenMenus();
-  const nextFullscreen = !(await appWindow.isFullscreen().catch((error) => {
-    console.error("isFullscreen failed", error);
-    return false;
-  }));
-  await appWindow.setFullscreen(nextFullscreen).catch((error) => {
-    console.error("setFullscreen failed", error);
-  });
-  isFullscreen.value = nextFullscreen;
-}
-
 function toggleRemoteFileManager() {
   if (!activeSshConfig.value) {
     return;
   }
   showRemoteFileManager.value = !showRemoteFileManager.value;
-}
-
-function handleOpenNewTabMenu() {
-  closeOpenMenus();
-  showNewTabMenu.value = true;
 }
 
 function handleNewLocalSessionFromMenu() {
@@ -1396,24 +1027,8 @@ function handleCloseActiveTab() {
   handleCloseTab(activeTab.value.id);
 }
 
-function toggleMenu(menuId: AppMenuId) {
-  const nextMenuId = openMenuId.value === menuId ? null : menuId;
-  openMenuId.value = nextMenuId;
-  if (nextMenuId !== "file") {
-    openFileSubmenuId.value = null;
-  }
-}
-
-function toggleFileSubmenu(submenuId: FileSubmenuId) {
-  openFileSubmenuId.value = openFileSubmenuId.value === submenuId ? null : submenuId;
-}
-
-function stopDragPropagation(event: MouseEvent) {
-  event.stopPropagation();
-}
-
 function handleNewLocalSession() {
-  const newId = `tab-${nextTabId++}`;
+  const newId = mintTabId();
   const cwd = window.getStartupDir?.() ?? undefined;
   tabs.value = [...tabs.value, { id: newId, title: "Local Shell", session: { protocol: "local", cwd } }];
   assignTabToFocusedPane(newId);
@@ -1451,7 +1066,7 @@ function handleCloseTab(id: string) {
 }
 
 async function handleConnectResult(result: ConnectResult) {
-  const newId = `tab-${nextTabId++}`;
+  const newId = mintTabId();
   const savedConnectionId = result.saveAs ? crypto.randomUUID() : undefined;
   const session = buildSessionFromConnectResult(result, savedConnectionId);
   const tab = session
@@ -1521,7 +1136,7 @@ async function handleConnectResult(result: ConnectResult) {
 }
 
 function handleBookmarkConnect(connection: SavedConnection) {
-  const newId = `tab-${nextTabId++}`;
+  const newId = mintTabId();
   const session = buildSessionFromSavedConnection(connection);
   const tab = createSessionTab(newId, session, connection.name, connection.logPath);
 
