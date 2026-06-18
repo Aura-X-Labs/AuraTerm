@@ -1,0 +1,329 @@
+/* ── Password retry overlay (centered inside terminal) ─────────── */
+.password-retry-overlay {
+  position: absolute;
+  inset: 0;
+  background: var(--app-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(2px);
+}
+
+.password-retry-dialog {
+  background: var(--app-dialog-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  padding: 28px 32px;
+  width: 340px;
+  box-shadow: 0 8px 32px var(--app-shadow-strong);
+  color: var(--app-text);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.password-retry-icon {
+  font-size: 32px;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.password-retry-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.password-retry-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--app-text-muted);
+  line-height: 1.5;
+}
+
+.password-retry-desc strong {
+  color: var(--app-text-secondary);
+}
+
+.password-retry-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.password-retry-input {
+  width: 100%;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  color: var(--app-text);
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.password-retry-input:focus {
+  border-color: var(--app-border-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-soft-strong);
+}
+
+.reconnect-option-prefix {
+  opacity: 0.45;
+  font-weight: normal;
+}
+
+.reconnect-option-name {
+  font-weight: 500;
+}
+
+.password-retry-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.password-retry-btn {
+  padding: 7px 18px;
+  border-radius: 5px;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.password-retry-btn.cancel {
+  background: var(--app-surface-3);
+  color: var(--app-text-secondary);
+}
+
+.password-retry-btn.cancel:hover {
+  background: var(--app-surface-4);
+  color: var(--app-text);
+}
+
+.password-retry-btn.retry {
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
+}
+
+.password-retry-btn.retry:hover {
+  background: var(--app-accent-hover);
+}
+
+/* ─── Toast notification ──────────────────────────────────────────────────── */
+.toast-notification {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--app-panel-bg-strong);
+  color: var(--app-text);
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  max-width: 480px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  box-shadow: 0 4px 16px var(--app-shadow);
+  z-index: 9999;
+  animation: toastFadeIn 0.2s ease-out;
+  pointer-events: none;
+}
+
+@keyframes toastFadeIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ─── New-tab choice dialog ───────────────────────────────────────────────── */
+.newtab-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--app-overlay-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2200;
+  backdrop-filter: blur(3px);
+}
+
+.newtab-dialog {
+  background: var(--bg-dialog, #1e1e1e);
+  color: var(--fg-dialog, #e0e0e0);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px var(--app-shadow);
+  padding: 24px 20px 20px;
+  width: 320px;
+  animation: slieInUp 0.2s ease-out;
+}
+
+.newtab-dialog-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  text-align: center;
+  color: var(--fg-dialog, #e0e0e0);
+  opacity: 0.75;
+  letter-spacing: 0.3px;
+}
+
+.newtab-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.newtab-option-btn {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-secondary, #2a2a2a);
+  border: 1px solid var(--border-color, #3a3a3a);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  color: inherit;
+}
+
+.newtab-option-btn:hover {
+  background: var(--bg-hover, #333);
+  border-color: var(--accent, #0078d4);
+}
+
+.newtab-option-btn:active {
+  transform: scale(0.98);
+}
+
+.newtab-option-icon {
+  grid-row: 1 / 3;
+  font-size: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.newtab-option-label {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.newtab-option-desc {
+  font-size: 12px;
+  opacity: 0.55;
+  line-height: 1.3;
+}
+
+/* ===== Encrypted Credential Backup (Settings → Security) ===== */
+.settings-backup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.settings-backup-card {
+  background: var(--ui-surface-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--ui-border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-backup-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--ui-text, #d5dbe5);
+}
+
+.settings-backup-card-desc {
+  font-size: 12px;
+  color: var(--ui-text-muted, rgba(213, 219, 229, 0.6));
+}
+
+.settings-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-form-row label {
+  font-size: 12px;
+  color: var(--ui-text-muted, rgba(213, 219, 229, 0.65));
+}
+
+.settings-form-row input[type="password"],
+.settings-form-row input[type="text"],
+.settings-form-row input[type="file"] {
+  background: var(--ui-input-bg, rgba(0, 0, 0, 0.3));
+  border: 1px solid var(--ui-border, rgba(255, 255, 255, 0.1));
+  border-radius: 4px;
+  padding: 6px 8px;
+  color: var(--ui-text, #d5dbe5);
+  font-size: 13px;
+}
+
+.settings-form-row input:focus {
+  outline: none;
+  border-color: var(--ui-accent, #6d98cb);
+}
+
+.settings-form-row small {
+  font-size: 11px;
+  color: var(--ui-text-muted, rgba(213, 219, 229, 0.5));
+}
+
+.settings-remember-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ui-text, #d5dbe5);
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.settings-remember-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+
+.settings-security-success {
+  color: #7daa78;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.settings-btn-primary {
+  background: var(--ui-accent, #6d98cb);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.settings-btn-primary:hover:not(:disabled) {
+  background: var(--ui-accent-hover, #86b0e1);
+}
+
+.settings-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

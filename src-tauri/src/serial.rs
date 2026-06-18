@@ -1,4 +1,3 @@
-use crate::{PtyExitEvent, PtyOutputEvent};
 use serde::Serialize;
 use serialport::{available_ports, DataBits, FlowControl, Parity, SerialPort, StopBits, SerialPortType};
 use std::collections::HashMap;
@@ -157,28 +156,16 @@ pub async fn start_serial_session(
         while !stop_flag.load(Ordering::Relaxed) {
             match reader.read(&mut buffer) {
                 Ok(size) if size > 0 => {
-                    let output = decoder.push(&buffer[..size]);
-                    if output.is_empty() {
-                        continue;
-                    }
-                    let _ = app_handle.emit(
-                        &crate::util::session_event("pty-output", &session_id),
-                        PtyOutputEvent {
-                            id: session_id.clone(),
-                            data: output,
-                        },
-                    );
+                    crate::util::emit_pty_output(&app_handle, &session_id, &mut decoder, &buffer[..size]);
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(error) => {
                     if !stop_flag.load(Ordering::Relaxed) {
-                        let _ = app_handle.emit(
-                            &crate::util::session_event("pty-exit", &session_id),
-                            PtyExitEvent {
-                                id: session_id.clone(),
-                                message: format!("Serial read error: {}", error),
-                            },
+                        crate::util::emit_pty_exit(
+                            &app_handle,
+                            &session_id,
+                            format!("Serial read error: {}", error),
                         );
                     }
                     break;

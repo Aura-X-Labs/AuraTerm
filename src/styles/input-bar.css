@@ -1,0 +1,444 @@
+/* ── Terminal Input Bar ──────────────────────────────────────────────────── */
+.terminal-input-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-panel-bg);
+}
+
+/* Resize handle */
+.terminal-input-resize-handle {
+  height: 4px;
+  margin-top: -2px;
+  cursor: ns-resize;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  user-select: none;
+  transition: background 0.2s, height 0.2s;
+  z-index: 10;
+}
+
+.terminal-input-resize-handle:hover,
+.terminal-input-resize-handle:active {
+  background: var(--app-accent-soft-strong);
+  height: 6px;
+}
+
+.terminal-input-resize-grip {
+  width: 40px;
+  height: 2px;
+  border-radius: 1px;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.2s;
+}
+
+.terminal-input-resize-handle:hover .terminal-input-resize-grip,
+.terminal-input-resize-handle:active .terminal-input-resize-grip {
+  background: var(--app-accent);
+}
+
+/* Collapsed state: kept invisible, only shows on hover */
+.terminal-input-resize-handle.collapsed {
+  height: 4px;
+  margin-top: 0;
+  background: transparent;
+  border-top: none;
+  gap: 8px;
+}
+
+.terminal-input-resize-handle.collapsed:hover {
+  background: var(--app-accent-soft-strong);
+  height: 8px;
+}
+
+.terminal-input-collapsed-hint {
+  font-size: 10px;
+  color: var(--app-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  pointer-events: none;
+  user-select: none;
+  transition: color 0.2s;
+}
+
+.terminal-input-resize-handle.collapsed:hover .terminal-input-collapsed-hint {
+  color: var(--app-accent);
+}
+
+/* Quick buttons row */
+.quick-buttons-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  padding: 5px 8px 4px;
+  border-bottom: 1px solid var(--app-border);
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scrollbar-thumb) transparent;
+  align-items: center;
+  min-height: 32px;
+}
+
+.quick-buttons-bar::-webkit-scrollbar {
+  height: 4px;
+}
+.quick-buttons-bar::-webkit-scrollbar-thumb {
+  background: var(--app-scrollbar-thumb);
+  border-radius: 2px;
+}
+
+.quick-buttons-hint {
+  font-size: 11px;
+  color: var(--app-text-dim);
+  margin-right: 8px;
+  font-style: italic;
+}
+
+.quick-btn {
+  flex-shrink: 0;
+  padding: 2px 10px;
+  height: 22px;
+  background: var(--app-surface-2);
+  border: 1px solid var(--app-border);
+  color: var(--app-text-secondary);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s;
+}
+
+.quick-btn:hover {
+  background: var(--app-surface-3);
+  color: var(--app-text);
+  border-color: var(--app-border-strong);
+}
+
+.quick-btn--edit {
+  background: transparent;
+  border-color: var(--app-border);
+  color: var(--app-text-dim);
+  margin-left: auto;
+}
+
+.quick-btn--edit:hover {
+  color: var(--app-text-secondary);
+  background: var(--app-surface-1);
+  border-color: var(--app-border-strong);
+}
+
+/* Textarea + send row */
+.terminal-input-row {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+}
+
+.terminal-input-textarea {
+  flex: 1;
+  resize: none;
+  min-height: 0;
+  background: var(--app-input-bg);
+  color: var(--app-text);
+  border: none;
+  border-right: 1px solid var(--app-border);
+  padding: 6px 8px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+  caret-color: var(--app-text);
+}
+
+.terminal-input-textarea::placeholder {
+  color: var(--app-text-dim);
+}
+
+.terminal-input-textarea:focus {
+  background: var(--app-input-bg-focus);
+}
+
+.terminal-input-send-btn {
+  width: 38px;
+  flex-shrink: 0;
+  background: var(--app-accent-soft);
+  border: none;
+  color: var(--app-accent);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.terminal-input-send-btn:hover {
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
+}
+
+/* Quick-button editor dialog */
+.quick-btn-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--app-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(2px);
+}
+
+.quick-btn-editor {
+  background: var(--app-panel-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  width: 720px;
+  max-width: 92vw;
+  height: 500px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px var(--app-shadow-strong);
+  color: var(--app-text);
+}
+
+.quick-btn-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--app-border);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.quick-btn-editor-close {
+  background: none;
+  border: none;
+  color: var(--app-text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.quick-btn-editor-close:hover {
+  color: var(--app-text);
+  background: var(--app-hover);
+}
+
+.quick-btn-editor-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  padding: 0;
+}
+
+.quick-btn-editor-sidebar {
+  width: 240px;
+  border-right: 1px solid var(--app-border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-panel-bg-strong);
+}
+
+.quick-btn-editor-sidebar-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--app-border);
+  transition: background 0.2s;
+}
+
+.quick-btn-editor-sidebar-item:hover {
+  background: var(--app-hover);
+}
+
+.quick-btn-editor-sidebar-item.active {
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
+}
+
+.quick-btn-editor-sidebar-label {
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: 8px;
+}
+
+.quick-btn-editor-sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.6;
+}
+
+.quick-btn-editor-sidebar-item:hover .quick-btn-editor-sidebar-actions,
+.quick-btn-editor-sidebar-item.active .quick-btn-editor-sidebar-actions {
+  opacity: 1;
+}
+
+.quick-btn-editor-sidebar-actions button {
+  background: var(--app-hover);
+  border: 1px solid var(--app-hover-soft);
+  color: inherit;
+  font-size: 10px;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+  line-height: 1;
+}
+
+.quick-btn-editor-sidebar-actions button:hover:not(:disabled) {
+  background: var(--app-hover);
+}
+
+.quick-btn-editor-sidebar-actions button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.quick-btn-editor-sidebar-delete {
+  color: var(--app-danger) !important;
+}
+
+.quick-btn-editor-sidebar-item.active .quick-btn-editor-sidebar-delete {
+  color: #fff !important;
+}
+
+.quick-btn-editor-content {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.quick-btn-editor-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+}
+
+.quick-btn-editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-btn-editor-field--command {
+  flex: 1;
+}
+
+.quick-btn-editor-field label {
+  font-size: 12px;
+  color: var(--app-text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.quick-btn-editor-content-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--app-text-dim);
+  font-size: 14px;
+  text-align: center;
+}
+
+.quick-btn-editor-empty {
+  color: var(--app-text-dim);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.quick-btn-editor-input {
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 13px;
+  outline: none;
+}
+
+.quick-btn-editor-input:focus {
+  border-color: var(--app-border-accent);
+}
+
+.quick-btn-editor-input--label {
+  flex: 1;
+}
+
+.quick-btn-editor-input--command {
+  flex: 1;
+  min-height: 200px;
+  resize: none;
+  font-family: Consolas, "Courier New", monospace;
+  line-height: 1.4;
+}
+
+.quick-btn-editor-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--app-border);
+}
+
+.quick-btn-editor-add {
+  background: var(--app-success-soft);
+  border: 1px solid var(--app-success);
+  color: var(--app-success);
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quick-btn-editor-add:hover {
+  background: var(--app-success);
+  color: var(--app-accent-contrast);
+}
+
+.quick-btn-editor-cancel {
+  background: var(--app-surface-3);
+  border: none;
+  color: var(--app-text-secondary);
+  padding: 5px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quick-btn-editor-cancel:hover {
+  background: var(--app-surface-4);
+}
+
+.quick-btn-editor-save {
+  background: var(--app-accent);
+  border: none;
+  color: var(--app-accent-contrast);
+  padding: 5px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quick-btn-editor-save:hover {
+  background: var(--app-accent-hover);
+}
+
+

@@ -191,7 +191,7 @@ pub fn get_connections(
         let credential_store = encryption::resolve_secret(&app, &master_state)
             .and_then(|secret| encryption::load_encrypted_credentials(&app, &secret))
             .unwrap_or_else(|e| {
-                eprintln!("[get_connections] credential store unreadable ({}), returning empty credentials", e);
+                crate::warn_log!("[get_connections] credential store unreadable ({}), returning empty credentials", e);
                 encryption::CredentialStore { credentials: Vec::new() }
             });
         for connection in &mut connections {
@@ -228,7 +228,7 @@ pub fn save_connection(
     // 避免因遗留文件阻断所有新连接的保存。
     let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
         .unwrap_or_else(|e| {
-            eprintln!("[save_connection] credential store unreadable ({}), resetting", e);
+            crate::warn_log!("[save_connection] credential store unreadable ({}), resetting", e);
             encryption::CredentialStore { credentials: Vec::new() }
         });
 

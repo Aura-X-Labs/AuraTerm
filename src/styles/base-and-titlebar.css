@@ -1,0 +1,332 @@
+/* ── Theme Defaults ───────────────────────────────────────────────────────── */
+:root {
+  --app-bg: #111418;
+  --app-surface-0: #171b20;
+  --app-surface-1: #1d232a;
+  --app-surface-2: #252c35;
+  --app-surface-3: #2d3640;
+  --app-surface-4: #38434f;
+  --app-panel-bg: #1d232a;
+  --app-panel-bg-strong: #252c35;
+  --app-panel-bg-subtle: #171b20;
+  --app-input-bg: #171b20;
+  --app-input-bg-focus: #1d232a;
+  --app-overlay: rgba(0, 0, 0, 0.56);
+  --app-overlay-soft: rgba(0, 0, 0, 0.32);
+  --app-shadow: rgba(0, 0, 0, 0.38);
+  --app-shadow-strong: rgba(0, 0, 0, 0.58);
+  --app-border: #39414b;
+  --app-border-strong: #515a67;
+  --app-border-accent: #61afef;
+  --app-text: #dcdcdc;
+  --app-text-secondary: #b5bcc4;
+  --app-text-muted: #8d97a1;
+  --app-text-dim: #6e7984;
+  --app-accent: #61afef;
+  --app-accent-hover: #7dbcf2;
+  --app-accent-soft: rgba(97, 175, 239, 0.16);
+  --app-accent-soft-strong: rgba(97, 175, 239, 0.24);
+  --app-accent-contrast: #0f1419;
+  --app-alt-accent: #56b6c2;
+  --app-success: #98c379;
+  --app-success-hover: #add290;
+  --app-success-soft: rgba(152, 195, 121, 0.18);
+  --app-warning: #e5c07b;
+  --app-warning-soft: rgba(229, 192, 123, 0.18);
+  --app-danger: #e06c75;
+  --app-danger-hover: #e6838a;
+  --app-danger-soft: rgba(224, 108, 117, 0.16);
+  --app-danger-soft-strong: rgba(224, 108, 117, 0.24);
+  --app-selection: rgba(38, 79, 120, 0.24);
+  --app-hover: rgba(255, 255, 255, 0.08);
+  --app-hover-soft: rgba(255, 255, 255, 0.05);
+  --app-scrollbar-track: #171b20;
+  --app-scrollbar-thumb: #39414b;
+  --app-scrollbar-thumb-hover: #515a67;
+  --app-titlebar-bg: #1d232a;
+  --app-titlebar-subtle: #171b20;
+  --app-tabbar-bg: #171b20;
+  --app-tab-bg: #252c35;
+  --app-tab-bg-hover: #2d3640;
+  --app-tab-bg-active: #171b20;
+  --app-sidebar-bg: #1d232a;
+  --app-menu-bg: #1d232a;
+  --app-menu-hover: rgba(97, 175, 239, 0.22);
+  --app-menu-separator: #39414b;
+  --app-terminal-panel: #101419;
+  --app-terminal-panel-alt: #090c10;
+  --app-terminal-gradient: linear-gradient(180deg, #1d232a 0%, #171b20 100%);
+  --app-terminal-glow: radial-gradient(circle at top left, rgba(97, 175, 239, 0.18) 0%, transparent 26%);
+  --app-status-pill-bg: rgba(97, 175, 239, 0.16);
+  --app-status-pill-fg: #61afef;
+}
+
+/* ── Global Scrollbar Styles ───────────────────────────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scrollbar-thumb) var(--app-scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--app-scrollbar-track);
+  border-radius: 5px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--app-scrollbar-thumb);
+  border-radius: 5px;
+  border: 2px solid var(--app-scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--app-scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--app-scrollbar-track);
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+.titlebar {
+  height: 35px;
+  background: var(--app-titlebar-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.titlebar-windows-main {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+.titlebar-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  height: 100%;
+}
+
+.titlebar-logo img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  opacity: 0.9;
+}
+
+.titlebar-title {
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.titlebar-title.center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  color: var(--app-text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.titlebar-menubar {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.titlebar-menu-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.titlebar-menu-btn {
+  height: 100%;
+  padding: 0 8px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  cursor: default;
+}
+
+.titlebar-menu-btn:hover,
+.titlebar-menu-btn.open {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.titlebar-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  padding: 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-menu-bg);
+  box-shadow: 0 12px 32px var(--app-shadow);
+}
+
+.titlebar-menu-submenu-group {
+  position: relative;
+}
+
+.titlebar-menu-item {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--app-text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+}
+
+.titlebar-menu-item--submenu {
+  padding-right: 8px;
+}
+
+.titlebar-menu-item:hover {
+  background: var(--app-menu-hover);
+  color: var(--app-text);
+}
+
+.titlebar-menu-item:disabled {
+  color: var(--app-text-dim);
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.titlebar-menu-item:disabled:hover {
+  color: var(--app-text-dim);
+  background: transparent;
+}
+
+.titlebar-menu-item-arrow {
+  margin-left: 18px;
+  color: var(--app-text-muted);
+}
+
+.titlebar-menu-submenu {
+  position: absolute;
+  top: -6px;
+  left: calc(100% - 2px);
+  min-width: 180px;
+  padding: 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-menu-bg);
+  box-shadow: 0 12px 32px var(--app-shadow);
+}
+
+.titlebar-menu-separator {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--app-menu-separator);
+}
+
+.titlebar-menu-item-hint {
+  color: var(--app-text-muted);
+  margin-left: 18px;
+  font-size: 11px;
+}
+
+.titlebar-controls {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 6px;
+}
+
+.titlebar-control-btn {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: filter 0.15s;
+}
+
+.titlebar-control-btn::after {
+  content: "";
+  font-size: 8px;
+  color: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+  font-weight: bold;
+}
+
+.titlebar-controls:hover .titlebar-control-btn::after {
+  opacity: 1;
+}
+
+.titlebar-control-close::after {
+  content: "×";
+}
+
+.titlebar-control-minimize::after {
+  content: "−";
+  font-size: 10px;
+}
+
+.titlebar-control-maximize::after {
+  content: "+";
+  font-size: 9px;
+}
+
+.titlebar-control-close {
+  background: #ff5f57;
+}
+
+.titlebar-control-minimize {
+  background: #ffbd2e;
+}
+
+.titlebar-control-maximize {
+  background: #28c840;
+}
+

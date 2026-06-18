@@ -8,7 +8,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Manager};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -44,13 +44,16 @@ pub struct MasterPasswordState {
 
 impl MasterPasswordState {
     pub fn set(&self, password: String) {
-        let mut guard = self.inner.lock().expect("master password mutex poisoned");
+        // Recover from a poisoned lock rather than panicking: under
+        // `panic = "abort"` a panic here would take down the whole app, and a
+        // poisoned master-password mutex is recoverable (we overwrite the value).
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // The previous value (if any) is wiped when the old Zeroizing<String> drops.
         *guard = Some(Zeroizing::new(password));
     }
 
     pub fn clear(&self) {
-        let mut guard = self.inner.lock().expect("master password mutex poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // Dropping the cached Zeroizing<String> overwrites its bytes with zeros.
         *guard = None;
     }
@@ -250,13 +253,85 @@ impl EncryptedFileHeader {
     }
 }
 
-/// 从主密码推导加密密钥（按文件版本选择 KDF）。
-fn derive_key(password: &str, salt: &[u8], version: u32) -> Result<Zeroizing<[u8; 32]>, String> {
-    match version {
-        VERSION_V1_LEGACY => derive_key_v1(password, salt),
-        VERSION_V2 => derive_key_v2(password, salt),
-        other => Err(format!("Unsupported credential KDF version: {}", other)),
+/// Memoized Argon2 KDF output.
+///
+/// Deriving the credential key runs Argon2id at 16 MiB / t=3 (tens of ms). It is
+/// re-run on every `get_connections`, every sidebar refresh, every password
+/// retry, and twice per `save_connection` (load + save), which adds up to a
+/// visibly sluggish UI. The derived key is a pure function of
+/// `(password, salt, version)`, so memoizing it can never return a stale key —
+/// a different password produces a different fingerprint, and `save` writes a
+/// fresh random salt (hence a new entry). No explicit invalidation is required
+/// for correctness; [`clear_kdf_cache`] is only called for defense-in-depth when
+/// locking / disabling the master password.
+struct KdfCacheEntry {
+    /// SHA-256 of the password (domain-separated), so the plaintext password is
+    /// not held in a second place purely for cache-key comparison.
+    fingerprint: [u8; 32],
+    salt: Vec<u8>,
+    version: u32,
+    key: Zeroizing<[u8; 32]>,
+}
+
+/// Most-recent KDF results, newest last. Tiny: the password rarely changes and
+/// only a couple of salts are live at once (current file + last write).
+static KDF_CACHE: OnceLock<Mutex<Vec<KdfCacheEntry>>> = OnceLock::new();
+const KDF_CACHE_MAX: usize = 4;
+
+fn kdf_cache() -> &'static Mutex<Vec<KdfCacheEntry>> {
+    KDF_CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn password_fingerprint(password: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"auraterm-kdf-cache-v1"); // domain separation
+    hasher.update(password.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Drop all memoized derived keys (zeroized on drop). Called when the master
+/// password is locked, changed, or disabled so derived keys do not outlive the
+/// unlocked session.
+pub fn clear_kdf_cache() {
+    if let Ok(mut cache) = kdf_cache().lock() {
+        cache.clear();
     }
+}
+
+/// 从主密码推导加密密钥（按文件版本选择 KDF），命中内存缓存则跳过 Argon2。
+fn derive_key(password: &str, salt: &[u8], version: u32) -> Result<Zeroizing<[u8; 32]>, String> {
+    let fingerprint = password_fingerprint(password);
+
+    if let Ok(cache) = kdf_cache().lock() {
+        if let Some(entry) = cache
+            .iter()
+            .find(|e| e.version == version && e.fingerprint == fingerprint && e.salt == salt)
+        {
+            return Ok(entry.key.clone());
+        }
+    }
+
+    let key = match version {
+        VERSION_V1_LEGACY => derive_key_v1(password, salt)?,
+        VERSION_V2 => derive_key_v2(password, salt)?,
+        other => return Err(format!("Unsupported credential KDF version: {}", other)),
+    };
+
+    if let Ok(mut cache) = kdf_cache().lock() {
+        cache.push(KdfCacheEntry {
+            fingerprint,
+            salt: salt.to_vec(),
+            version,
+            key: key.clone(),
+        });
+        // Bound the cache; drop the oldest entries (their keys zeroize on drop).
+        let overflow = cache.len().saturating_sub(KDF_CACHE_MAX);
+        if overflow > 0 {
+            cache.drain(0..overflow);
+        }
+    }
+
+    Ok(key)
 }
 
 /// 当前 KDF (v2)：Argon2id 直接派生出 32 字节密钥。
@@ -987,6 +1062,29 @@ mod tests {
             *derive_key_v2(password, &salt).unwrap(),
         );
         assert!(derive_key(password, &salt, 999).is_err(), "Unknown version must error");
+    }
+
+    #[test]
+    fn test_derive_key_cache_returns_consistent_key() {
+        // The KDF memo must be transparent: a second call with identical inputs
+        // (a cache hit) returns the same key as the first, and equals a direct
+        // derivation. A different salt must derive a distinct key, not reuse the
+        // cached one.
+        let password = "cache-user";
+        let salt_a = vec![0x11u8; SALT_SIZE];
+        let salt_b = vec![0x22u8; SALT_SIZE];
+
+        let first = derive_key(password, &salt_a, VERSION_V2).unwrap();
+        let cached = derive_key(password, &salt_a, VERSION_V2).unwrap();
+        assert_eq!(*first, *cached, "cache hit must match the original derivation");
+        assert_eq!(*cached, *derive_key_v2(password, &salt_a).unwrap());
+
+        let other = derive_key(password, &salt_b, VERSION_V2).unwrap();
+        assert_ne!(*first, *other, "different salt must not collide with a cached key");
+
+        // Clearing the cache must not change future derivations.
+        clear_kdf_cache();
+        assert_eq!(*derive_key(password, &salt_a, VERSION_V2).unwrap(), *first);
     }
 
     /// 端到端验证版本调度：用 v1 KDF + 头部 version=1 写出的 blob，必须用 v1 派生才能解开，
