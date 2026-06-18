@@ -43,7 +43,7 @@ pub async fn start_telnet_session(
             match reader.read(&mut buffer).await {
                 Ok(0) => {
                     let _ = read_app.emit(
-                        "pty-exit",
+                        &crate::util::session_event("pty-exit", &read_id),
                         PtyExitEvent {
                             id: read_id.clone(),
                             message: "Telnet connection closed".to_string(),
@@ -57,7 +57,7 @@ pub async fn start_telnet_session(
                         continue;
                     }
                     let _ = read_app.emit(
-                        "pty-output",
+                        &crate::util::session_event("pty-output", &read_id),
                         PtyOutputEvent {
                             id: read_id.clone(),
                             data: output,
@@ -66,7 +66,7 @@ pub async fn start_telnet_session(
                 }
                 Err(error) => {
                     let _ = read_app.emit(
-                        "pty-exit",
+                        &crate::util::session_event("pty-exit", &read_id),
                         PtyExitEvent {
                             id: read_id.clone(),
                             message: format!("Telnet read error: {}", error),
@@ -89,7 +89,7 @@ pub async fn start_telnet_session(
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     let _ = write_app.emit(
-                        "pty-exit",
+                        &crate::util::session_event("pty-exit", &write_id),
                         PtyExitEvent {
                             id: write_id.clone(),
                             message: format!("Telnet write error: {}", error),
@@ -99,7 +99,7 @@ pub async fn start_telnet_session(
                 }
                 Err(_) => {
                     let _ = write_app.emit(
-                        "pty-exit",
+                        &crate::util::session_event("pty-exit", &write_id),
                         PtyExitEvent {
                             id: write_id.clone(),
                             message: format!(

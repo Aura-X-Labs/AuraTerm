@@ -141,7 +141,7 @@ pub async fn start_serial_session(
     }
 
     let _ = app.emit(
-        "serial-connected",
+        &crate::util::session_event("serial-connected", &id),
         SerialConnectedEvent {
             id: id.clone(),
         },
@@ -162,7 +162,7 @@ pub async fn start_serial_session(
                         continue;
                     }
                     let _ = app_handle.emit(
-                        "pty-output",
+                        &crate::util::session_event("pty-output", &session_id),
                         PtyOutputEvent {
                             id: session_id.clone(),
                             data: output,
@@ -174,7 +174,7 @@ pub async fn start_serial_session(
                 Err(error) => {
                     if !stop_flag.load(Ordering::Relaxed) {
                         let _ = app_handle.emit(
-                            "pty-exit",
+                            &crate::util::session_event("pty-exit", &session_id),
                             PtyExitEvent {
                                 id: session_id.clone(),
                                 message: format!("Serial read error: {}", error),

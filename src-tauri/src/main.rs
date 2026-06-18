@@ -399,7 +399,7 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
             match reader.read(&mut buffer) {
                 Ok(0) => {
                     let _ = app_handle.emit(
-                        "pty-exit",
+                        &util::session_event("pty-exit", &pty_id),
                         PtyExitEvent {
                             id: pty_id.clone(),
                             message: "PTY closed".to_string(),
@@ -413,7 +413,7 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
                         continue;
                     }
                     let _ = app_handle.emit(
-                        "pty-output",
+                        &util::session_event("pty-output", &pty_id),
                         PtyOutputEvent {
                             id: pty_id.clone(),
                             data: output,
@@ -422,7 +422,7 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
                 }
                 Err(_) => {
                     let _ = app_handle.emit(
-                        "pty-exit",
+                        &util::session_event("pty-exit", &pty_id),
                         PtyExitEvent {
                             id: pty_id.clone(),
                             message: "PTY read error".to_string(),
