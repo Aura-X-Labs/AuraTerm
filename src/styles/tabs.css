@@ -1,0 +1,396 @@
+/* ── Blur state: Gray out buttons when window is not focused ───── */
+.app-container.blurred .titlebar-control-btn {
+  background: var(--app-border-strong) !important;
+}
+
+.titlebar-control-btn:hover {
+  filter: brightness(0.92);
+}
+
+.titlebar-controls-win {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  height: 100%;
+}
+
+.titlebar-control-win-btn {
+  height: 100%;
+  width: 46px;
+  background: transparent;
+  border: none;
+  color: var(--app-text);
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 10px;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s ease;
+}
+
+.titlebar-control-win-btn:hover {
+  background: var(--app-hover);
+}
+
+.titlebar-control-win-btn.close:hover {
+  background: #e81123;
+  color: #ffffff;
+}
+
+.app-container.windows .titlebar {
+  justify-content: flex-start;
+  background: var(--app-titlebar-bg);
+}
+
+.tab-bar {
+  height: 36px;
+  background: var(--app-tabbar-bg);
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+  margin-top: 35px;
+  min-width: 0;
+  position: relative;
+  /* 需要高于 pane-resize-layer(4) 以确保下拉菜单不被终端遮挡 */
+  z-index: 20;
+}
+
+.tab-bar.no-titlebar {
+  margin-top: 0;
+}
+
+.tab-strip {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* ── Step 1: Tab 栏按钮区分组 ───────────────────────────────── */
+.tab-bar-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  padding: 0 2px;
+  gap: 1px;
+  border-left: 1px solid var(--app-border);
+  background: var(--app-tabbar-bg);
+}
+
+.tab-bar-action-group {
+  display: flex;
+  align-items: stretch;
+}
+
+.tab-bar-action-divider {
+  width: 1px;
+  margin: 6px 3px;
+  background: var(--app-border);
+  flex-shrink: 0;
+}
+
+/* Layout 下拉按钮宽度稍宽以容纳文字+箭头 */
+.tab-layout-btn {
+  width: auto !important;
+  padding: 0 8px !important;
+  gap: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* ── Step 3: Layout 下拉菜单 ────────────────────────────────── */
+.tab-layout-group {
+  position: relative;
+}
+
+.layout-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 160px;
+  padding: 5px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-menu-bg);
+  box-shadow: 0 10px 28px var(--app-shadow);
+  z-index: 100;
+}
+
+/* fixed 变体：脱离父容器 stacking context，不被终端层遮挡 */
+.layout-dropdown--fixed {
+  position: fixed;
+  z-index: 1200;
+  top: unset;
+  right: unset;
+}
+
+.layout-dropdown-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+  transition: background 0.12s;
+}
+
+.layout-dropdown-item:hover:not(:disabled) {
+  background: var(--app-menu-hover);
+}
+
+.layout-dropdown-item:disabled {
+  color: var(--app-text-dim);
+  cursor: not-allowed;
+}
+
+.layout-dropdown-separator {
+  height: 1px;
+  margin: 4px 4px;
+  background: var(--app-menu-separator);
+}
+
+.tab-layout-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.tab-item {
+  height: 100%;
+  min-width: 120px;
+  max-width: 200px;
+  background: var(--app-tab-bg);
+  border-radius: 0;
+  border-right: 1px solid var(--app-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  cursor: pointer;
+  color: var(--app-text-muted);
+  font-size: 13px;
+  flex: 0 0 auto;
+  transition: background 0.1s, color 0.1s, opacity 0.1s;
+  user-select: none;
+  box-sizing: border-box;
+  border-top: 2px solid transparent;
+}
+
+.tab-item:hover {
+  background: var(--app-tab-bg-hover);
+  color: var(--app-text-secondary);
+}
+
+.tab-item.active {
+  background: var(--app-tab-bg-active);
+  color: var(--app-text);
+  border-top-color: var(--app-border-accent);
+}
+
+.tab-item.dragging {
+  background: var(--app-surface-4);
+  color: var(--app-text);
+  border-top-color: var(--app-border-accent);
+  outline: 1px solid var(--app-accent-soft-strong);
+  outline-offset: -1px;
+  cursor: grabbing;
+  opacity: 1;
+  position: relative;
+  z-index: 10;
+}
+
+.tab-item.dragging .tab-close-btn {
+  opacity: 1;
+}
+
+/* other tabs dim slightly while one is being dragged */
+.tab-strip.is-dragging .tab-item:not(.dragging) {
+  opacity: 0.55;
+  transition: opacity 0.1s;
+}
+
+/* smooth slide animation when tabs reorder */
+.tab-sort-move {
+  transition: transform 0.15s ease;
+}
+
+/* ── Step 4: Tab 在非焦点 pane 中可见的指示 ──────────────── */
+.tab-item.pane-visible {
+  border-bottom: 2px solid var(--app-accent-soft-strong);
+}
+
+.tab-pane-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  flex-shrink: 0;
+  margin: 0 2px 0 0;
+  opacity: 0.7;
+  vertical-align: middle;
+}
+
+.tab-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.tab-title-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border-accent);
+  border-radius: 4px;
+  color: var(--app-text);
+  font: inherit;
+  margin: 0;
+  outline: none;
+  padding: 3px 6px;
+}
+
+.tab-context-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 148px;
+  padding: 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-menu-bg);
+  box-shadow: 0 12px 28px var(--app-shadow);
+}
+
+.tab-context-item {
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--app-text);
+  cursor: pointer;
+  font: inherit;
+  margin: 0;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.tab-context-item:hover {
+  background: var(--app-menu-hover);
+  color: var(--app-text);
+}
+
+.tab-context-item:disabled {
+  color: var(--app-text-dim);
+  cursor: default;
+}
+
+.tab-context-item:disabled:hover {
+  background: transparent;
+  color: var(--app-text-dim);
+}
+
+.tab-close-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 16px;
+  flex-shrink: 0;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
+.tab-item:hover .tab-close-btn,
+.tab-item.active .tab-close-btn {
+  opacity: 1;
+}
+
+.tab-close-btn:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.tab-new-btn {
+  height: 100%;
+  width: 30px;
+  background: transparent;
+  border: none;
+  color: var(--app-text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 3;
+}
+
+.tab-new-btn:hover {
+  background: var(--app-tab-bg-hover);
+  color: var(--app-text);
+}
+
+.tab-new-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tab-new-btn:disabled:hover {
+  background: transparent;
+  color: var(--app-text-muted);
+}
+
+/* grabbing cursor across the entire window while dragging a tab */
+.app-container.tab-dragging,
+.app-container.tab-dragging * {
+  cursor: grabbing !important;
+}
+
+.bookmark-toggle-btn {
+  font-size: 14px;
+}
+
+.tab-settings-btn {
+  width: 34px;
+  font-size: 14px;
+}
+
+.tab-search-btn {
+  width: 34px;
+  font-size: 14px;
+}
+
+.tab-search-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.tab-files-btn {
+  width: 34px;
+  font-size: 14px;
+}
+
+.tab-files-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+

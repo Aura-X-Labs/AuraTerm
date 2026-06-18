@@ -1,0 +1,510 @@
+/* ── Workspace (Sidebar + Terminal area horizontal layout) ─────────────── */
+.workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.terminal-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.terminal-searchbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--app-border);
+  background: linear-gradient(180deg, var(--app-panel-bg-strong) 0%, var(--app-panel-bg) 100%);
+}
+
+.terminal-search-input-wrap {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  height: 32px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-input-bg);
+}
+
+.terminal-search-label {
+  flex-shrink: 0;
+  color: var(--app-text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.terminal-search-input {
+  min-width: 0;
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 13px;
+  outline: none;
+}
+
+.terminal-search-input::placeholder {
+  color: var(--app-text-dim);
+}
+
+.terminal-search-summary {
+  flex-shrink: 0;
+  min-width: 118px;
+  color: var(--app-text-muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.terminal-search-toggles,
+.terminal-search-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.terminal-search-toggle,
+.terminal-search-action {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-2);
+  color: var(--app-text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.terminal-search-toggle:hover,
+.terminal-search-action:hover:not(:disabled) {
+  background: var(--app-surface-3);
+  color: var(--app-text);
+  border-color: var(--app-border-strong);
+}
+
+.terminal-search-toggle.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+  border-color: var(--app-border-accent);
+}
+
+.terminal-search-action:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.terminal-search-action.close {
+  font-size: 16px;
+}
+
+.terminal-container {
+  flex: 1;
+  background: var(--app-terminal-panel);
+  padding: 5px;
+  overflow: hidden;
+  position: relative;
+  min-width: 0;
+}
+
+.split-terminal-container {
+  background: var(--app-terminal-glow), var(--app-terminal-gradient);
+}
+
+.terminal-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--app-text-dim);
+}
+
+.pane-frame-layer,
+.terminal-instance-layer,
+.pane-resize-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.pane-frame-layer {
+  z-index: 1;
+  pointer-events: none;
+}
+
+.terminal-instance-layer {
+  z-index: 2;
+}
+
+/* pane-overlay-layer: 包含 header/empty pane 交互内容，必须高于 terminal-instance-layer */
+.pane-overlay-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.pane-overlay-shell {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+  /* 圆角裁切与 pane-frame 保持一致 */
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* overlay 层里的 header 和 empty pane 需要 pointer-events: auto */
+.pane-overlay-shell .terminal-pane-header,
+.pane-overlay-shell .terminal-pane-empty {
+  pointer-events: auto;
+}
+
+.pane-resize-layer {
+  z-index: 4;
+  pointer-events: none;
+}
+
+.terminal-pane-frame {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--app-terminal-panel);
+  box-shadow: inset 0 0 0 1px var(--app-hover-soft);
+  transition: left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out;
+}
+
+.terminal-pane-frame.focused {
+  border-color: var(--app-border-accent);
+  box-shadow: 0 0 0 1px var(--app-accent-soft-strong), inset 0 0 0 1px var(--app-hover-soft);
+}
+
+.terminal-pane-frame.empty {
+  background: var(--app-terminal-panel-alt);
+}
+
+/* ── Step 7: Pane Header slide-down 进入动画 ─────────────────── */
+.pane-header-slide-enter-active {
+  transition: max-height 0.18s ease-out, opacity 0.18s ease-out;
+  overflow: hidden;
+}
+
+.pane-header-slide-leave-active {
+  transition: max-height 0.15s ease-in, opacity 0.15s ease-in;
+  overflow: hidden;
+}
+
+.pane-header-slide-enter-from,
+.pane-header-slide-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+
+.pane-header-slide-enter-to,
+.pane-header-slide-leave-from {
+  max-height: 30px;
+  opacity: 1;
+}
+
+.terminal-pane-header {
+  height: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 8px 0 6px;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-terminal-gradient);
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+}
+
+.terminal-pane-header:active {
+  cursor: grabbing;
+}
+
+/* Step 2/7: 拖拽手柄 */
+.terminal-pane-drag-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 100%;
+  cursor: grab;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+
+.terminal-pane-header:hover .terminal-pane-drag-handle {
+  opacity: 1;
+}
+
+.terminal-pane-header-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  cursor: inherit;
+}
+
+.terminal-pane-title {
+  min-width: 0;
+  color: var(--app-text);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-pane-protocol {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.terminal-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-pane-actions button {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.terminal-pane-actions button:hover:not(:disabled) {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.terminal-pane-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.terminal-pane-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--app-text-muted);
+  pointer-events: auto;
+  text-align: center;
+  padding: 20px;
+  border: 1px dashed transparent;
+  border-radius: 7px;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.terminal-pane-empty.drag-target {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+  box-shadow: inset 0 0 0 1px var(--app-accent-soft-strong), 0 0 0 1px var(--app-accent-soft-strong);
+}
+
+.terminal-pane-empty-title {
+  color: var(--app-text);
+  font-size: 14px;
+}
+
+.terminal-pane-empty-desc {
+  font-size: 12px;
+  max-width: 220px;
+  line-height: 1.45;
+}
+
+/* ── Step 5: 空 Pane 快捷操作按钮 ──────────────────────────── */
+.terminal-pane-empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.terminal-pane-empty-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface-2);
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.terminal-pane-empty-btn:hover {
+  background: var(--app-accent-soft);
+  border-color: var(--app-border-accent);
+  color: var(--app-accent);
+}
+
+.terminal-pane-empty-btn--danger {
+  border-color: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.terminal-pane-empty-btn--danger:hover {
+  background: var(--app-danger-soft);
+  border-color: var(--app-danger);
+  color: var(--app-danger);
+}
+
+.terminal-instance-shell {
+  position: absolute;
+  min-width: 0;
+  min-height: 0;
+  transition: left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out;
+}
+
+.terminal-pane-drop-preview {
+  position: absolute;
+  inset: 0;
+  background: var(--app-accent-soft-strong);
+  border: 2px solid var(--app-border-accent);
+  border-radius: 4px;
+  z-index: 100;
+  pointer-events: none;
+  transition: all 0.15s ease;
+  /* Step 6: flex 居中放文字 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Step 6: Drop preview 文字提示 */
+.terminal-pane-drop-label {
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px var(--app-shadow);
+}
+
+.terminal-pane-drop-preview.top {
+  bottom: 50%;
+}
+
+.terminal-pane-drop-preview.bottom {
+  top: 50%;
+}
+
+.terminal-pane-drop-preview.left {
+  right: 50%;
+}
+
+.terminal-pane-drop-preview.right {
+  left: 50%;
+}
+
+.terminal-pane-drop-preview.center {
+  inset: 4px;
+  background: var(--app-accent-soft);
+}
+
+.terminal-instance-shell.visible {
+  display: block;
+}
+
+.app-container.tab-dragging .terminal-pane-frame,
+.app-container.tab-dragging .terminal-instance-shell {
+  transition: none;
+}
+
+.pane-split-handle {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 10;
+}
+
+.pane-split-handle.vertical {
+  cursor: col-resize;
+  width: 12px !important;
+  margin-left: -1px;
+}
+
+.pane-split-handle.horizontal {
+  cursor: row-resize;
+  height: 12px !important;
+  margin-top: -1px;
+}
+
+.pane-split-handle-grip {
+  border-radius: 999px;
+  background: var(--app-accent-soft-strong);
+  box-shadow: 0 0 0 1px var(--app-overlay);
+  transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+}
+
+.pane-split-handle.vertical .pane-split-handle-grip {
+  width: 2px;
+  height: min(56px, 55%);
+}
+
+.pane-split-handle.horizontal .pane-split-handle-grip {
+  width: min(56px, 55%);
+  height: 2px;
+}
+
+.pane-split-handle:hover .pane-split-handle-grip,
+.pane-split-handle:active .pane-split-handle-grip {
+  background: var(--app-accent);
+  box-shadow: 0 0 0 1px var(--app-accent-soft-strong), 0 0 18px var(--app-accent-soft-strong);
+}
+
+.pane-split-handle.vertical:hover .pane-split-handle-grip {
+  transform: scaleX(2);
+}
+
+.pane-split-handle.horizontal:hover .pane-split-handle-grip {
+  transform: scaleY(2);
+}
+

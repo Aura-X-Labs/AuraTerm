@@ -230,6 +230,16 @@ fn build_screen_attach_command(session_name: &str) -> String {
     )
 }
 
+/// Build the remote command that attaches to (or creates) the tmux session used
+/// for reconnect persistence, then enables mouse scrolling. Attaching to an
+/// existing session is preferred so a reconnect rejoins the live shell.
+fn build_tmux_attach_command(session_name: &str) -> String {
+    let sess = shell_escape(session_name);
+    format!(
+        "tmux new-session -A -s {sess} 2>/dev/null || tmux attach-session -t {sess} 2>/dev/null || tmux new-session -s {sess}; tmux set -g mouse on 2>/dev/null; true"
+    )
+}
+
 fn auraterm_reconnect_session_name(id: &str) -> String {
     format!("{AURATERM_RECONNECT_SESSION_PREFIX}{id}")
 }
@@ -594,7 +604,7 @@ async fn authenticate_ssh(
         }
     };
 
-    println!("Authenticating as {}...", user);
+    crate::debug_log!("Authenticating as {}...", user);
 
     let password = password.filter(|v| !v.is_empty());
     let private_key = private_key.filter(|v| !v.trim().is_empty());
@@ -613,7 +623,7 @@ async fn authenticate_ssh(
             .await
         {
             Ok(russh::client::AuthResult::Success) => {
-                println!("Public key authentication successful!");
+                crate::debug_log!("Public key authentication successful!");
                 None
             }
             Ok(russh::client::AuthResult::Failure { .. }) => {
@@ -624,11 +634,11 @@ async fn authenticate_ssh(
     } else if let Some(pwd) = password {
         match session.authenticate_password(user.to_string(), pwd.to_string()).await {
             Ok(russh::client::AuthResult::Success) => {
-                println!("Password authentication successful!");
+                crate::debug_log!("Password authentication successful!");
                 None
             }
             Ok(russh::client::AuthResult::Failure { .. }) => {
-                println!("Password auth failed, falling back to keyboard-interactive");
+                crate::debug_log!("Password auth failed, falling back to keyboard-interactive");
                 Some(session.authenticate_keyboard_interactive_start(user.to_string(), None).await)
             }
             Err(error) => return Err(format!("Password auth error: {error}")),
@@ -644,7 +654,7 @@ async fn authenticate_ssh(
         loop {
             match auth_res {
                 russh::client::KeyboardInteractiveAuthResponse::Success => {
-                    println!("Authentication successful!");
+                    crate::debug_log!("Authentication successful!");
                     break;
                 }
                 russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
@@ -862,11 +872,7 @@ async fn open_pty_channel(
 
                 if tool_available {
                     let attach_cmd = match rt {
-                        ReconnectType::Tmux => format!(
-                            // Attach or create; then immediately enable mouse scrolling.
-                            "tmux new-session -A -s {sess} 2>/dev/null || tmux attach-session -t {sess} 2>/dev/null || tmux new-session -s {sess}; tmux set -g mouse on 2>/dev/null; true",
-                            sess = shell_escape(session_name)
-                        ),
+                        ReconnectType::Tmux => build_tmux_attach_command(session_name),
                         ReconnectType::Screen => build_screen_attach_command(session_name),
                         ReconnectType::Manual => unreachable!(),
                         ReconnectType::Simple => unreachable!(),
@@ -905,7 +911,7 @@ pub async fn start_ssh_pty(
     auto_reconnect: Option<bool>,
     reconnect_type: Option<ReconnectType>,
 ) -> Result<(), String> {
-    println!("Starting SSH connection to {}@{}:{}", user, host, port);
+    crate::debug_log!("Starting SSH connection to {}@{}:{}", user, host, port);
 
     // Stop any previous session for this id.
     stop_and_cleanup_ssh_session(state.inner(), &id).await;
@@ -1100,7 +1106,7 @@ async fn run_reconnect_loop(
                 }
             }
             Err(err) => {
-                eprintln!("[ssh-debug] {} do_single_ssh_connect returned Err: {}", id, err);
+                crate::debug_log!("[ssh-debug] {} do_single_ssh_connect returned Err: {}", id, err);
                 cleanup_ssh_runtime_state(&state, &id).await;
 
                 // Authentication errors are not recoverable by retrying with the
@@ -1192,12 +1198,12 @@ async fn do_single_ssh_connect(
     mut auth_response_rx: mpsc::Receiver<String>,
 ) -> Result<mpsc::Receiver<String>, String> {
     let addr = format!("{host}:{port}");
-    println!("Connecting to {}...", addr);
+    crate::debug_log!("Connecting to {}...", addr);
 
     let session_handle = authenticate_ssh(host, port, user, password, private_key, app, id, &mut auth_response_rx).await?;
-    eprintln!("[ssh-debug] {} authenticated; opening PTY channel", id);
+    crate::debug_log!("[ssh-debug] {} authenticated; opening PTY channel", id);
 
-    println!("Requesting PTY and shell...");
+    crate::debug_log!("Requesting PTY and shell...");
     let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(id));
 
     if let Some(rt) = reconnect_type {
@@ -1290,7 +1296,7 @@ async fn do_single_ssh_connect(
     let state_clone = state.clone();
     let session_handle_for_io = session_handle.clone();
 
-    eprintln!(
+    crate::debug_log!(
         "[ssh-debug] {} PTY channel established (used_multiplexer={}); entering IO loop",
         connection_id, used_multiplexer
     );
@@ -1332,7 +1338,7 @@ async fn run_channel_io_loop(
     let mut stdout_decoder = crate::util::Utf8StreamDecoder::new();
     let mut stderr_decoder = crate::util::Utf8StreamDecoder::new();
 
-    eprintln!("[ssh-debug] {} run_channel_io_loop started", id);
+    crate::debug_log!("[ssh-debug] {} run_channel_io_loop started", id);
 
     loop {
         tokio::select! {
@@ -1355,7 +1361,7 @@ async fn run_channel_io_loop(
                     Some(ChannelMsg::ExtendedData { ref data, ext }) => {
                         data_msg_count += 1;
                         data_bytes_total += data.len() as u64;
-                        eprintln!(
+                        crate::debug_log!(
                             "[ssh-debug] {} ExtendedData ext={} ({} bytes)",
                             id, ext, data.len()
                         );
@@ -1371,7 +1377,7 @@ async fn run_channel_io_loop(
                         }
                     }
                     Some(ChannelMsg::Eof) => {
-                        eprintln!(
+                        crate::debug_log!(
                             "[ssh-debug] {} received ChannelMsg::Eof after {:?} (msgs={}, bytes={})",
                             id, loop_started_at.elapsed(), data_msg_count, data_bytes_total
                         );
@@ -1379,7 +1385,7 @@ async fn run_channel_io_loop(
                         break;
                     }
                     Some(ChannelMsg::Close) => {
-                        eprintln!(
+                        crate::debug_log!(
                             "[ssh-debug] {} received ChannelMsg::Close after {:?} (msgs={}, bytes={})",
                             id, loop_started_at.elapsed(), data_msg_count, data_bytes_total
                         );
@@ -1387,13 +1393,13 @@ async fn run_channel_io_loop(
                         break;
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
-                        eprintln!(
+                        crate::debug_log!(
                             "[ssh-debug] {} received ExitStatus={} after {:?}",
                             id, exit_status, loop_started_at.elapsed()
                         );
                     }
                     Some(ChannelMsg::ExitSignal { ref signal_name, core_dumped, ref error_message, ref lang_tag }) => {
-                        eprintln!(
+                        crate::debug_log!(
                             "[ssh-debug] {} received ExitSignal signal={:?} core_dumped={} error={:?} lang={:?}",
                             id, signal_name, core_dumped, error_message, lang_tag
                         );
@@ -1407,22 +1413,22 @@ async fn run_channel_io_loop(
                         // Normal reply to a channel request (e.g. pty-req / shell). Ignore.
                     }
                     Some(ChannelMsg::Failure) => {
-                        eprintln!("[ssh-debug] {} received ChannelMsg::Failure (server rejected a channel request)", id);
+                        crate::debug_log!("[ssh-debug] {} received ChannelMsg::Failure (server rejected a channel request)", id);
                     }
                     Some(ChannelMsg::OpenFailure(reason)) => {
-                        eprintln!("[ssh-debug] {} received ChannelMsg::OpenFailure: {:?}", id, reason);
+                        crate::debug_log!("[ssh-debug] {} received ChannelMsg::OpenFailure: {:?}", id, reason);
                         final_exit_message = Some(format!("SSH channel open failure: {:?}", reason));
                         break;
                     }
                     Some(other) => {
                         // Log unknown / unhandled ChannelMsg variants to diagnose unexpected disconnects.
-                        eprintln!(
+                        crate::debug_log!(
                             "[ssh-debug] {} unhandled ChannelMsg variant: {:?}",
                             id, std::mem::discriminant(&other)
                         );
                     }
                     None => {
-                        eprintln!(
+                        crate::debug_log!(
                             "[ssh-debug] {} channel.wait() returned None after {:?} (msgs={}, bytes={}); likely transport closed (keepalive timeout or TCP reset)",
                             id, loop_started_at.elapsed(), data_msg_count, data_bytes_total
                         );
@@ -1436,7 +1442,7 @@ async fn run_channel_io_loop(
                 match write_interactive_input(&mut channel, &handle, input_bytes.as_slice()).await {
                     InteractiveWriteOutcome::Sent => {}
                     InteractiveWriteOutcome::Dropped(message) => {
-                        eprintln!("[ssh-debug] {} write dropped: {}", id, message);
+                        crate::debug_log!("[ssh-debug] {} write dropped: {}", id, message);
                         let should_emit = last_write_error_notice_at
                             .map(|t| t.elapsed() >= std::time::Duration::from_secs(2))
                             .unwrap_or(true);
@@ -1466,14 +1472,14 @@ async fn run_channel_io_loop(
                     .await;
             }
             else => {
-                eprintln!("[ssh-debug] {} select!/else branch hit — all sources closed", id);
+                crate::debug_log!("[ssh-debug] {} select!/else branch hit — all sources closed", id);
                 final_exit_message = Some("Interactive IO loop ended unexpectedly".to_string());
                 break;
             }
         }
     }
 
-    eprintln!(
+    crate::debug_log!(
         "[ssh-debug] {} IO loop exit after {:?}; final_message={:?}; msgs={}, bytes={}",
         id,
         loop_started_at.elapsed(),
@@ -1545,13 +1551,33 @@ async fn write_interactive_input(
 mod tests {
     use super::known_hosts::{known_host_scope, parse_known_host_scope, summarize_fingerprint};
     use super::{
-        auraterm_reconnect_session_name, build_screen_attach_command, is_auth_error, shell_escape,
-        ReconnectType, AURATERM_RECONNECT_SESSION_PREFIX,
+        auraterm_reconnect_session_name, build_screen_attach_command, build_tmux_attach_command,
+        is_auth_error, shell_escape, ReconnectType, AURATERM_RECONNECT_SESSION_PREFIX,
     };
 
     #[test]
     fn shell_escape_handles_single_quotes() {
         assert_eq!(shell_escape("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn build_tmux_attach_command_prefers_existing_session() {
+        let command = build_tmux_attach_command("at-tab-0");
+        // Session name must be shell-escaped, and the order must be
+        // attach-or-create → enable mouse.
+        assert!(command.contains("tmux new-session -A -s 'at-tab-0'"));
+        assert!(command.contains("tmux attach-session -t 'at-tab-0'"));
+        assert!(command.contains("tmux set -g mouse on"));
+        let attach_or_create = command.find("new-session -A").unwrap();
+        let mouse = command.find("mouse on").unwrap();
+        assert!(attach_or_create < mouse, "attach must come before enabling mouse");
+    }
+
+    #[test]
+    fn build_tmux_attach_command_escapes_session_name() {
+        let command = build_tmux_attach_command("evil'; rm -rf /");
+        // The injected quote must be escaped, never passed through raw.
+        assert!(command.contains("'evil'\"'\"'; rm -rf /'"));
     }
 
     #[test]

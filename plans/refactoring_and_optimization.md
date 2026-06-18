@@ -177,15 +177,15 @@
 | 3 | zeroize 擦除 | ✅ 已完成（2026-06-17） |
 | 4 | KDF 收口 | ✅ 已完成（2026-06-17，含 v1→v2 透明迁移） |
 | 5 | 拆分 App.vue | ✅ 已完成（2026-06-18） |
-| 6 | 统一 stream_pump | 🟡 部分完成：UTF-8 解码已抽到 `util::Utf8StreamDecoder` 共享；session 注册表与读取循环的统一仍待做 |
+| 6 | 统一 stream_pump | ✅ 已完成（2026-06-19）：decode+emit 抽成共享 `util::emit_pty_output`/`emit_pty_exit`；session 注册表统一经评估不做（见说明） |
 | 7 | per-session 事件/Channel | ✅ 已完成（2026-06-18，按 id 事件名方案） |
 | 8 | logBuffer 优化 | ✅ 已完成（2026-06-17，PR #24） |
-| 9 | get_connections 缓存 | ⬜ 待处理 |
-| 10 | ssh-debug 日志门控 | ⬜ 待处理 |
-| 11 | 补单测 | 🟡 部分完成：新增 `util` 模块 6 个 UTF-8 解码单测 + 3 个 KDF/迁移单测 |
-| 12 | App.css 拆分 | ⬜ 待处理 |
-| 13 | Telnet IAC 说明 | ⬜ 待处理 |
-| 14 | unwrap/expect 收敛 | ⬜ 待处理 |
+| 9 | get_connections 缓存 | ✅ 已完成（2026-06-19，KDF 结果记忆化） |
+| 10 | ssh-debug 日志门控 | ✅ 已完成（2026-06-19，`debug_log!`/`warn_log!` 按 build profile 门控） |
+| 11 | 补单测 | ✅ 已完成（2026-06-19）：累计 +12 单测（UTF-8 6 + KDF/迁移 4 + Telnet IAC 7 + tmux 2 + KDF 缓存 1） |
+| 12 | App.css 拆分 | ✅ 已完成（2026-06-19，按功能拆成 `src/styles/` 7 文件，产物字节一致） |
+| 13 | Telnet IAC | ✅ 已完成（2026-06-19，实现 IAC 过滤 + 协商拒绝，非仅文档说明） |
+| 14 | unwrap/expect 收敛 | ✅ 已完成（2026-06-19）：主密码 mutex poison 恢复 + 时钟 unwrap 加固；其余均在测试或顶层 `run().expect()` |
 
 ### 已完成项实现说明（2026-06-17）
 
@@ -244,3 +244,18 @@
 - 加上限：保留最近 `SAVED_LOG_MAX_CHARS`（~4M 字符），超过 cap + 1M slack 时裁掉最旧部分（slack 避免每个 chunk 都 slice 多 MB 字符串）。
 - 权衡：超长会话的"保存日志"只含最近窗口；持续落盘日志（配置了 logPath）走独立的 `pendingLogBuffer`/`appendToLog` 路径，不受影响。
 - 验证：`npm run build`（vue-tsc + vite）通过；`npm test`（Vitest）48 项全过。
+
+### §6 / §9 / §10 / §11 / §12 / §13 / §14 实现说明（2026-06-19，收尾批次）
+
+剩余 7 项一并完成。验证：`cargo test`（68 项全过）+ `cargo check --release`（0 warning）+ `npm run build`（vue-tsc + vite）+ `npm test`（48 项）。
+
+- **§6 stream_pump**：把"解码 + 跳过空串 + per-session emit"抽成共享 `util::emit_pty_output(app, id, decoder, chunk)` 与 `util::emit_pty_exit(app, id, msg)`，接入本地 PTY（`main.rs`）、`serial.rs`、`telnet.rs` 三个简单读取循环，消除三处重复样板。
+  - **刻意不做**的部分：跨协议统一 session 注册表 / 读取循环。理由——三者 IO 模型异构（telnet 走 tokio async、serial/PTY 走阻塞线程 + 不同停止机制），且锁类型不一（PTY 用 `std::sync::Mutex`，telnet/serial 用 `tokio::sync::Mutex`）；SSH 的读取循环是多路复用状态机（Data/ExtendedData/Eof/重连/MFA/window-change），与简单循环本质不同。强行套一个泛型抽象是净负收益，故保留各自的 start/write/close 三件套，仅统一真正重复的 emit/decode 表面。
+- **§9 get_connections 缓存**：在 `encryption.rs` 对 Argon2 KDF 结果做记忆化（`KDF_CACHE`，键 = `(sha256(password) 域分隔, salt, version)`）。
+  - 选型：缓存 **派生密钥** 而非"解密后的凭据库"。派生密钥是 `(password, salt, version)` 的纯函数，命中**永不可能返回过期数据**（密码变→指纹变；`save` 每次写随机盐→新条目），因此**无需任何失效点**即正确；凭据明文仍每次从磁盘新鲜读取。相比缓存明文库，避免了散落在 set/change/disable/lock/import 各处的失效逻辑与漏失效风险。
+  - 边界：上限 `KDF_CACHE_MAX=4`（淘汰最旧，密钥 `Zeroizing` 析构擦除）；纵深防御额外在 `lock_master_password`/`disable_master_password`/`change_master_password` 调 `clear_kdf_cache()`，使派生密钥不超出解锁会话存活。
+- **§10 日志门控**：新增 `logging.rs` 两个 `#[macro_export]` 宏——`debug_log!`（仅 `debug_assertions` 输出，release 编译为丢弃 `format_args!` 的零成本块，避免"仅用于日志"的变量触发 release `unused` 警告）、`warn_log!`（任何 build 都到 stderr）。`ssh/mod.rs` 24 处诊断/状态打印（含原 `println!("Password authentication successful!")` 的认证旁路信息泄露）改 `debug_log!`；`main.rs` 窗口尺寸 trace 改 `debug_log!`、窗口边界恢复失败改 `warn_log!`；`connections.rs` 凭据库不可读改 `warn_log!`。
+- **§11 补单测**：累计 +12 纯函数单测。本批新增 7 个 `util::TelnetIacFilter`（透传/IAC 转义/DO→WONT/WILL→DONT/不回应 WONT-DONT/子协商剥离/跨读取边界）+ 2 个 `build_tmux_attach_command`（附加优先 + shell 转义防注入）+ 1 个 `derive_key` 缓存一致性。
+- **§12 App.css 拆分**：2724 行单文件按功能拆成 `src/styles/` 下 7 个文件（base-and-titlebar / tabs / workspace / input-bar / bookmark-sidebar / settings / overlays），仅在 section 注释边界切分、不切断任何规则；脚本校验拼回字节一致，且 `vite build` 产物 CSS 哈希不变（`index-B-FroVXd.css`）。`App.vue` 按原顺序 import 7 文件以保级联。
+- **§13 Telnet IAC**：超出原"仅文档说明"——在 `util::TelnetIacFilter` 实现有状态 IAC 过滤：剥离命令序列使 `0xFF` 选项字节不再污染 UTF-8 解码/终端；对 `DO`/`WILL` 一律礼貌拒绝（回 `WONT`/`DONT`），`IAC IAC` 还原为字面 `0xFF`，子协商整段丢弃；序列可跨读取边界。`telnet.rs` 信道类型 `String`→`Vec<u8>`（协商响应含非 UTF-8 字节），reader 经过滤后用共享 emit helper 输出、协商响应经 writer 信道回发。
+- **§14 unwrap/expect 收敛**：`MasterPasswordState::set`/`clear` 的 `.expect("poisoned")` 改为 `unwrap_or_else(|e| e.into_inner())` 恢复中毒锁（`panic = "abort"` 下原会整个崩溃）；`main.rs` 创建子窗口时的时钟 `unwrap()` 改 `map_or(0, …)`。其余 `unwrap/expect` 经审计均在测试模块或顶层 `tauri::Builder::run().expect(...)`（应用入口，无可恢复路径），保持不动。

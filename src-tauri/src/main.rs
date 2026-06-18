@@ -19,6 +19,8 @@ use tauri::{
     Size, State, WindowEvent,
 };
 
+#[macro_use]
+mod logging;
 mod connections;
 mod encryption;
 mod keychain;
@@ -307,7 +309,7 @@ fn setup_window_bounds_persistence(app: &AppHandle) -> Result<(), String> {
                 let packed = ((size.width as u64) << 32) | (size.height as u64);
                 let prev = last_logged_size.swap(packed, std::sync::atomic::Ordering::Relaxed);
                 if prev != packed {
-                    println!("[Window] New inner size: {}x{}", size.width, size.height);
+                    crate::debug_log!("[Window] New inner size: {}x{}", size.width, size.height);
                 }
             }
             if let Ok(bounds) = current_window_bounds(&event_window) {
@@ -399,36 +401,14 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    let _ = app_handle.emit(
-                        &util::session_event("pty-exit", &pty_id),
-                        PtyExitEvent {
-                            id: pty_id.clone(),
-                            message: "PTY closed".to_string(),
-                        },
-                    );
+                    util::emit_pty_exit(&app_handle, &pty_id, "PTY closed");
                     break;
                 }
                 Ok(size) => {
-                    let output = decoder.push(&buffer[..size]);
-                    if output.is_empty() {
-                        continue;
-                    }
-                    let _ = app_handle.emit(
-                        &util::session_event("pty-output", &pty_id),
-                        PtyOutputEvent {
-                            id: pty_id.clone(),
-                            data: output,
-                        },
-                    );
+                    util::emit_pty_output(&app_handle, &pty_id, &mut decoder, &buffer[..size]);
                 }
                 Err(_) => {
-                    let _ = app_handle.emit(
-                        &util::session_event("pty-exit", &pty_id),
-                        PtyExitEvent {
-                            id: pty_id.clone(),
-                            message: "PTY read error".to_string(),
-                        },
-                    );
+                    util::emit_pty_exit(&app_handle, &pty_id, "PTY read error");
                     break;
                 }
             }
@@ -630,6 +610,8 @@ fn change_master_password(
     } else {
         let _ = keychain::clear();
     }
+    // Drop the previous password's memoized derived keys.
+    encryption::clear_kdf_cache();
     master_state.set(new_password);
     Ok(())
 }
@@ -664,6 +646,7 @@ fn disable_master_password(
     settings::save_settings(app.clone(), settings)?;
     let _ = keychain::clear();
     master_state.clear();
+    encryption::clear_kdf_cache();
     Ok(())
 }
 
@@ -733,6 +716,7 @@ fn lock_master_password(
     master_state: State<'_, encryption::MasterPasswordState>,
 ) -> Result<(), String> {
     master_state.clear();
+    encryption::clear_kdf_cache();
     Ok(())
 }
 
@@ -977,10 +961,10 @@ fn main() {
             }
 
             if let Err(error) = apply_saved_window_bounds(_app.handle()) {
-                eprintln!("failed to restore saved window bounds: {error}");
+                crate::warn_log!("failed to restore saved window bounds: {error}");
             }
             if let Err(error) = setup_window_bounds_persistence(_app.handle()) {
-                eprintln!("failed to set up window bounds persistence: {error}");
+                crate::warn_log!("failed to set up window bounds persistence: {error}");
             }
 
             Ok(())
@@ -1009,7 +993,7 @@ fn main() {
                 "menu-new-window" => {
                     let _ = tauri::WebviewWindowBuilder::new(
                         app,
-                        format!("window-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()),
+                        format!("window-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())),
                         tauri::WebviewUrl::App("index.html?role=child".into())
                     )
                     .title("AuraTerm")

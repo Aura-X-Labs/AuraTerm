@@ -44,7 +44,14 @@ import type {
   TerminalSearchResults,
 } from "./types";
 import logoUrl from "./logo.png";
-import "./App.css";
+// App styles, split by feature area (order preserved for the cascade).
+import "./styles/base-and-titlebar.css";
+import "./styles/tabs.css";
+import "./styles/workspace.css";
+import "./styles/input-bar.css";
+import "./styles/bookmark-sidebar.css";
+import "./styles/settings.css";
+import "./styles/overlays.css";
 
 type Tab = PaneLayoutTab;
 

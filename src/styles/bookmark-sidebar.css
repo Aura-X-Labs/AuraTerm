@@ -1,0 +1,164 @@
+/* ── Bookmark Sidebar ──────────────────────────────────── */
+/* Styles moved to BookmarkSidebar.vue to avoid duplication */
+
+/* Bookmark Sidebar Button Active State */
+.bookmark-toggle-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.bookmark-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--app-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+}
+
+.bookmark-editor-dialog {
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-dialog-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px var(--app-shadow);
+}
+
+.bookmark-editor-header,
+.bookmark-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.bookmark-editor-footer {
+  border-bottom: none;
+  border-top: 1px solid var(--app-border);
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.bookmark-editor-title {
+  font-size: 16px;
+  color: var(--app-text);
+  font-weight: 600;
+}
+
+.bookmark-editor-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.bookmark-editor-close {
+  background: transparent;
+  border: none;
+  color: var(--app-text-muted);
+  font-size: 22px;
+  cursor: pointer;
+}
+
+.bookmark-editor-body {
+  padding: 16px;
+  overflow: auto;
+}
+
+.bookmark-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+}
+
+.bookmark-editor-span-2 {
+  grid-column: span 2;
+}
+
+.bookmark-editor-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+  font-size: 12px;
+}
+
+.bookmark-editor-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.bookmark-editor-btn.secondary {
+  background: var(--app-surface-3);
+  color: var(--app-text-secondary);
+}
+
+.bookmark-editor-btn.primary {
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
+}
+
+.bookmark-editor-btn.primary:hover {
+  background: var(--app-accent-hover);
+}
+
+.terminal-statusbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-panel-bg-subtle);
+  color: var(--app-text-muted);
+  font-size: 11px;
+}
+
+.terminal-statusbar-left,
+.terminal-statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.terminal-status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--app-text-dim);
+  box-shadow: 0 0 8px var(--app-hover);
+}
+
+.terminal-status-indicator.connecting {
+  background: var(--app-warning);
+}
+
+.terminal-status-indicator.connected {
+  background: var(--app-success);
+}
+
+.terminal-status-indicator.error,
+.terminal-status-indicator.closed {
+  background: var(--app-danger);
+}
+
+.terminal-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--app-status-pill-bg);
+  color: var(--app-status-pill-fg);
+}
+

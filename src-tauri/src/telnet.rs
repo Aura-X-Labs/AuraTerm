@@ -1,7 +1,6 @@
-use crate::{PtyExitEvent, PtyOutputEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
@@ -10,7 +9,10 @@ use tokio::task::AbortHandle;
 const INTERACTIVE_WRITE_TIMEOUT_SECS: u64 = 10;
 
 struct TelnetSession {
-    writer: mpsc::UnboundedSender<String>,
+    /// Raw bytes to write to the socket: user keystrokes plus IAC negotiation
+    /// responses produced by the reader. Carries arbitrary bytes (not just
+    /// UTF-8) because negotiation replies contain `0xFF` option bytes.
+    writer: mpsc::UnboundedSender<Vec<u8>>,
     reader_abort: AbortHandle,
     writer_abort: AbortHandle,
 }
@@ -32,45 +34,36 @@ pub async fn start_telnet_session(
         .await
         .map_err(|e| e.to_string())?;
     let (mut reader, mut writer) = stream.into_split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     let read_app = app.clone();
     let read_id = id.clone();
+    let response_tx = tx.clone();
     let reader_task = tokio::spawn(async move {
         let mut buffer = [0_u8; 4096];
         let mut decoder = crate::util::Utf8StreamDecoder::new();
+        let mut iac = crate::util::TelnetIacFilter::new();
         loop {
             match reader.read(&mut buffer).await {
                 Ok(0) => {
-                    let _ = read_app.emit(
-                        &crate::util::session_event("pty-exit", &read_id),
-                        PtyExitEvent {
-                            id: read_id.clone(),
-                            message: "Telnet connection closed".to_string(),
-                        },
-                    );
+                    crate::util::emit_pty_exit(&read_app, &read_id, "Telnet connection closed");
                     break;
                 }
                 Ok(size) => {
-                    let output = decoder.push(&buffer[..size]);
-                    if output.is_empty() {
-                        continue;
+                    // Strip IAC command sequences before decoding so option bytes
+                    // never corrupt the terminal; reply to negotiations via the
+                    // writer channel.
+                    let filtered = iac.push(&buffer[..size]);
+                    if !filtered.response.is_empty() {
+                        let _ = response_tx.send(filtered.response);
                     }
-                    let _ = read_app.emit(
-                        &crate::util::session_event("pty-output", &read_id),
-                        PtyOutputEvent {
-                            id: read_id.clone(),
-                            data: output,
-                        },
-                    );
+                    crate::util::emit_pty_output(&read_app, &read_id, &mut decoder, &filtered.data);
                 }
                 Err(error) => {
-                    let _ = read_app.emit(
-                        &crate::util::session_event("pty-exit", &read_id),
-                        PtyExitEvent {
-                            id: read_id.clone(),
-                            message: format!("Telnet read error: {}", error),
-                        },
+                    crate::util::emit_pty_exit(
+                        &read_app,
+                        &read_id,
+                        format!("Telnet read error: {}", error),
                     );
                     break;
                 }
@@ -84,29 +77,25 @@ pub async fn start_telnet_session(
         while let Some(data) = rx.recv().await {
             match tokio::time::timeout(
                 tokio::time::Duration::from_secs(INTERACTIVE_WRITE_TIMEOUT_SECS),
-                writer.write_all(data.as_bytes()),
+                writer.write_all(&data),
             ).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    let _ = write_app.emit(
-                        &crate::util::session_event("pty-exit", &write_id),
-                        PtyExitEvent {
-                            id: write_id.clone(),
-                            message: format!("Telnet write error: {}", error),
-                        },
+                    crate::util::emit_pty_exit(
+                        &write_app,
+                        &write_id,
+                        format!("Telnet write error: {}", error),
                     );
                     break;
                 }
                 Err(_) => {
-                    let _ = write_app.emit(
-                        &crate::util::session_event("pty-exit", &write_id),
-                        PtyExitEvent {
-                            id: write_id.clone(),
-                            message: format!(
-                                "Telnet write timed out after {} seconds",
-                                INTERACTIVE_WRITE_TIMEOUT_SECS
-                            ),
-                        },
+                    crate::util::emit_pty_exit(
+                        &write_app,
+                        &write_id,
+                        format!(
+                            "Telnet write timed out after {} seconds",
+                            INTERACTIVE_WRITE_TIMEOUT_SECS
+                        ),
                     );
                     break;
                 }
@@ -141,7 +130,7 @@ pub async fn write_telnet_input(
 
     session
         .writer
-        .send(data)
+        .send(data.into_bytes())
         .map_err(|_| "Failed to send Telnet input".to_string())
 }
 
