@@ -450,6 +450,18 @@
   display: block;
 }
 
+/* MultiExec: ring every visible pane that will receive broadcast keystrokes.
+   A pointer-events:none overlay keeps the terminal fully interactive. */
+.terminal-instance-shell.broadcast-target::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--app-border-accent);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 5;
+}
+
 .app-container.tab-dragging .terminal-pane-frame,
 .app-container.tab-dragging .terminal-instance-shell {
   transition: none;

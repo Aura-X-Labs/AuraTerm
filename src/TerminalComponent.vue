@@ -4,8 +4,10 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
+import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useTerminalSearch } from "./composables/useTerminalSearch";
 import { useTerminalSessionCommands } from "./composables/useTerminalSessionCommands";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
@@ -67,6 +69,9 @@ const props = defineProps<{
   session: SessionConfig;
   logPath?: string;
   settings?: AppSettings;
+  /** When true and this terminal is focused, typed input is also emitted via
+   *  `broadcastInput` so the parent can fan it out to other panes (MultiExec). */
+  broadcast?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -74,6 +79,7 @@ const emit = defineEmits<{
   sessionUpdate: [session: SessionConfig];
   sshPasswordUpdated: [];
   searchResultsChange: [results: TerminalSearchResults];
+  broadcastInput: [data: string];
 }>();
 
 function stripAnsi(value: string): string {
@@ -396,6 +402,16 @@ function sendData(text: string) {
   queueTerminalInput(data);
 }
 
+// Raw passthrough used by broadcast fan-out: write to this session exactly as
+// received, without sendData's newline append. No-op until the pty is live so
+// keystrokes aren't buffered for a not-yet-connected target pane.
+function writeInput(data: string) {
+  if (!ptyId.value) {
+    return;
+  }
+  queueTerminalInput(data);
+}
+
 function fit() {
   fitAddon?.fit();
 }
@@ -437,6 +453,7 @@ async function reconnectSshSession() {
 defineExpose<TerminalHandle>({
   saveLog,
   sendData,
+  writeInput,
   fit,
   focus,
   findNext: (text, options) => runSearch("next", text, options),
@@ -476,9 +493,23 @@ onMounted(() => {
   terminalRef.value = terminal;
   searchAddonRef.value = searchAddon;
   const unicode11Addon = new Unicode11Addon();
+  // Make URLs in terminal output clickable. window.open is unreliable inside the
+  // Tauri webview, so route the click through the shell plugin to launch the OS
+  // default browser instead.
+  const webLinksAddon = new WebLinksAddon((event, uri) => {
+    // Honor the same modifier-click convention as editors/browsers: a plain
+    // click only opens when the link is not part of a text selection gesture.
+    if (event.button !== 0) {
+      return;
+    }
+    void openExternalUrl(uri).catch((error) => {
+      console.error("failed to open link", error);
+    });
+  });
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(searchAddon);
   terminal.loadAddon(unicode11Addon);
+  terminal.loadAddon(webLinksAddon);
   terminal.open(terminalRootRef.value);
   // Activate Unicode 11 so emoji and wide characters (e.g. 💰) are treated as
   // 2 columns wide, preventing them from overlapping the following character.
@@ -580,6 +611,12 @@ onMounted(() => {
       && data === "\x08";
     const normalizedData = shouldNormalizeBackspace ? "\x7f" : data;
     queueTerminalInput(normalizedData);
+    // MultiExec: when broadcasting, the focused terminal is the source — hand the
+    // keystroke to the parent to fan out to the other panes. writeInput on the
+    // targets does not re-trigger onData, so there is no feedback loop.
+    if (props.broadcast && props.isFocused) {
+      emit("broadcastInput", normalizedData);
+    }
   });
 
   const resizeDisposable = terminal.onResize(({ cols, rows }) => {
