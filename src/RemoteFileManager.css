@@ -393,3 +393,108 @@
     grid-template-columns: minmax(0, 1.6fr) 72px 104px;
   }
 }
+
+.remote-file-manager-resume {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--app-text-muted);
+  font-size: 11px;
+}
+
+.remote-file-manager-list.dragging-files {
+  position: relative;
+  outline: 2px dashed var(--app-accent);
+  outline-offset: -8px;
+}
+
+.remote-file-manager-drop-hint {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 4px;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--app-accent-soft-strong);
+  color: var(--app-text);
+  text-align: center;
+  font-size: 12px;
+}
+
+.remote-file-editor-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.remote-file-editor-toolbar strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.remote-file-editor-toolbar span {
+  color: var(--app-warning, #d0b26f);
+  font-size: 10px;
+}
+
+.remote-file-editor-toolbar button {
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  background: var(--app-surface-2);
+  color: var(--app-text);
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.remote-file-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.remote-file-editor-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  border: 0;
+  outline: 0;
+  padding: 12px;
+  background: var(--app-input-bg);
+  color: var(--app-text);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.remote-file-manager-queue {
+  max-height: 110px;
+  overflow: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.remote-file-manager-queue-title {
+  margin-bottom: 5px;
+  color: var(--app-text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.remote-file-manager-queue-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+.remote-file-manager-queue-item.completed { color: var(--app-success); }
+.remote-file-manager-queue-item.failed { color: var(--app-danger); }

@@ -8,6 +8,7 @@ import {
   normalizeAppSettings,
   TERMINAL_THEME_PRESETS,
   type AppSettings,
+  type OutputRule,
   type TerminalTheme,
   type UiThemeMode,
 } from "./settings";
@@ -23,7 +24,7 @@ const emit = defineEmits<{
 
 const settings = ref<AppSettings>(normalizeAppSettings(props.initial));
 
-const activeTab = ref<"terminal" | "keyboard" | "theme" | "security">("terminal");
+const activeTab = ref<"terminal" | "keyboard" | "theme" | "automation" | "security">("terminal");
 
 type TrustedSshHostKeyEntry = {
   host: string;
@@ -151,6 +152,55 @@ function inputValue(event: Event) {
 
 function inputChecked(event: Event) {
   return (event.target as HTMLInputElement).checked;
+}
+
+function addOutputRule() {
+  const next: OutputRule = {
+    id: crypto.randomUUID(),
+    name: "New rule",
+    enabled: true,
+    pattern: "ERROR",
+    isRegex: false,
+    caseSensitive: false,
+    scope: "global",
+    hosts: [],
+    foreground: "#ff6b6b",
+    bell: false,
+    notify: false,
+    cooldownMs: 1000,
+  };
+  update("outputRules", [...settings.value.outputRules, next]);
+}
+
+function updateOutputRule<K extends keyof OutputRule>(id: string, key: K, value: OutputRule[K]) {
+  update("outputRules", settings.value.outputRules.map((rule) => (
+    rule.id === id ? { ...rule, [key]: value } : rule
+  )));
+}
+
+function removeOutputRule(id: string) {
+  update("outputRules", settings.value.outputRules.filter((rule) => rule.id !== id));
+}
+
+function parseHostPatterns(value: string) {
+  return value.split(",").map((host) => host.trim()).filter(Boolean);
+}
+
+function outputRulePatternError(rule: OutputRule) {
+  if (!rule.pattern.trim()) return "Pattern is required.";
+  if (!rule.isRegex) return "";
+  try {
+    new RegExp(rule.pattern);
+    return "";
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function enableDesktopNotifications() {
+  if ("Notification" in window) {
+    await Notification.requestPermission();
+  }
 }
 
 function handleShellPresetChange(event: Event) {
@@ -570,6 +620,11 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           @click="activeTab = 'theme'"
         >Theme</button>
         <button
+          :class="['settings-tab', { 'settings-tab--active': activeTab === 'automation' }]"
+          type="button"
+          @click="activeTab = 'automation'"
+        >Rules</button>
+        <button
           :class="['settings-tab', { 'settings-tab--active': activeTab === 'security' }]"
           type="button"
           @click="activeTab = 'security'"
@@ -668,13 +723,26 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           <label class="settings-field settings-field--toggle">
             <span>
               <strong>Show Input Bar</strong>
-              <small>Show input bar and quick buttons below the terminal</small>
+              <small>Show input bar and snippet toolbars below the terminal</small>
             </span>
             <input
               type="checkbox"
               class="settings-toggle"
               :checked="settings.showInputBar"
               @change="update('showInputBar', inputChecked($event))"
+            >
+          </label>
+
+          <label class="settings-field settings-field--toggle">
+            <span>
+              <strong>Open SFTP after SSH connects</strong>
+              <small>Automatically reveal Remote Files for the active SSH session</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :checked="settings.autoOpenSftp"
+              @change="update('autoOpenSftp', inputChecked($event))"
             >
           </label>
 
@@ -855,6 +923,77 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                     spellcheck="false"
                   >
                 </div>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Shared highlight / trigger rules -->
+        <div v-show="activeTab === 'automation'" class="settings-section settings-rules-section">
+          <div class="settings-rules-header">
+            <div>
+              <strong>Output Rules</strong>
+              <small>One matcher powers highlighting, alerts, and automatic responses.</small>
+            </div>
+            <div class="settings-rules-header-actions">
+              <button class="settings-btn-secondary" type="button" @click="void enableDesktopNotifications()">Enable notifications</button>
+              <button class="settings-btn-primary" type="button" @click="addOutputRule">+ Add rule</button>
+            </div>
+          </div>
+
+          <div v-if="settings.outputRules.length === 0" class="settings-field-full-hint">
+            No output rules yet. Add one to highlight keywords or react to terminal output.
+          </div>
+
+          <div v-for="rule in settings.outputRules" :key="rule.id" class="settings-rule-card">
+            <div class="settings-rule-card-title">
+              <label class="settings-rule-enabled">
+                <input type="checkbox" :checked="rule.enabled" @change="updateOutputRule(rule.id, 'enabled', inputChecked($event))">
+                <input type="text" :value="rule.name" placeholder="Rule name" @input="updateOutputRule(rule.id, 'name', inputValue($event))">
+              </label>
+              <button class="settings-btn-danger" type="button" @click="removeOutputRule(rule.id)">Delete</button>
+            </div>
+            <div class="settings-rule-grid">
+              <label class="settings-field settings-field--stacked settings-rule-pattern">
+                <span>Pattern</span>
+                <input type="text" :value="rule.pattern" autocapitalize="none" autocorrect="off" spellcheck="false" @input="updateOutputRule(rule.id, 'pattern', inputValue($event))">
+                <small v-if="outputRulePatternError(rule)" class="settings-rule-error">{{ outputRulePatternError(rule) }}</small>
+              </label>
+              <label class="settings-field settings-field--stacked">
+                <span>Scope</span>
+                <select :value="rule.scope" @change="updateOutputRule(rule.id, 'scope', inputValue($event) === 'hosts' ? 'hosts' : 'global')">
+                  <option value="global">All sessions</option>
+                  <option value="hosts">SSH hosts</option>
+                </select>
+              </label>
+              <label v-if="rule.scope === 'hosts'" class="settings-field settings-field--stacked settings-rule-hosts">
+                <span>Host patterns (comma separated)</span>
+                <input type="text" :value="rule.hosts.join(', ')" placeholder="prod-*, router.example.com" @input="updateOutputRule(rule.id, 'hosts', parseHostPatterns(inputValue($event)))">
+              </label>
+            </div>
+            <div class="settings-rule-options">
+              <label><input type="checkbox" :checked="rule.isRegex" @change="updateOutputRule(rule.id, 'isRegex', inputChecked($event))"> Regular expression</label>
+              <label><input type="checkbox" :checked="rule.caseSensitive" @change="updateOutputRule(rule.id, 'caseSensitive', inputChecked($event))"> Case sensitive</label>
+              <label><input type="checkbox" :checked="Boolean(rule.foreground || rule.background)" @change="updateOutputRule(rule.id, 'foreground', inputChecked($event) ? (rule.foreground || '#ff6b6b') : undefined); !inputChecked($event) && updateOutputRule(rule.id, 'background', undefined)"> Highlight</label>
+              <label><input type="checkbox" :checked="rule.bell" @change="updateOutputRule(rule.id, 'bell', inputChecked($event))"> Bell</label>
+              <label><input type="checkbox" :checked="rule.notify" @change="updateOutputRule(rule.id, 'notify', inputChecked($event))"> Notification</label>
+            </div>
+            <div class="settings-rule-grid">
+              <label class="settings-field settings-field--stacked">
+                <span>Text color</span>
+                <input type="color" :disabled="!rule.foreground && !rule.background" :value="rule.foreground || '#ff6b6b'" @input="updateOutputRule(rule.id, 'foreground', inputValue($event))">
+              </label>
+              <label class="settings-field settings-field--stacked">
+                <span>Background (optional)</span>
+                <input type="text" :value="rule.background || ''" placeholder="#3b2020" @input="updateOutputRule(rule.id, 'background', inputValue($event) || undefined)">
+              </label>
+              <label class="settings-field settings-field--stacked settings-rule-response">
+                <span>Automatic response (optional, $1 uses capture group)</span>
+                <input type="text" :value="rule.autoResponse || ''" placeholder="ack $1\n" @input="updateOutputRule(rule.id, 'autoResponse', inputValue($event) || undefined)">
+              </label>
+              <label class="settings-field settings-field--stacked">
+                <span>Cooldown (ms)</span>
+                <input type="number" min="0" :value="rule.cooldownMs" @input="updateOutputRule(rule.id, 'cooldownMs', Math.max(0, Number(inputValue($event)) || 0))">
               </label>
             </div>
           </div>

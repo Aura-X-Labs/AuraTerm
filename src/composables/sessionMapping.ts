@@ -20,6 +20,7 @@ export function buildSessionFromConnectResult(result: ConnectResult, savedConnec
       sshConfig: {
         ...sshConfig,
         savedConnectionId,
+        savedConnectionGroup: result.saveGroup,
       },
     };
   }
@@ -120,6 +121,7 @@ export function buildSessionFromSavedConnection(connection: SavedConnection): Se
       password: connection.password,
       privateKey: connection.authType === "key" ? connection.privateKey : undefined,
       savedConnectionId: connection.id,
+      savedConnectionGroup: connection.group,
       autoReconnect: isReconnectEnabled(reconnectType),
       reconnectType,
     },

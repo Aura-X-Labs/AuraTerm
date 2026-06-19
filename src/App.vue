@@ -806,10 +806,14 @@ function rememberSerialConfig(serialConfig: SerialConfig) {
   });
 }
 
-function sendToActiveTerminal(text: string) {
+function sendToActiveTerminal(text: string, raw = false) {
   const handle = termRefs.get(activeTabId.value);
   if (handle) {
-    handle.sendData(text);
+    if (raw) {
+      handle.writeInput(text);
+    } else {
+      handle.sendData(text);
+    }
   }
 }
 
@@ -828,9 +832,11 @@ function addToInputHistory(text: string) {
   });
 }
 
-function handleInputSend(text: string) {
-  addToInputHistory(text.replace(/\n$/, '')); // Remove trailing newline for history
-  sendToActiveTerminal(text);
+function handleInputSend(text: string, raw = false) {
+  if (!raw) {
+    addToInputHistory(text.replace(/\n$/, '')); // Remove trailing newline for history
+  }
+  sendToActiveTerminal(text, raw);
 }
 
 async function handleButtonsChange(buttons: QuickButton[]) {
@@ -1309,6 +1315,9 @@ function handleSshConnectedForTab(tabId: string) {
   const configured = tabTunnels.value[tabId];
   if (configured?.length) {
     void tunnels.autoStartTunnels(tabId, configured);
+  }
+  if (settingsRef.value.autoOpenSftp && activeTabId.value === tabId) {
+    showRemoteFileManager.value = true;
   }
 }
 
@@ -2017,6 +2026,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           v-if="settings.showInputBar"
           :quick-buttons="settings.quickButtons"
           :input-history="settings.inputHistory"
+          :active-host="activeSshConfig?.host"
+          :session-group="activeSshConfig?.savedConnectionGroup"
           @send="handleInputSend"
           @buttons-change="handleButtonsChange"
           @resize="fitActiveTerminal"

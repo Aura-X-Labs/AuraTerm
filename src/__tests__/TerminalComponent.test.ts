@@ -262,4 +262,48 @@ describe("TerminalComponent", () => {
 
     wrapper.unmount();
   });
+
+  it("uses one output rule for highlighting and automatic response", async () => {
+    const session: SessionConfig = {
+      protocol: "ssh",
+      sshConfig: { host: "prod-01", port: 22, user: "ops", reconnectType: "manual" },
+    };
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      outputRules: [{
+        id: "ready",
+        name: "Ready",
+        enabled: true,
+        pattern: "READY (\\d+)",
+        isRegex: true,
+        caseSensitive: true,
+        scope: "global" as const,
+        hosts: [],
+        foreground: "#00ff00",
+        bell: false,
+        notify: false,
+        autoResponse: "continue $1\\n",
+        cooldownMs: 1000,
+      }],
+    };
+
+    const wrapper = mount(TerminalComponent, {
+      props: {
+        sessionId: "ssh-session-rule",
+        isVisible: true,
+        isFocused: true,
+        session,
+        settings,
+      },
+    });
+    await flushPromises();
+
+    mockState.emitEvent("pty-output:ssh-session-rule", { id: "ssh-session-rule", data: "READY 7\r\n" });
+    await flushPromises();
+
+    const terminal = mockState.terminals[0];
+    expect(terminal.written.join("")).toContain("\x1b[38;2;0;255;0mREADY 7\x1b[0m");
+    expect(mockState.writeSessionInput).toHaveBeenCalledWith("ssh-session-rule", "continue 7\n", session);
+    wrapper.unmount();
+  });
 });

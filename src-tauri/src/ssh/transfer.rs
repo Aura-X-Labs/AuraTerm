@@ -9,19 +9,22 @@
 //! - SFTP session bootstrap (`open_sftp_session`).
 //! - Low-level SCP primitives (`read_scp_line`, `read_scp_ack`, `scp_upload`,
 //!   `scp_download_to_path`).
-//! - Five Tauri commands exposed to the frontend:
+//! - Remote browsing, editing, and transfer Tauri commands exposed to the frontend:
 //!   - `ssh_list_remote_dir`
 //!   - `ssh_create_remote_dir`
 //!   - `ssh_remove_remote_entry`
+//!   - `ssh_read_remote_text_file`
+//!   - `ssh_write_remote_text_file`
 //!   - `ssh_upload_file`
 //!   - `ssh_download_file`
 
 use russh::client;
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::OpenFlags;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, SeekFrom};
 
 use super::types::{
     RemoteDirectoryListing, RemoteFileEntry, SshTransferDirection, SshTransferMode,
@@ -31,6 +34,8 @@ use super::{
     open_ssh_channel, shell_escape, SshState, SSH_TRANSFER_PROGRESS_EVENT,
     TRANSFER_CHUNK_SIZE, TRANSFER_PROGRESS_EMIT_STEP,
 };
+
+const REMOTE_TEXT_FILE_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 pub(super) fn remote_parent_path(path: &str) -> Option<String> {
     if path == "/" {
@@ -567,6 +572,76 @@ pub async fn ssh_remove_remote_entry(
 }
 
 #[tauri::command]
+pub async fn ssh_read_remote_text_file(
+    state: State<'_, SshState>,
+    id: String,
+    path: String,
+) -> Result<String, String> {
+    let sftp = open_sftp_session(state.inner(), &id).await?;
+    let metadata = sftp
+        .metadata(path.clone())
+        .await
+        .map_err(|error| format!("Failed to inspect remote file: {error}"))?;
+    if metadata.len() > REMOTE_TEXT_FILE_MAX_BYTES as u64 {
+        return Err(format!(
+            "Remote quick edit supports files up to {} MiB",
+            REMOTE_TEXT_FILE_MAX_BYTES / 1024 / 1024
+        ));
+    }
+
+    let remote_file = sftp
+        .open(path)
+        .await
+        .map_err(|error| format!("Failed to open remote file: {error}"))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    remote_file
+        .take((REMOTE_TEXT_FILE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| format!("Failed to read remote file: {error}"))?;
+    let _ = sftp.close().await;
+
+    if bytes.len() > REMOTE_TEXT_FILE_MAX_BYTES {
+        return Err("Remote file grew beyond the quick-edit size limit while reading".to_string());
+    }
+    if bytes.contains(&0) {
+        return Err("Binary files cannot be opened in remote quick edit".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "Remote quick edit only supports UTF-8 text".to_string())
+}
+
+#[tauri::command]
+pub async fn ssh_write_remote_text_file(
+    state: State<'_, SshState>,
+    id: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    if content.len() > REMOTE_TEXT_FILE_MAX_BYTES {
+        return Err(format!(
+            "Remote quick edit supports files up to {} MiB",
+            REMOTE_TEXT_FILE_MAX_BYTES / 1024 / 1024
+        ));
+    }
+
+    let sftp = open_sftp_session(state.inner(), &id).await?;
+    let mut remote_file = sftp
+        .create(path)
+        .await
+        .map_err(|error| format!("Failed to open remote file for writing: {error}"))?;
+    remote_file
+        .write_all(content.as_bytes())
+        .await
+        .map_err(|error| format!("Failed to write remote file: {error}"))?;
+    remote_file
+        .shutdown()
+        .await
+        .map_err(|error| format!("Failed to finalize remote file: {error}"))?;
+    let _ = sftp.close().await;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn ssh_upload_file(
     app: AppHandle,
     state: State<'_, SshState>,
@@ -575,6 +650,7 @@ pub async fn ssh_upload_file(
     file_name: String,
     data: Vec<u8>,
     mode: SshTransferMode,
+    resume: bool,
 ) -> Result<(), String> {
     let file_name = Path::new(&file_name)
         .file_name()
@@ -601,14 +677,32 @@ pub async fn ssh_upload_file(
     match mode {
         SshTransferMode::Sftp => {
             let sftp = open_sftp_session(state.inner(), &id).await?;
-            let mut remote_file = sftp
-                .create(remote_path.clone())
-                .await
-                .map_err(|error| format!("Failed to create remote file: {error}"))?;
-            let mut transferred_bytes = 0_u64;
+            let resume_offset = if resume {
+                sftp.metadata(remote_path.clone()).await.map(|metadata| metadata.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            if resume_offset > total_bytes {
+                return Err("Remote file is larger than the local upload; disable resume to overwrite it".to_string());
+            }
+            let mut remote_file = if resume_offset > 0 {
+                let mut file = sftp
+                    .open_with_flags(remote_path.clone(), OpenFlags::CREATE | OpenFlags::WRITE)
+                    .await
+                    .map_err(|error| format!("Failed to resume remote file: {error}"))?;
+                file.seek(SeekFrom::Start(resume_offset))
+                    .await
+                    .map_err(|error| format!("Failed to seek remote file: {error}"))?;
+                file
+            } else {
+                sftp.create(remote_path.clone())
+                    .await
+                    .map_err(|error| format!("Failed to create remote file: {error}"))?
+            };
+            let mut transferred_bytes = resume_offset;
             let mut last_reported_bytes = 0_u64;
 
-            for chunk in data.chunks(TRANSFER_CHUNK_SIZE) {
+            for chunk in data[resume_offset as usize..].chunks(TRANSFER_CHUNK_SIZE) {
                 remote_file
                     .write_all(chunk)
                     .await
@@ -674,6 +768,7 @@ pub async fn ssh_download_file(
     local_dir: Option<String>,
     expected_size: Option<u64>,
     mode: SshTransferMode,
+    resume: bool,
 ) -> Result<String, String> {
     let file_name = file_name_from_remote_path(&remote_path)?;
     let destination_dir = expand_local_path(local_dir.as_deref());
@@ -681,7 +776,11 @@ pub async fn ssh_download_file(
         .await
         .map_err(|error| format!("Failed to create download directory: {error}"))?;
 
-    let destination_path = unique_local_path(&destination_dir, &file_name);
+    let destination_path = if resume {
+        destination_dir.join(&file_name)
+    } else {
+        unique_local_path(&destination_dir, &file_name)
+    };
     let total_bytes = expected_size.filter(|value| *value > 0);
 
     emit_transfer_progress(
@@ -704,11 +803,29 @@ pub async fn ssh_download_file(
                 .open(remote_path.clone())
                 .await
                 .map_err(|error| format!("Failed to open remote file: {error}"))?;
-            let mut local_file = fs::File::create(&destination_path)
+            let resume_offset = if resume {
+                fs::metadata(&destination_path).await.map(|metadata| metadata.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            if total_bytes.is_some_and(|total| resume_offset > total) {
+                return Err("Local file is larger than the remote download; disable resume to create a new copy".to_string());
+            }
+            if resume_offset > 0 {
+                remote_file.seek(SeekFrom::Start(resume_offset))
+                    .await
+                    .map_err(|error| format!("Failed to seek remote file: {error}"))?;
+            }
+            let mut local_file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(resume_offset > 0)
+                .truncate(resume_offset == 0)
+                .open(&destination_path)
                 .await
                 .map_err(|error| format!("Failed to create local file: {error}"))?;
             let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
-            let mut transferred_bytes = 0_u64;
+            let mut transferred_bytes = resume_offset;
             let mut last_reported_bytes = 0_u64;
 
             loop {
@@ -745,6 +862,9 @@ pub async fn ssh_download_file(
             transferred_bytes
         }
         SshTransferMode::Scp => {
+            if resume {
+                return Err("Resume is available for SFTP transfers only".to_string());
+            }
             scp_download_to_path(
                 &app,
                 state.inner(),

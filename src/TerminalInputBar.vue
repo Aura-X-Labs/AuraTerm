@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import type { QuickButton } from "./settings";
+import { buildSnippetPayload, snippetApplies, snippetVariables } from "./snippets";
 
 const props = defineProps<{
   quickButtons: QuickButton[];
   inputHistory: string[];
+  activeHost?: string;
+  sessionGroup?: string;
 }>();
 
 const emit = defineEmits<{
-  send: [text: string];
+  send: [text: string, raw?: boolean];
   buttonsChange: [buttons: QuickButton[]];
   resize: [];
 }>();
@@ -22,6 +25,7 @@ const editButtons = ref<QuickButton[]>([]);
 const selectedButtonId = ref<string | null>(null);
 const textareaH = ref(DEFAULT_TEXTAREA_H);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const selectedToolbar = ref("Default");
 let dragStartY = 0;
 let dragStartH = 0;
 
@@ -67,11 +71,29 @@ function handleResizeDblClick() {
   emit("resize");
 }
 
-function doSend(payload: string) {
-  if (!payload.trim()) {
+const availableToolbars = computed(() => {
+  const names = props.quickButtons
+    .filter((button) => snippetApplies(button, props.activeHost, props.sessionGroup))
+    .map((button) => button.toolbar || "Default");
+  return [...new Set(names)];
+});
+
+const visibleButtons = computed(() => props.quickButtons.filter((button) => (
+  snippetApplies(button, props.activeHost, props.sessionGroup)
+  && (button.toolbar || "Default") === selectedToolbar.value
+)));
+
+watch(availableToolbars, (toolbars) => {
+  if (!toolbars.includes(selectedToolbar.value)) {
+    selectedToolbar.value = toolbars[0] || "Default";
+  }
+}, { immediate: true });
+
+function doSend(payload: string, raw = false) {
+  if (raw ? payload.length === 0 : !payload.trim()) {
     return;
   }
-  emit("send", payload.endsWith("\n") ? payload : `${payload}\n`);
+  emit("send", raw ? payload : (payload.endsWith("\n") ? payload : `${payload}\n`), raw);
 }
 
 function navigateHistory(direction: 1 | -1) {
@@ -155,7 +177,14 @@ function handleKeyDown(event: KeyboardEvent) {
 }
 
 function handleQuickButton(button: QuickButton) {
-  doSend(button.command);
+  const values: Record<string, string> = {};
+  for (const variable of snippetVariables(button.command)) {
+    const value = window.prompt(`Value for {{${variable}}}`);
+    if (value === null) return;
+    values[variable] = value;
+  }
+  const payload = buildSnippetPayload(button, values);
+  doSend(payload, button.sendMode === "raw");
   textareaRef.value?.focus();
 }
 
@@ -181,14 +210,27 @@ function saveEditor() {
 
 function addButton() {
   const newId = crypto.randomUUID();
-  editButtons.value = [...editButtons.value, { id: newId, label: "", command: "" }];
+  editButtons.value = [...editButtons.value, {
+    id: newId,
+    label: "",
+    command: "",
+    toolbar: selectedToolbar.value || "Default",
+    group: "General",
+    hosts: [],
+    sessionGroups: [],
+    sendMode: "line",
+  }];
   selectedButtonId.value = newId;
 }
 
-function updateButton(id: string, field: "label" | "command", value: string) {
+function updateButton<K extends keyof QuickButton>(id: string, field: K, value: QuickButton[K]) {
   editButtons.value = editButtons.value.map((button) => (
     button.id === id ? { ...button, [field]: value } : button
   ));
+}
+
+function parseScopes(value: string) {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function deleteButton(id: string) {
@@ -236,19 +278,31 @@ function closeEditor() {
     </div>
 
     <div class="quick-buttons-bar">
-      <span v-if="quickButtons.length === 0" class="quick-buttons-hint">
-        No quick buttons yet. Click Edit to add.
-      </span>
-      <button
-        v-for="button in quickButtons"
-        :key="button.id"
-        class="quick-btn"
-        type="button"
-        :title="button.command"
-        @click="handleQuickButton(button)"
+      <select
+        v-if="availableToolbars.length > 1"
+        v-model="selectedToolbar"
+        class="quick-toolbar-select"
+        title="Snippet toolbar"
       >
-        {{ button.label.trim() || button.command.slice(0, 20) }}
-      </button>
+        <option v-for="toolbar in availableToolbars" :key="toolbar" :value="toolbar">{{ toolbar }}</option>
+      </select>
+      <span v-if="visibleButtons.length === 0" class="quick-buttons-hint">
+        No snippets for this session. Click Edit to add one.
+      </span>
+      <template v-for="(button, index) in visibleButtons" :key="button.id">
+        <span
+          v-if="index === 0 || (visibleButtons[index - 1]?.group || 'General') !== (button.group || 'General')"
+          class="quick-button-group-label"
+        >{{ button.group || 'General' }}</span>
+        <button
+          class="quick-btn"
+          type="button"
+          :title="`${button.command}${button.sendMode === 'raw' ? ' (raw)' : ''}`"
+          @click="handleQuickButton(button)"
+        >
+          {{ button.label.trim() || button.command.slice(0, 20) }}
+        </button>
+      </template>
 
       <button class="quick-btn quick-btn--edit" type="button" title="Edit quick buttons" @click="openEditor">
         ✎ Edit
@@ -274,7 +328,7 @@ function closeEditor() {
     <div v-if="showEditor" class="quick-btn-editor-overlay" @click="closeEditor">
       <div class="quick-btn-editor" @click.stop>
         <div class="quick-btn-editor-header">
-          <span>Edit Quick Buttons</span>
+          <span>Snippet Library</span>
           <button type="button" class="quick-btn-editor-close" @click="closeEditor">×</button>
         </div>
 
@@ -326,7 +380,7 @@ function closeEditor() {
                   >
                 </div>
                 <div class="quick-btn-editor-field quick-btn-editor-field--command">
-                  <label>Command</label>
+                  <label>Command · use &#123;&#123;variable&#125;&#125;, ^C, \e, \x1b</label>
                   <textarea
                     class="quick-btn-editor-input quick-btn-editor-input--command"
                     placeholder="Command to send (e.g. ls -la)"
@@ -336,6 +390,31 @@ function closeEditor() {
                     spellcheck="false"
                     @input="updateButton(button.id, 'command', inputValue($event))"
                   />
+                </div>
+                <div class="quick-btn-editor-fields-grid">
+                  <div class="quick-btn-editor-field">
+                    <label>Toolbar</label>
+                    <input class="quick-btn-editor-input" type="text" :value="button.toolbar || 'Default'" @input="updateButton(button.id, 'toolbar', inputValue($event))">
+                  </div>
+                  <div class="quick-btn-editor-field">
+                    <label>Group</label>
+                    <input class="quick-btn-editor-input" type="text" :value="button.group || 'General'" @input="updateButton(button.id, 'group', inputValue($event))">
+                  </div>
+                  <div class="quick-btn-editor-field">
+                    <label>SSH hosts (comma separated)</label>
+                    <input class="quick-btn-editor-input" type="text" :value="(button.hosts || []).join(', ')" placeholder="All hosts" @input="updateButton(button.id, 'hosts', parseScopes(inputValue($event)))">
+                  </div>
+                  <div class="quick-btn-editor-field">
+                    <label>Connection groups</label>
+                    <input class="quick-btn-editor-input" type="text" :value="(button.sessionGroups || []).join(', ')" placeholder="All groups" @input="updateButton(button.id, 'sessionGroups', parseScopes(inputValue($event)))">
+                  </div>
+                  <div class="quick-btn-editor-field">
+                    <label>Send mode</label>
+                    <select class="quick-btn-editor-input" :value="button.sendMode || 'line'" @change="updateButton(button.id, 'sendMode', inputValue($event) === 'raw' ? 'raw' : 'line')">
+                      <option value="line">Command + Enter</option>
+                      <option value="raw">Raw / control characters</option>
+                    </select>
+                  </div>
                 </div>
               </div>
             </template>

@@ -60,6 +60,46 @@ pub struct QuickButton {
     pub id: String,
     pub label: String,
     pub command: String,
+    #[serde(default)]
+    pub toolbar: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub session_groups: Vec<String>,
+    #[serde(default)]
+    pub send_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputRule {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub pattern: String,
+    #[serde(default = "default_true")]
+    pub is_regex: bool,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_global_scope")]
+    pub scope: String,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub foreground: Option<String>,
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub bell: bool,
+    #[serde(default)]
+    pub notify: bool,
+    #[serde(default)]
+    pub auto_response: Option<String>,
+    #[serde(default = "default_rule_cooldown")]
+    pub cooldown_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +166,12 @@ pub struct Settings {
     /// Quick-action buttons shown below the terminal
     #[serde(default)]
     pub quick_buttons: Vec<QuickButton>,
+    /// Shared output highlight and trigger rules.
+    #[serde(default)]
+    pub output_rules: Vec<OutputRule>,
+    /// Automatically open the SFTP browser for the active SSH session.
+    #[serde(default)]
+    pub auto_open_sftp: bool,
     /// Most recently used serial connection parameters
     #[serde(default)]
     pub last_serial_config: Option<SerialHistoryItem>,
@@ -160,6 +206,8 @@ pub struct Settings {
 }
 
 fn default_true() -> bool { true }
+fn default_global_scope() -> String { "global".to_string() }
+fn default_rule_cooldown() -> u64 { 1000 }
 fn default_log_save_path() -> String { "~/AuraTerm/logs".to_string() }
 fn default_log_file_name_template() -> String { "{session}_{timestamp}".to_string() }
 
@@ -181,6 +229,8 @@ impl Default for Settings {
             middle_click_paste: true,
             show_input_bar: true,
             quick_buttons: vec![],
+            output_rules: vec![],
+            auto_open_sftp: false,
             last_serial_config: None,
             recent_serial_configs: vec![],
             input_history: vec![],
