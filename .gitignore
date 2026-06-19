@@ -46,3 +46,7 @@ coverage/
 .vitest-cache/
 .vitest-reports/
 *.timestamp-*.mjs
+
+plans/*
+
+releases/*
