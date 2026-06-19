@@ -98,6 +98,26 @@
   font-style: italic;
 }
 
+.quick-toolbar-select {
+  flex-shrink: 0;
+  height: 22px;
+  max-width: 150px;
+  background: var(--app-input-bg);
+  color: var(--app-text-secondary);
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.quick-button-group-label {
+  flex-shrink: 0;
+  padding-left: 5px;
+  color: var(--app-text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .quick-btn {
   flex-shrink: 0;
   padding: 2px 10px;
@@ -328,6 +348,12 @@
   flex-direction: column;
   gap: 16px;
   height: 100%;
+}
+
+.quick-btn-editor-fields-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 
 .quick-btn-editor-field {

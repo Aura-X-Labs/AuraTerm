@@ -40,6 +40,7 @@ export interface SshConfig {
   password?: string;
   privateKey?: string;
   savedConnectionId?: string;
+  savedConnectionGroup?: string;
   /** Legacy compatibility field; reconnect behavior is driven by reconnectType */
   autoReconnect?: boolean;
   /** Reconnect behavior for SSH sessions */

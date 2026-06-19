@@ -11,6 +11,8 @@ import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useTerminalSearch } from "./composables/useTerminalSearch";
 import { useTerminalSessionCommands } from "./composables/useTerminalSessionCommands";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
+import { OutputRuleEngine } from "./outputRules";
+import { decodeControlCharacters } from "./snippets";
 import type {
   SerialConnectionState,
   SessionConfig,
@@ -189,6 +191,7 @@ let logBuffer = "";
 let pendingLogBuffer = "";
 let pendingLogPath: string | null = null;
 let pendingLogTimer: number | null = null;
+const outputRuleEngine = new OutputRuleEngine();
 
 const LOG_FLUSH_INTERVAL_MS = 180;
 const LOG_FLUSH_MAX_CHUNK = 4096;
@@ -724,6 +727,7 @@ onMounted(() => {
 
       flushPendingLog(true);
       logBuffer = "";
+      outputRuleEngine.reset();
       if (logPathRef.value) {
         const trimmedPath = logPathRef.value.trim();
         const resolvedPath = resolveLogPathPlaceholders(trimmedPath);
@@ -740,7 +744,32 @@ onMounted(() => {
         if (!terminal) {
           return;
         }
-        terminal.write(event.payload.data);
+        const host = activeSessionRef.value.protocol === "ssh"
+          ? activeSessionRef.value.sshConfig.host
+          : undefined;
+        const processed = outputRuleEngine.process(
+          event.payload.data,
+          settingsRef.value.outputRules,
+          host,
+        );
+        terminal.write(processed.rendered);
+        for (const match of processed.matches) {
+          if (match.rule.bell) {
+            terminal.write("\x07");
+          }
+          if (match.rule.notify && "Notification" in window && Notification.permission === "granted") {
+            new Notification(`AuraTerm: ${match.rule.name}`, {
+              body: `${host ? `${host}: ` : ""}${match.text}`,
+            });
+          }
+          if (match.response && ptyId.value) {
+            void writeSessionInput(
+              ptyId.value,
+              decodeControlCharacters(match.response),
+              activeSessionRef.value,
+            );
+          }
+        }
         logBuffer += event.payload.data;
         if (logBuffer.length > SAVED_LOG_MAX_CHARS + SAVED_LOG_TRIM_SLACK) {
           // Keep only the most recent window; drop the oldest output.

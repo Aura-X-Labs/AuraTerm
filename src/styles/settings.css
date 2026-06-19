@@ -547,3 +547,74 @@
 }
 
 
+.settings-rules-section {
+  gap: 14px;
+}
+
+.settings-rules-header,
+.settings-rule-card-title,
+.settings-rules-header-actions,
+.settings-rule-options {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-rule-error {
+  color: var(--app-danger);
+  font-size: 11px;
+}
+
+.settings-rules-header,
+.settings-rule-card-title {
+  justify-content: space-between;
+}
+
+.settings-rules-header small {
+  display: block;
+  margin-top: 4px;
+  color: var(--app-text-dim);
+}
+
+.settings-rule-card {
+  padding: 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 7px;
+  background: var(--app-surface-1);
+}
+
+.settings-rule-card + .settings-rule-card {
+  margin-top: 10px;
+}
+
+.settings-rule-enabled {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.settings-rule-enabled input[type="text"] {
+  flex: 1;
+  font-weight: 600;
+}
+
+.settings-rule-grid {
+  display: grid;
+  grid-template-columns: minmax(110px, 2fr) minmax(110px, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.settings-rule-pattern,
+.settings-rule-hosts,
+.settings-rule-response {
+  grid-column: 1 / -1;
+}
+
+.settings-rule-options {
+  flex-wrap: wrap;
+  margin-top: 10px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}

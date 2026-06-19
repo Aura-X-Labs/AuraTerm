@@ -19,6 +19,8 @@ const currentPath = ref("");
 const parentPath = ref<string | null>(null);
 const selectedPath = ref<string | null>(null);
 const transferMode = ref<RemoteTransferMode>("sftp");
+// Resume assumes the existing file is a prefix of the selected file, so keep it opt-in.
+const resumeTransfers = ref(false);
 const downloadDirectory = ref("~/AuraTerm/downloads");
 const loading = ref(false);
 const busy = ref(false);
@@ -26,11 +28,21 @@ const errorMessage = ref("");
 const statusMessage = ref("");
 const uploadInputRef = ref<HTMLInputElement | null>(null);
 const transfer = ref<RemoteTransferProgress | null>(null);
+type UploadQueueItem = { id: string; name: string; status: "waiting" | "active" | "completed" | "failed" };
+const uploadQueue = ref<UploadQueueItem[]>([]);
+const draggingFiles = ref(false);
+const editorPath = ref<string | null>(null);
+const editorName = ref("");
+const editorContent = ref("");
+const editorOriginal = ref("");
+const editorLoading = ref(false);
+const editorSaving = ref(false);
 const cleanupFns: UnlistenFn[] = [];
 
 const selectedEntry = computed(() => (
   entries.value.find((entry: RemoteFileEntry) => entry.path === selectedPath.value) ?? null
 ));
+const editorDirty = computed(() => editorContent.value !== editorOriginal.value);
 
 const breadcrumbs = computed(() => {
   if (!currentPath.value) {
@@ -241,10 +253,14 @@ function selectEntry(entry: RemoteFileEntry) {
 }
 
 function openEntry(entry: RemoteFileEntry) {
-  if (!entry.isDir || busy.value) {
+  if (busy.value) {
     return;
   }
-  void loadDirectory(entry.path);
+  if (entry.isDir) {
+    void loadDirectory(entry.path);
+  } else {
+    void openRemoteEditor(entry);
+  }
 }
 
 function triggerUpload() {
@@ -254,15 +270,31 @@ function triggerUpload() {
 async function handleUploadChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
+  await uploadFiles(files);
+  input.value = "";
+}
+
+async function uploadFiles(files: File[]) {
   if (files.length === 0) {
     return;
   }
 
+  const queued: UploadQueueItem[] = files.map((file) => ({
+    id: crypto.randomUUID(),
+    name: file.name,
+    status: "waiting",
+  }));
+  uploadQueue.value = [...uploadQueue.value.filter((item) => item.status === "active"), ...queued];
   statusMessage.value = "";
   errorMessage.value = "";
   busy.value = true;
   try {
-    for (const file of files) {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      const queueItem = queued[index];
+      uploadQueue.value = uploadQueue.value.map((item) => (
+        item.id === queueItem.id ? { ...item, status: "active" } : item
+      ));
       transfer.value = {
         id: props.sessionId,
         direction: "upload",
@@ -283,16 +315,91 @@ async function handleUploadChange(event: Event) {
         fileName: file.name,
         data: bytes,
         mode: transferMode.value,
+        resume: transferMode.value === "sftp" && resumeTransfers.value,
       });
+      uploadQueue.value = uploadQueue.value.map((item) => (
+        item.id === queueItem.id ? { ...item, status: "completed" } : item
+      ));
     }
     setStatus(`Uploaded ${files.length} file(s) to ${currentPath.value || "."}`);
     await loadDirectory(currentPath.value);
   } catch (error) {
+    uploadQueue.value = uploadQueue.value.map((item) => (
+      item.status === "active" ? { ...item, status: "failed" } : item
+    ));
     markTransferFailed(error);
     setError(error);
   } finally {
     busy.value = false;
-    input.value = "";
+  }
+}
+
+function handleFileDrop(event: DragEvent) {
+  draggingFiles.value = false;
+  void uploadFiles(Array.from(event.dataTransfer?.files ?? []));
+}
+
+async function openRemoteEditor(entry: RemoteFileEntry) {
+  if (entry.size > 2 * 1024 * 1024) {
+    setError("Remote quick edit supports files up to 2 MiB.");
+    return;
+  }
+  editorLoading.value = true;
+  errorMessage.value = "";
+  editorPath.value = entry.path;
+  editorName.value = entry.name;
+  try {
+    const content = await invoke<string>("ssh_read_remote_text_file", {
+      id: props.sessionId,
+      path: entry.path,
+    });
+    editorContent.value = content;
+    editorOriginal.value = content;
+  } catch (error) {
+    editorPath.value = null;
+    editorName.value = "";
+    setError(error);
+  } finally {
+    editorLoading.value = false;
+  }
+}
+
+async function saveRemoteEditor() {
+  if (!editorPath.value || editorSaving.value) return;
+  editorSaving.value = true;
+  try {
+    await invoke("ssh_write_remote_text_file", {
+      id: props.sessionId,
+      path: editorPath.value,
+      content: editorContent.value,
+    });
+    editorOriginal.value = editorContent.value;
+    setStatus(`Saved ${editorName.value}`);
+    await loadDirectory(currentPath.value);
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorSaving.value = false;
+  }
+}
+
+function closeRemoteEditor() {
+  if (editorDirty.value && !window.confirm("Discard unsaved remote file changes?")) return;
+  editorPath.value = null;
+  editorName.value = "";
+  editorContent.value = "";
+  editorOriginal.value = "";
+}
+
+function closeManager() {
+  if (editorDirty.value && !window.confirm("Close Remote Files and discard unsaved changes?")) return;
+  emit("close");
+}
+
+function handleEditorKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    void saveRemoteEditor();
   }
 }
 
@@ -324,6 +431,7 @@ async function downloadSelected() {
       localDir: downloadDirectory.value || null,
       expectedSize: selectedEntry.value.size,
       mode: transferMode.value,
+      resume: transferMode.value === "sftp" && resumeTransfers.value,
     });
     setStatus(`Downloaded to ${localPath}`);
   } catch (error) {
@@ -391,6 +499,9 @@ watch(() => props.sessionId, () => {
   errorMessage.value = "";
   statusMessage.value = "";
   resetTransferState();
+  editorPath.value = null;
+  editorContent.value = "";
+  editorOriginal.value = "";
   void loadDirectory();
 });
 
@@ -427,7 +538,7 @@ onBeforeUnmount(() => {
         <div class="remote-file-manager-title">Remote Files</div>
         <div class="remote-file-manager-subtitle">{{ sshConfig.user }}@{{ sshConfig.host }}:{{ sshConfig.port }}</div>
       </div>
-      <button class="remote-file-manager-close" type="button" @click="emit('close')">×</button>
+      <button class="remote-file-manager-close" type="button" @click="closeManager">×</button>
     </div>
 
     <div class="remote-file-manager-toolbar">
@@ -469,10 +580,24 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
+      <label class="remote-file-manager-resume">
+        <input v-model="resumeTransfers" type="checkbox" :disabled="transferMode !== 'sftp' || busy">
+        Resume partial SFTP transfers
+      </label>
+
       <input ref="uploadInputRef" type="file" multiple hidden @change="handleUploadChange">
     </div>
 
-    <div class="remote-file-manager-pathbar">
+    <div v-if="editorPath" class="remote-file-editor-toolbar">
+      <button type="button" :disabled="editorSaving" @click="closeRemoteEditor">Back</button>
+      <strong :title="editorPath">{{ editorName }}</strong>
+      <span v-if="editorDirty">Modified</span>
+      <button type="button" :disabled="editorSaving || !editorDirty" @click="void saveRemoteEditor()">
+        {{ editorSaving ? 'Saving...' : 'Save' }}
+      </button>
+    </div>
+
+    <div v-else class="remote-file-manager-pathbar">
       <button
         v-for="segment in breadcrumbs"
         :key="segment.path"
@@ -484,7 +609,16 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="remote-file-manager-list">
+    <div
+      v-if="!editorPath"
+      class="remote-file-manager-list"
+      :class="{ 'dragging-files': draggingFiles }"
+      @dragenter.prevent="draggingFiles = true"
+      @dragover.prevent="draggingFiles = true"
+      @dragleave.prevent="draggingFiles = false"
+      @drop.prevent="handleFileDrop"
+    >
+      <div v-if="draggingFiles" class="remote-file-manager-drop-hint">Drop files to upload to {{ currentPath }}</div>
       <div class="remote-file-manager-list-head">
         <span>Name</span>
         <span>Size</span>
@@ -511,6 +645,20 @@ onBeforeUnmount(() => {
         <span class="remote-file-manager-meta">{{ entry.isDir ? "-" : formatSize(entry.size) }}</span>
         <span class="remote-file-manager-meta">{{ formatDate(entry.modifiedAt) }}</span>
       </button>
+    </div>
+
+    <div v-else class="remote-file-editor">
+      <div v-if="editorLoading" class="remote-file-manager-empty">Loading remote text...</div>
+      <textarea
+        v-else
+        v-model="editorContent"
+        class="remote-file-editor-textarea"
+        :aria-label="`Edit ${editorName}`"
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+        @keydown="handleEditorKeydown"
+      />
     </div>
 
     <div class="remote-file-manager-footer">
@@ -541,6 +689,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="transfer.message" class="remote-file-manager-transfer-note">{{ transfer.message }}</div>
+      </div>
+
+      <div v-if="uploadQueue.length > 1" class="remote-file-manager-queue">
+        <div class="remote-file-manager-queue-title">Upload queue</div>
+        <div v-for="item in uploadQueue" :key="item.id" class="remote-file-manager-queue-item" :class="item.status">
+          <span>{{ item.name }}</span><span>{{ item.status }}</span>
+        </div>
       </div>
 
       <label class="remote-file-manager-download-dir">

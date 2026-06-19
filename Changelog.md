@@ -2,6 +2,11 @@
 ## Doing
 
 ### 新增
+- **Phase 4: SFTP、Snippets 与输出规则**
+  - 输出规则引擎统一支持关键字/正则高亮、响铃、桌面通知、自动应答、冷却时间及全局/主机作用域
+  - Quick Buttons 升级为 Snippets:多套工具栏、分组、主机/书签组绑定、`{{变量}}` 参数和 Raw 控制字符发送
+  - SFTP 支持拖放上传、顺序传输队列、可选断点续传及 SSH 连接后自动打开
+  - 远程文件双击进入轻量 UTF-8 编辑器，支持 `Ctrl/Cmd+S` 回写、2 MiB 限制与未保存保护
 - **SSH 端口转发 / 隧道管理器**(Phase 2，对标 MobaXterm / SecureCRT 隧道管理）
   - 支持三种转发模式:本地 `-L`、远程 `-R`、动态 `-D`(内置 SOCKS5 代理)
   - 图形化隧道管理器(`Port Forwarding…`,View 菜单或命令面板打开):新增/编辑/删除隧道,逐条启动/停止,实时状态(starting/active/error)与错误提示

@@ -1091,6 +1091,8 @@ fn main() {
             ssh::ssh_list_remote_dir,
             ssh::ssh_create_remote_dir,
             ssh::ssh_remove_remote_entry,
+            ssh::ssh_read_remote_text_file,
+            ssh::ssh_write_remote_text_file,
             ssh::ssh_upload_file,
             ssh::ssh_download_file,
             ssh::ssh_start_tunnel,

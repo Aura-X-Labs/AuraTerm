@@ -66,6 +66,35 @@ export interface QuickButton {
   label: string;
   /** Command sent to terminal on click; automatically appends \n */
   command: string;
+  /** Named toolbar. Buttons from different toolbars can be switched per session. */
+  toolbar?: string;
+  /** Optional visual group within a toolbar. */
+  group?: string;
+  /** Host globs this snippet is visible for. Empty means all sessions. */
+  hosts?: string[];
+  /** Saved connection groups this snippet is visible for. */
+  sessionGroups?: string[];
+  /** `line` appends Enter; `raw` sends decoded control characters as-is. */
+  sendMode?: "line" | "raw";
+}
+
+export type OutputRuleScope = "global" | "hosts";
+
+export interface OutputRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  pattern: string;
+  isRegex: boolean;
+  caseSensitive: boolean;
+  scope: OutputRuleScope;
+  hosts: string[];
+  foreground?: string;
+  background?: string;
+  bell: boolean;
+  notify: boolean;
+  autoResponse?: string;
+  cooldownMs: number;
 }
 
 export interface SerialHistoryItem {
@@ -111,6 +140,10 @@ export interface AppSettings {
   showInputBar: boolean;
   /** Quick buttons below the terminal */
   quickButtons: QuickButton[];
+  /** Shared highlight and trigger rules applied to terminal output. */
+  outputRules: OutputRule[];
+  /** Automatically reveal the SFTP browser after an SSH connection succeeds. */
+  autoOpenSftp: boolean;
   /** Last used serial port configuration */
   lastSerialConfig: SerialHistoryItem | null;
   /** Recent serial port configurations for quick presets */
@@ -442,6 +475,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   middleClickPaste: true,
   showInputBar: true,
   quickButtons: [],
+  outputRules: [],
+  autoOpenSftp: false,
   lastSerialConfig: null,
   recentSerialConfigs: [],
   inputHistory: [],
@@ -491,7 +526,33 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     ),
     theme: nextTheme,
     uiThemeMode: normalizeUiThemeMode(value?.uiThemeMode),
-    quickButtons: value?.quickButtons ?? DEFAULT_SETTINGS.quickButtons,
+    quickButtons: (value?.quickButtons ?? DEFAULT_SETTINGS.quickButtons).map((button) => ({
+      ...button,
+      toolbar: button.toolbar?.trim() || "Default",
+      group: button.group?.trim() || "General",
+      hosts: Array.isArray(button.hosts) ? button.hosts.filter((host) => typeof host === "string" && host.trim()) : [],
+      sessionGroups: Array.isArray(button.sessionGroups) ? button.sessionGroups.filter((group) => typeof group === "string" && group.trim()) : [],
+      sendMode: button.sendMode === "raw" ? "raw" : "line",
+    })),
+    outputRules: (value?.outputRules ?? DEFAULT_SETTINGS.outputRules).filter((rule) => (
+      Boolean(rule) && typeof rule.pattern === "string"
+    )).map((rule) => ({
+      id: rule.id || crypto.randomUUID(),
+      name: rule.name?.trim() || rule.pattern,
+      enabled: rule.enabled !== false,
+      pattern: rule.pattern,
+      isRegex: rule.isRegex !== false,
+      caseSensitive: rule.caseSensitive === true,
+      scope: rule.scope === "hosts" ? "hosts" : "global",
+      hosts: Array.isArray(rule.hosts) ? rule.hosts.filter((host) => typeof host === "string" && host.trim()) : [],
+      foreground: rule.foreground || undefined,
+      background: rule.background || undefined,
+      bell: rule.bell === true,
+      notify: rule.notify === true,
+      autoResponse: rule.autoResponse || undefined,
+      cooldownMs: Math.max(0, Number.isFinite(rule.cooldownMs) ? rule.cooldownMs : 1000),
+    })),
+    autoOpenSftp: value?.autoOpenSftp === true,
     lastSerialConfig: value?.lastSerialConfig ?? DEFAULT_SETTINGS.lastSerialConfig,
     recentSerialConfigs: value?.recentSerialConfigs ?? DEFAULT_SETTINGS.recentSerialConfigs,
     inputHistory: value?.inputHistory ?? DEFAULT_SETTINGS.inputHistory,
