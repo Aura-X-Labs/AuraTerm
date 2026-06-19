@@ -56,6 +56,31 @@ pub struct SavedConnection {
     /// SSH reconnect mode: "manual", "simple", "tmux", or "screen" (default: "manual")
     #[serde(default = "default_reconnect_type", skip_serializing_if = "is_default_reconnect_type")]
     pub reconnect_type: String,
+    /// Saved port-forwarding tunnels (SSH only). Stored in plaintext alongside
+    /// connection metadata — these carry no secrets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunnels: Vec<SavedTunnel>,
+}
+
+/// Persisted definition of a single port-forwarding tunnel. Mirrors the
+/// frontend `TunnelConfig`; behaviour lives in `ssh::forwarding`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedTunnel {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub tunnel_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
+    pub bind_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_start: bool,
 }
 
 fn default_reconnect_type() -> String {

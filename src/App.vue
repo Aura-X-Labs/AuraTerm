@@ -10,6 +10,9 @@ import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
 import RemoteFileManager from "./RemoteFileManager.vue";
 import MasterPasswordDialog from "./MasterPasswordDialog.vue";
+import TunnelManager from "./TunnelManager.vue";
+import CommandPalette from "./CommandPalette.vue";
+import { useSshTunnels } from "./composables/useSshTunnels";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
 import { useAppEventListeners } from "./composables/useAppEventListeners";
 import { useWorkspacePersistence } from "./composables/useWorkspacePersistence";
@@ -34,6 +37,7 @@ import {
 import type {
   ConnectResult,
   ConnectionProtocol,
+  PaletteCommand,
   SavedConnection,
   SerialConfig,
   SerialConnectionState,
@@ -42,6 +46,7 @@ import type {
   TerminalHandle,
   TerminalSearchOptions,
   TerminalSearchResults,
+  TunnelConfig,
 } from "./types";
 import logoUrl from "./logo.png";
 // App styles, split by feature area (order preserved for the cascade).
@@ -78,6 +83,15 @@ const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
 const sidebarExpandGroup = ref<string | undefined>(undefined);
 const showRemoteFileManager = ref(false);
+const showTunnelManager = ref(false);
+const showCommandPalette = ref(false);
+// Shared SSH port-forwarding runtime state (status mirror + start/stop/list).
+const tunnels = useSshTunnels();
+// Per-tab configured tunnels, kept out of `tab.session` so editing them never
+// triggers the session-revision reconnect. Persistence is via bookmarks.
+const tabTunnels = ref<Record<string, TunnelConfig[]>>({});
+// Bookmarks snapshot loaded when the command palette opens (for quick-connect).
+const paletteBookmarks = ref<SavedConnection[]>([]);
 // MultiExec: when on, keystrokes typed into the focused pane are fanned out to
 // every other currently-visible pane. Targets are the visible split panes only.
 const broadcastInput = ref(false);
@@ -239,6 +253,8 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleCloseActiveTab,
   handleToggleBookmarks,
   handleToggleRemoteFileManager,
+  handleToggleTunnelManager,
+  handleToggleCommandPalette,
   handleSplitPaneFromView,
   handleClosePaneFromView,
   handleIncreaseTerminalFontSize,
@@ -283,7 +299,13 @@ function handleGlobalKeyDown(event: KeyboardEvent) {
   const normalizedKey = event.key.toLowerCase();
 
   if (hasPrimaryModifier && !event.altKey) {
-    if (normalizedKey === "f") {
+    if (event.shiftKey && normalizedKey === "p") {
+      event.preventDefault();
+      handleToggleCommandPalette();
+      return;
+    }
+
+    if (!event.shiftKey && normalizedKey === "f") {
       event.preventDefault();
       handleOpenTerminalSearch();
       return;
@@ -419,6 +441,11 @@ onMounted(async () => {
   }
 
   cleanupFns.push(await registerAppEventListeners());
+
+  await tunnels.registerTunnelListener();
+  cleanupFns.push(() => {
+    tunnels.disposeTunnelListener();
+  });
 
   window.addEventListener("keydown", handleGlobalKeyDown);
   cleanupFns.push(() => {
@@ -1120,6 +1147,15 @@ function handleCloseTab(id: string) {
     delete nextStates[id];
     serialConnectionStates.value = nextStates;
   }
+
+  if (id in tabTunnels.value) {
+    const nextTunnels = { ...tabTunnels.value };
+    delete nextTunnels[id];
+    tabTunnels.value = nextTunnels;
+  }
+  if (showTunnelManager.value && activeTabId.value === id) {
+    showTunnelManager.value = false;
+  }
 }
 
 async function handleConnectResult(result: ConnectResult) {
@@ -1181,6 +1217,10 @@ async function handleConnectResult(result: ConnectResult) {
   if (existingConn?.lastUsed) {
     connection.lastUsed = existingConn.lastUsed;
   }
+  // 保留已配置的端口转发隧道，避免通过连接对话框重连时被覆盖丢失
+  if (existingConn?.tunnels?.length) {
+    connection.tunnels = existingConn.tunnels;
+  }
 
   try {
     await invoke("save_connection", { connection });
@@ -1202,9 +1242,131 @@ function handleBookmarkConnect(connection: SavedConnection) {
     updateSerialConnectionState(newId, "connecting");
   }
 
+  if (session.protocol === "ssh" && connection.tunnels?.length) {
+    tabTunnels.value = { ...tabTunnels.value, [newId]: connection.tunnels.map((tunnel) => ({ ...tunnel })) };
+  }
+
   tabs.value = [...tabs.value, tab];
   assignTabToFocusedPane(newId);
 }
+
+const activeTabTunnels = computed<TunnelConfig[]>(() => (
+  activeTabId.value ? tabTunnels.value[activeTabId.value] ?? [] : []
+));
+
+async function handleToggleTunnelManager() {
+  closeOpenMenus();
+  if (!activeSshConfig.value || !activeTabId.value) {
+    return;
+  }
+  if (showTunnelManager.value) {
+    showTunnelManager.value = false;
+    return;
+  }
+
+  const tabId = activeTabId.value;
+  // Lazily hydrate tunnels from the bookmark for sessions restored on startup
+  // (where tabTunnels was never seeded from a live connect).
+  if (!tabTunnels.value[tabId] && activeSshConfig.value.savedConnectionId) {
+    try {
+      const connections = await invoke<SavedConnection[]>("get_connections");
+      const match = connections.find((connection) => connection.id === activeSshConfig.value?.savedConnectionId);
+      if (match?.tunnels?.length) {
+        tabTunnels.value = { ...tabTunnels.value, [tabId]: match.tunnels.map((tunnel) => ({ ...tunnel })) };
+      }
+    } catch (error) {
+      console.error("Failed to load tunnels for session", error);
+    }
+  }
+  showTunnelManager.value = true;
+}
+
+async function handleUpdateTunnels(nextTunnels: TunnelConfig[]) {
+  const tabId = activeTabId.value;
+  if (!tabId) {
+    return;
+  }
+  tabTunnels.value = { ...tabTunnels.value, [tabId]: nextTunnels };
+
+  // Persist to the underlying bookmark, if this session came from one.
+  const savedConnectionId = activeSshConfig.value?.savedConnectionId;
+  if (!savedConnectionId) {
+    return;
+  }
+  try {
+    const connections = await invoke<SavedConnection[]>("get_connections");
+    const target = connections.find((connection) => connection.id === savedConnectionId);
+    if (target) {
+      await invoke("save_connection", { connection: { ...target, tunnels: nextTunnels } });
+      sidebarRefreshToken.value += 1;
+    }
+  } catch (error) {
+    console.error("Failed to persist tunnels to bookmark", error);
+  }
+}
+
+function handleSshConnectedForTab(tabId: string) {
+  const configured = tabTunnels.value[tabId];
+  if (configured?.length) {
+    void tunnels.autoStartTunnels(tabId, configured);
+  }
+}
+
+async function handleToggleCommandPalette() {
+  closeOpenMenus();
+  if (showCommandPalette.value) {
+    showCommandPalette.value = false;
+    return;
+  }
+  try {
+    paletteBookmarks.value = await invoke<SavedConnection[]>("get_connections");
+  } catch {
+    paletteBookmarks.value = [];
+  }
+  showCommandPalette.value = true;
+}
+
+const paletteCommands = computed<PaletteCommand[]>(() => {
+  const hasTab = Boolean(activeTab.value);
+  const hasSsh = Boolean(activeSshConfig.value);
+  const commands: PaletteCommand[] = [
+    { id: "new-local", title: "New Local Shell", group: "Session", keywords: "terminal shell", run: () => handleNewLocalSession() },
+    { id: "new-ssh", title: "New SSH Connection", group: "Session", keywords: "remote", run: () => openConnect("ssh") },
+    { id: "new-telnet", title: "New Telnet Connection", group: "Session", run: () => openConnect("telnet") },
+    { id: "new-serial", title: "New Serial Connection", group: "Session", keywords: "port com", run: () => openConnect("serial") },
+    { id: "close-tab", title: "Close Tab", group: "Session", enabled: hasTab, run: () => handleCloseActiveTab() },
+    { id: "toggle-bookmarks", title: sidebarOpen.value ? "Hide Bookmarks" : "Show Bookmarks", group: "View", keywords: "sidebar connections", run: () => handleToggleBookmarks() },
+    { id: "tunnels", title: "Port Forwarding / Tunnels", group: "Tools", keywords: "tunnel forward socks proxy -L -R -D", enabled: hasSsh, run: () => { void handleToggleTunnelManager(); } },
+    { id: "remote-files", title: showRemoteFileManager.value ? "Hide Remote Files" : "Show Remote Files", group: "Tools", keywords: "sftp scp files", enabled: hasSsh, run: () => handleToggleRemoteFileManager() },
+    { id: "find", title: "Find in Terminal", group: "View", keywords: "search", enabled: hasTab, run: () => handleOpenTerminalSearch() },
+    { id: "split-right", title: "Split Right", group: "Layout", keywords: "pane vertical", run: () => handleSplitPane("vertical") },
+    { id: "split-down", title: "Split Down", group: "Layout", keywords: "pane horizontal", run: () => handleSplitPane("horizontal") },
+    { id: "close-pane", title: "Close Pane", group: "Layout", enabled: paneLeaves.value.length > 1, run: () => handleClosePane() },
+    { id: "font-increase", title: "Increase Terminal Font Size", group: "View", keywords: "zoom", run: () => handleIncreaseTerminalFontSize() },
+    { id: "font-decrease", title: "Decrease Terminal Font Size", group: "View", keywords: "zoom", run: () => handleDecreaseTerminalFontSize() },
+    { id: "font-reset", title: "Reset Terminal Font Size", group: "View", keywords: "zoom", run: () => handleResetTerminalFontSize() },
+    { id: "fullscreen", title: "Toggle Full Screen", group: "View", run: () => { void handleToggleFullScreen(); } },
+    { id: "settings", title: "Open Settings", group: "App", keywords: "preferences config", run: () => handleOpenSettings() },
+    { id: "about", title: "About AuraTerm", group: "App", run: () => handleOpenAbout() },
+  ];
+
+  for (const bookmark of paletteBookmarks.value) {
+    const protocol = bookmark.protocol ?? "ssh";
+    const detail = protocol === "serial"
+      ? bookmark.portName ?? ""
+      : `${protocol === "ssh" && bookmark.user ? `${bookmark.user}@` : ""}${bookmark.host}${bookmark.port ? `:${bookmark.port}` : ""}`;
+    commands.push({
+      id: `bookmark-${bookmark.id}`,
+      title: `Connect: ${bookmark.name}`,
+      subtitle: detail,
+      group: "Bookmark",
+      keywords: `${bookmark.group ?? ""} ${bookmark.host} ${protocol}`,
+      run: () => handleBookmarkConnect(bookmark),
+    });
+  }
+
+  return commands;
+});
 </script>
 
 <template>
@@ -1319,8 +1481,9 @@ function handleBookmarkConnect(connection: SavedConnection) {
               <button class="titlebar-menu-item" type="button" @click="handleToggleBookmarks">
                 <span>{{ sidebarOpen ? 'Hide Bookmarks' : 'Show Bookmarks' }}</span>
               </button>
-              <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleRemoteFileManager">
-                <span>{{ showRemoteFileManager ? 'Hide Remote Files' : 'Show Remote Files' }}</span>
+              <button class="titlebar-menu-item" type="button" @click="handleToggleCommandPalette">
+                <span>Command Palette</span>
+                <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+Shift+P</span>
               </button>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleSplitPaneFromView('vertical')">
@@ -1349,6 +1512,26 @@ function handleBookmarkConnect(connection: SavedConnection) {
               <button class="titlebar-menu-item" type="button" @click="handleToggleFullScreen">
                 <span>{{ isFullscreen ? 'Exit Full Screen' : 'Full Screen' }}</span>
                 <span class="titlebar-menu-item-hint">F11</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="titlebar-menu-group" @mouseenter="openMenuId ? (openMenuId = 'tools') : null">
+            <button
+              class="titlebar-menu-btn"
+              :class="{ open: openMenuId === 'tools' }"
+              type="button"
+              @mousedown="stopDragPropagation"
+              @click="toggleMenu('tools')"
+            >
+              Tools
+            </button>
+            <div v-if="openMenuId === 'tools'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
+              <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleRemoteFileManager">
+                <span>{{ showRemoteFileManager ? 'Hide Remote Files' : 'Show Remote Files' }}</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleTunnelManager">
+                <span>Port Forwarding…</span>
               </button>
             </div>
           </div>
@@ -1715,6 +1898,7 @@ function handleBookmarkConnect(connection: SavedConnection) {
                 @ssh-password-updated="sidebarRefreshToken += 1"
                 @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"
                 @broadcast-input="(data) => handleBroadcastInput(tab.id, data)"
+                @ssh-connected="handleSshConnectedForTab(tab.id)"
               />
             </div>
           </div>
@@ -1860,6 +2044,23 @@ function handleBookmarkConnect(connection: SavedConnection) {
         @close="showRemoteFileManager = false"
       />
     </div>
+
+    <TunnelManager
+      v-if="showTunnelManager && activeTab && activeSshConfig"
+      :key="`tunnels-${activeTab.id}`"
+      :session-id="activeTab.id"
+      :ssh-config="activeSshConfig"
+      :tunnels="activeTabTunnels"
+      :api="tunnels"
+      @update-tunnels="handleUpdateTunnels"
+      @close="showTunnelManager = false"
+    />
+
+    <CommandPalette
+      v-if="showCommandPalette"
+      :commands="paletteCommands"
+      @close="showCommandPalette = false"
+    />
 
     <MasterPasswordDialog
       :is-open="showMasterPasswordDialog"

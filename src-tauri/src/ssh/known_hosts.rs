@@ -42,16 +42,22 @@ pub(super) struct KnownHostsStore {
 pub(super) struct ClientHandler {
     expected_fingerprint: Option<String>,
     observed_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared per-session map consulted when the server opens a `forwarded-tcpip`
+    /// channel for a remote (`-R`) port forward. Empty for connections without
+    /// any active remote forward.
+    remote_forwards: super::forwarding::RemoteForwardRegistry,
 }
 
 impl ClientHandler {
     pub(super) fn new(
         expected_fingerprint: Option<String>,
         observed_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
+        remote_forwards: super::forwarding::RemoteForwardRegistry,
     ) -> Self {
         Self {
             expected_fingerprint,
             observed_fingerprint,
+            remote_forwards,
         }
     }
 }
@@ -77,6 +83,37 @@ impl client::Handler for ClientHandler {
             }
 
             Ok(true)
+        }
+    }
+
+    /// Inbound connection for a remote (`-R`) forward: look up the local target
+    /// by the server-side bind port and splice the channel to a fresh local
+    /// TCP connection. Unknown ports are dropped (channel closed).
+    fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut russh::client::Session,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        let _ = connected_address;
+        let target = self
+            .remote_forwards
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&connected_port).cloned());
+
+        async move {
+            if let Some(target) = target {
+                tokio::spawn(super::forwarding::pump_channel_to_local(
+                    channel,
+                    target.host,
+                    target.port,
+                ));
+            }
+            Ok(())
         }
     }
 }
@@ -249,9 +286,14 @@ pub(super) async fn connect_with_expected_fingerprint(
     host: &str,
     port: u16,
     expected_fingerprint: Option<String>,
+    remote_forwards: super::forwarding::RemoteForwardRegistry,
 ) -> Result<(client::Handle<ClientHandler>, Option<String>), (String, Option<String>)> {
     let observed_fingerprint = Arc::new(std::sync::Mutex::new(None));
-    let handler = ClientHandler::new(expected_fingerprint, observed_fingerprint.clone());
+    let handler = ClientHandler::new(
+        expected_fingerprint,
+        observed_fingerprint.clone(),
+        remote_forwards,
+    );
     let config = Arc::new(client::Config {
         // Send a keepalive every 15 s; disconnect only after 8 consecutive
         // missing replies (= 120 s). This more frequent probing helps detect

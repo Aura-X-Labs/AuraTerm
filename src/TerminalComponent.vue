@@ -80,6 +80,7 @@ const emit = defineEmits<{
   sshPasswordUpdated: [];
   searchResultsChange: [results: TerminalSearchResults];
   broadcastInput: [data: string];
+  sshConnected: [];
 }>();
 
 function stripAnsi(value: string): string {
@@ -778,6 +779,7 @@ onMounted(() => {
 
       unlistenSshConnected = await listen<{ id: string }>(`ssh-connected:${props.sessionId}`, () => {
         terminal?.writeln("\r\n[Connected]");
+        emit("sshConnected");
       });
 
       unlistenSerialConnected = await listen<{ id: string }>(`serial-connected:${props.sessionId}`, () => {
