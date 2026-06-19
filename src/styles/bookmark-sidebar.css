@@ -1,6 +1,37 @@
 /* ── Bookmark Sidebar ──────────────────────────────────── */
 /* Styles moved to BookmarkSidebar.vue to avoid duplication */
 
+.bookmark-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bookmark-header-actions .bookmark-refresh-btn:first-of-type {
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.bookmark-import-message {
+  margin: 0 10px 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  background: var(--app-surface-2);
+  color: var(--app-text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.bookmark-tree-folder {
+  margin-bottom: 2px;
+}
+
+.bookmark-tree-folder.collapsed .bookmark-group-arrow {
+  transform: rotate(0deg);
+}
+
 /* Bookmark Sidebar Button Active State */
 .bookmark-toggle-btn.active {
   background: var(--app-accent-soft);

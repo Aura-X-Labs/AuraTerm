@@ -13,14 +13,17 @@ import { useTerminalSessionCommands } from "./composables/useTerminalSessionComm
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { OutputRuleEngine } from "./outputRules";
 import { decodeControlCharacters } from "./snippets";
+import { ShellIntegration } from "./shellIntegration";
 import type {
   SerialConnectionState,
   SessionConfig,
   SshConfig,
   TerminalHandle,
   TerminalSearchResults,
+  ZmodemTransferEvent,
 } from "./types";
 import "@xterm/xterm/css/xterm.css";
+import "./styles/shell-integration.css";
 
 interface PtyOutputEvent {
   id: string;
@@ -185,6 +188,7 @@ let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
 let terminalCleanup: (() => void) | null = null;
+let shellIntegration: ShellIntegration | null = null;
 let stopSessionWatch: (() => void) | null = null;
 let pendingInputBuffer = "";
 let pendingInputTimer: number | null = null;
@@ -196,6 +200,9 @@ let pendingLogBuffer = "";
 let pendingLogPath: string | null = null;
 let pendingLogTimer: number | null = null;
 const outputRuleEngine = new OutputRuleEngine();
+const zmodemTransfer = ref<ZmodemTransferEvent | null>(null);
+const zmodemFileInput = ref<HTMLInputElement | null>(null);
+const zmodemBusy = ref(false);
 
 const LOG_FLUSH_INTERVAL_MS = 180;
 const LOG_FLUSH_MAX_CHUNK = 4096;
@@ -208,6 +215,7 @@ const SAVED_LOG_TRIM_SLACK = 1_000_000;
 
 const {
   writeSessionInput,
+  writeSessionBytes,
   resizeSession,
   closeSession,
   getSshReconnectType,
@@ -215,6 +223,8 @@ const {
   startTelnetSession,
   startSerialSession,
   startLocalSession,
+  startZmodemSend,
+  cancelZmodem,
   persistUpdatedSshPassword,
   saveTerminalLog,
   appendToLog,
@@ -428,6 +438,28 @@ function focus() {
   terminal?.focus();
 }
 
+function previousCommand() {
+  return Boolean(shellIntegration?.previous());
+}
+
+function nextCommand() {
+  return Boolean(shellIntegration?.next());
+}
+
+function rerunLastCommand() {
+  const command = shellIntegration?.lastCommand()?.command;
+  if (!command) return false;
+  sendData(command);
+  return true;
+}
+
+async function copyLastCommand() {
+  const command = shellIntegration?.lastCommand()?.command;
+  if (!command) return false;
+  await navigator.clipboard.writeText(command);
+  return true;
+}
+
 async function reconnectSshSession() {
   if (activeSessionRef.value.protocol !== "ssh" || !terminal) {
     return;
@@ -468,6 +500,10 @@ defineExpose<TerminalHandle>({
   findPrevious: (text, options) => runSearch("previous", text, options),
   clearSearch,
   clearSearchActiveDecoration,
+  previousCommand,
+  nextCommand,
+  rerunLastCommand,
+  copyLastCommand,
 });
 
 onMounted(() => {
@@ -519,6 +555,7 @@ onMounted(() => {
   terminal.loadAddon(unicode11Addon);
   terminal.loadAddon(webLinksAddon);
   terminal.open(terminalRootRef.value);
+  shellIntegration = new ShellIntegration(terminal as unknown as ConstructorParameters<typeof ShellIntegration>[0]);
   // Activate Unicode 11 so emoji and wide characters (e.g. 💰) are treated as
   // 2 columns wide, preventing them from overlapping the following character.
   terminal.unicode.activeVersion = "11";
@@ -554,6 +591,17 @@ onMounted(() => {
       });
       
       return false; // Prevent default handling
+    }
+
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === "ArrowUp") {
+      event.preventDefault();
+      previousCommand();
+      return false;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === "ArrowDown") {
+      event.preventDefault();
+      nextCommand();
+      return false;
     }
 
     return true;
@@ -618,6 +666,7 @@ onMounted(() => {
       && ["macos", "linux"].includes(osType.value)
       && data === "\x08";
     const normalizedData = shouldNormalizeBackspace ? "\x7f" : data;
+    shellIntegration?.handleInput(normalizedData);
     queueTerminalInput(normalizedData);
     // MultiExec: when broadcasting, the focused terminal is the source — hand the
     // keystroke to the parent to fan out to the other panes. writeInput on the
@@ -667,7 +716,9 @@ onMounted(() => {
       ptyId.value = null;
       void closeSession(id, activeSessionRef.value).catch(() => {});
     }
-    terminal?.dispose();
+      terminal?.dispose();
+      shellIntegration?.dispose();
+      shellIntegration = null;
     terminal = null;
     terminalRef.value = null;
     fitAddon = null;
@@ -701,6 +752,7 @@ onMounted(() => {
     let unlistenReconnectPrompt: UnlistenFn | null = null;
     let unlistenHostKeyMismatch: UnlistenFn | null = null;
     let unlistenSerialConnected: UnlistenFn | null = null;
+    let unlistenZmodem: UnlistenFn | null = null;
 
     const cleanup = () => {
       disposed = true;
@@ -712,6 +764,7 @@ onMounted(() => {
       unlistenReconnectPrompt?.();
       unlistenHostKeyMismatch?.();
       unlistenSerialConnected?.();
+      unlistenZmodem?.();
       if (ptyId.value) {
         const id = ptyId.value;
         ptyId.value = null;
@@ -756,7 +809,7 @@ onMounted(() => {
           settingsRef.value.outputRules,
           host,
         );
-        terminal.write(processed.rendered);
+        terminal.write(processed.rendered, () => shellIntegration?.processOutput(event.payload.data));
         for (const match of processed.matches) {
           if (match.rule.bell) {
             terminal.write("\x07");
@@ -782,6 +835,19 @@ onMounted(() => {
         if (actualLogPath.value) {
           const plain = stripAnsi(event.payload.data);
           queueLogChunk(actualLogPath.value, plain);
+        }
+      });
+
+      unlistenZmodem = await listen<ZmodemTransferEvent>(`zmodem:${props.sessionId}`, (event) => {
+        zmodemTransfer.value = event.payload;
+        zmodemBusy.value = event.payload.status === "started" || event.payload.status === "progress";
+        if (event.payload.status === "failed") {
+          terminal?.writeln(`\r\n[Zmodem failed] ${event.payload.message ?? "Unknown error"}`);
+        } else if (event.payload.status === "completed") {
+          terminal?.writeln(`\r\n[Zmodem ${event.payload.direction} completed] ${event.payload.localPath ?? event.payload.fileName ?? ""}`);
+          window.setTimeout(() => {
+            if (zmodemTransfer.value?.status === "completed") zmodemTransfer.value = null;
+          }, 4000);
         }
       });
 
@@ -846,6 +912,7 @@ onMounted(() => {
         unlistenReconnectPrompt?.();
         unlistenHostKeyMismatch?.();
         unlistenSerialConnected?.();
+        unlistenZmodem?.();
         return;
       }
 
@@ -864,7 +931,7 @@ onMounted(() => {
             break;
           case "telnet":
             terminal.writeln(`Connecting to telnet://${session.telnetConfig.host}:${session.telnetConfig.port}...`);
-            await startTelnetSession(newId, session.telnetConfig.host, session.telnetConfig.port);
+            await startTelnetSession(newId, session.telnetConfig.host, session.telnetConfig.port, cols, rows);
             terminal.writeln("\r\n[Connected]");
             break;
           case "serial":
@@ -994,6 +1061,51 @@ function handleTrustHostKey() {
 function handleRejectHostKey() {
   submitHostKeyDecision(false);
 }
+
+function formatTransferBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+const zmodemProgress = computed(() => {
+  const transfer = zmodemTransfer.value;
+  if (!transfer?.totalBytes) return null;
+  return Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100));
+});
+
+async function handleZmodemFileSelected(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file || !ptyId.value) return;
+  zmodemBusy.value = true;
+  try {
+    const data = Array.from(new Uint8Array(await file.arrayBuffer()));
+    const wire = await startZmodemSend(ptyId.value, file.name, data);
+    await writeSessionBytes(ptyId.value, wire, activeSessionRef.value);
+  } catch (error) {
+    zmodemTransfer.value = {
+      id: props.sessionId,
+      direction: "upload",
+      status: "failed",
+      transferredBytes: 0,
+      message: String(error),
+    };
+    zmodemBusy.value = false;
+  } finally {
+    if (zmodemFileInput.value) zmodemFileInput.value.value = "";
+  }
+}
+
+async function handleCancelZmodem() {
+  if (!ptyId.value) return;
+  try {
+    const wire = await cancelZmodem(ptyId.value);
+    await writeSessionBytes(ptyId.value, wire, activeSessionRef.value);
+  } finally {
+    zmodemTransfer.value = null;
+    zmodemBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -1008,6 +1120,30 @@ function handleRejectHostKey() {
     }"
   >
     <div ref="terminalRootRef" :style="{ flex: 1, minHeight: 0 }" />
+
+    <div v-if="zmodemTransfer" class="zmodem-transfer-bar" :class="zmodemTransfer.status">
+      <input ref="zmodemFileInput" type="file" hidden @change="handleZmodemFileSelected">
+      <div class="zmodem-transfer-main">
+        <strong>Zmodem {{ zmodemTransfer.direction }}</strong>
+        <span>
+          {{ zmodemTransfer.fileName || (zmodemTransfer.direction === 'upload' ? 'Remote rz is waiting for a file' : 'Receiving file metadata...') }}
+        </span>
+        <span v-if="zmodemTransfer.status !== 'detected'">
+          {{ formatTransferBytes(zmodemTransfer.transferredBytes) }}
+          <template v-if="zmodemTransfer.totalBytes"> / {{ formatTransferBytes(zmodemTransfer.totalBytes) }}</template>
+        </span>
+      </div>
+      <div v-if="zmodemProgress !== null" class="zmodem-progress-track">
+        <div class="zmodem-progress-fill" :style="{ width: `${zmodemProgress}%` }" />
+      </div>
+      <button
+        v-if="zmodemTransfer.direction === 'upload' && zmodemTransfer.status === 'detected'"
+        type="button"
+        @click="zmodemFileInput?.click()"
+      >Select File</button>
+      <button v-if="zmodemBusy || zmodemTransfer.status === 'detected'" type="button" @click="handleCancelZmodem">Cancel</button>
+      <span v-if="zmodemTransfer.status === 'failed'" class="zmodem-error">{{ zmodemTransfer.message }}</span>
+    </div>
 
     <div v-if="showRetryOverlay && activeSshConfig" class="password-retry-overlay">
       <div class="password-retry-dialog">
@@ -1210,4 +1346,35 @@ function handleRejectHostKey() {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   word-break: break-all;
 }
+
+.zmodem-transfer-bar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 7px;
+  background: var(--app-surface-2);
+  color: var(--app-text);
+  box-shadow: 0 6px 24px var(--app-shadow);
+  font-size: 12px;
+}
+
+.zmodem-transfer-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.zmodem-transfer-main span { color: var(--app-text-muted); }
+.zmodem-progress-track { flex: 1; height: 4px; overflow: hidden; border-radius: 4px; background: var(--app-surface-3); }
+.zmodem-progress-fill { height: 100%; background: var(--app-accent); transition: width 0.15s ease; }
+.zmodem-transfer-bar button { border: 1px solid var(--app-border); border-radius: 5px; padding: 4px 8px; background: var(--app-surface-3); color: var(--app-text); cursor: pointer; }
+.zmodem-error { color: var(--app-danger); }
 </style>

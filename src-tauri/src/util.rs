@@ -144,23 +144,28 @@ pub fn session_event(base: &str, id: &str) -> String {
     format!("{base}:{id}")
 }
 
-/// Decode a freshly read transport chunk and emit it to the owning terminal as
-/// a `pty-output:<id>` event. An empty result (the chunk ended on an incomplete
-/// multi-byte sequence the decoder is still buffering) is skipped rather than
-/// emitting a no-op event. Shared by the local-PTY, serial and telnet read
-/// loops so the decode + skip-empty + per-session emit logic lives in one place.
-pub fn emit_pty_output(app: &AppHandle, id: &str, decoder: &mut Utf8StreamDecoder, chunk: &[u8]) {
-    let output = decoder.push(chunk);
-    if output.is_empty() {
-        return;
+/// Process one raw terminal stream chunk through the optional Zmodem router,
+/// the shared streaming UTF-8 decoder, and the per-session output event.
+/// Protocol response bytes are returned to the transport-specific writer.
+pub fn pump_stream_chunk(
+    app: &AppHandle,
+    id: &str,
+    decoder: &mut Utf8StreamDecoder,
+    chunk: &[u8],
+    zmodem: &crate::zmodem::ZmodemState,
+) -> (String, Vec<u8>) {
+    let processed = zmodem.process_incoming(app, id, chunk);
+    let output = decoder.push(&processed.terminal);
+    if !output.is_empty() {
+        let _ = app.emit(
+            &session_event("pty-output", id),
+            PtyOutputEvent {
+                id: id.to_string(),
+                data: output.clone(),
+            },
+        );
     }
-    let _ = app.emit(
-        &session_event("pty-output", id),
-        PtyOutputEvent {
-            id: id.to_string(),
-            data: output,
-        },
-    );
+    (output, processed.response)
 }
 
 /// Emit a `pty-exit:<id>` event signalling the session ended (clean close,
@@ -184,8 +189,15 @@ const WILL: u8 = 251;
 const WONT: u8 = 252;
 const DO: u8 = 253;
 const DONT: u8 = 254;
+const TELNET_BINARY: u8 = 0;
+const TELNET_ECHO: u8 = 1;
+const TELNET_SGA: u8 = 3;
+const TELNET_TERMINAL_TYPE: u8 = 24;
+const TELNET_NAWS: u8 = 31;
+const TERMINAL_TYPE_IS: u8 = 0;
+const TERMINAL_TYPE_SEND: u8 = 1;
 
-#[derive(Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 enum TelnetParse {
     /// Copying in-band data.
     #[default]
@@ -194,6 +206,8 @@ enum TelnetParse {
     Iac,
     /// Saw `IAC WILL|WONT|DO|DONT`; the next byte is the option being negotiated.
     Option(u8),
+    /// Waiting for the option byte after `IAC SB`.
+    SubnegOption,
     /// Inside an `IAC SB ... IAC SE` subnegotiation block.
     Subneg,
     /// Inside a subnegotiation and just saw an `IAC` (next byte is `SE` to end, or escaped data).
@@ -205,15 +219,31 @@ enum TelnetParse {
 /// garbage and break multi-byte decoding), and produces the bytes to write back
 /// to the server.
 ///
-/// AuraTerm is a client that drives an interactive shell; it has no use for the
-/// negotiable options, so it **politely refuses every one**: `IAC DO x` →
-/// `IAC WONT x`, `IAC WILL x` → `IAC DONT x`. The server's `WONT`/`DONT`
-/// acknowledgements need no reply (replying could loop). `IAC IAC` is unescaped
-/// to a single literal `0xFF` data byte. The parser is stateful so sequences may
-/// straddle read boundaries.
-#[derive(Default)]
+/// AuraTerm accepts the small option set needed by interactive shells (binary,
+/// echo, suppress-go-ahead, terminal type, and NAWS) and politely refuses all
+/// other options. The parser is stateful so commands may straddle read chunks.
 pub struct TelnetIacFilter {
     state: TelnetParse,
+    subneg_option: Option<u8>,
+    subneg_data: Vec<u8>,
+    local_enabled: [bool; 256],
+    remote_enabled: [bool; 256],
+    cols: u16,
+    rows: u16,
+}
+
+impl Default for TelnetIacFilter {
+    fn default() -> Self {
+        Self {
+            state: TelnetParse::Data,
+            subneg_option: None,
+            subneg_data: Vec::new(),
+            local_enabled: [false; 256],
+            remote_enabled: [false; 256],
+            cols: 80,
+            rows: 24,
+        }
+    }
 }
 
 /// Result of feeding a chunk through [`TelnetIacFilter::push`].
@@ -225,8 +255,23 @@ pub struct TelnetFiltered {
 }
 
 impl TelnetIacFilter {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_window_size(cols: u16, rows: u16) -> Self {
+        Self { cols, rows, ..Self::default() }
+    }
+
+    pub fn update_window_size(&mut self, cols: u16, rows: u16) -> Vec<u8> {
+        self.cols = cols;
+        self.rows = rows;
+        if self.local_enabled[TELNET_NAWS as usize] {
+            self.naws_response()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> TelnetFiltered {
@@ -252,7 +297,9 @@ impl TelnetIacFilter {
                         self.state = TelnetParse::Option(byte);
                     }
                     SB => {
-                        self.state = TelnetParse::Subneg;
+                        self.subneg_option = None;
+                        self.subneg_data.clear();
+                        self.state = TelnetParse::SubnegOption;
                     }
                     // Any other 2-byte command (NOP, GA, DM, …): consume and ignore.
                     _ => {
@@ -261,26 +308,48 @@ impl TelnetIacFilter {
                 },
                 TelnetParse::Option(verb) => {
                     match verb {
-                        // Server asks us to enable an option, or announces it will:
-                        // refuse both directions.
+                        DO if supports_local(byte) => {
+                            if !self.local_enabled[byte as usize] {
+                                self.local_enabled[byte as usize] = true;
+                                response.extend_from_slice(&[IAC, WILL, byte]);
+                            }
+                            if byte == TELNET_NAWS {
+                                response.extend_from_slice(&self.naws_response());
+                            }
+                        }
                         DO => response.extend_from_slice(&[IAC, WONT, byte]),
+                        DONT => self.local_enabled[byte as usize] = false,
+                        WILL if supports_remote(byte) => {
+                            if !self.remote_enabled[byte as usize] {
+                                self.remote_enabled[byte as usize] = true;
+                                response.extend_from_slice(&[IAC, DO, byte]);
+                            }
+                        }
                         WILL => response.extend_from_slice(&[IAC, DONT, byte]),
-                        // WONT/DONT are acknowledgements; no reply.
+                        WONT => self.remote_enabled[byte as usize] = false,
                         _ => {}
                     }
                     self.state = TelnetParse::Data;
                 }
+                TelnetParse::SubnegOption => {
+                    self.subneg_option = Some(byte);
+                    self.state = TelnetParse::Subneg;
+                }
                 TelnetParse::Subneg => {
                     if byte == IAC {
                         self.state = TelnetParse::SubnegIac;
+                    } else {
+                        self.subneg_data.push(byte);
                     }
-                    // else: discard subnegotiation payload bytes.
                 }
                 TelnetParse::SubnegIac => {
                     if byte == SE {
+                        self.finish_subnegotiation(&mut response);
                         self.state = TelnetParse::Data;
+                    } else if byte == IAC {
+                        self.subneg_data.push(IAC);
+                        self.state = TelnetParse::Subneg;
                     } else {
-                        // IAC inside SB escaping data, or a stray command; stay in subneg.
                         self.state = TelnetParse::Subneg;
                     }
                 }
@@ -289,13 +358,49 @@ impl TelnetIacFilter {
 
         TelnetFiltered { data, response }
     }
+
+    fn finish_subnegotiation(&mut self, response: &mut Vec<u8>) {
+        if self.subneg_option == Some(TELNET_TERMINAL_TYPE)
+            && self.local_enabled[TELNET_TERMINAL_TYPE as usize]
+            && self.subneg_data.first() == Some(&TERMINAL_TYPE_SEND)
+        {
+            response.extend_from_slice(&[IAC, SB, TELNET_TERMINAL_TYPE, TERMINAL_TYPE_IS]);
+            response.extend_from_slice(b"xterm-256color");
+            response.extend_from_slice(&[IAC, SE]);
+        }
+        self.subneg_option = None;
+        self.subneg_data.clear();
+    }
+
+    fn naws_response(&self) -> Vec<u8> {
+        let mut response = vec![IAC, SB, TELNET_NAWS];
+        for byte in self.cols.to_be_bytes().into_iter().chain(self.rows.to_be_bytes()) {
+            response.push(byte);
+            if byte == IAC {
+                response.push(IAC);
+            }
+        }
+        response.extend_from_slice(&[IAC, SE]);
+        response
+    }
+}
+
+fn supports_local(option: u8) -> bool {
+    matches!(option, TELNET_BINARY | TELNET_SGA | TELNET_TERMINAL_TYPE | TELNET_NAWS)
+}
+
+fn supports_remote(option: u8) -> bool {
+    matches!(option, TELNET_BINARY | TELNET_ECHO | TELNET_SGA)
 }
 
 #[cfg(test)]
 mod tests {
     use super::Utf8StreamDecoder;
     use super::session_event;
-    use super::{TelnetIacFilter, DO, DONT, IAC, SB, SE, WILL, WONT};
+    use super::{
+        TelnetIacFilter, DO, DONT, IAC, SB, SE, TELNET_ECHO, TELNET_NAWS,
+        TELNET_TERMINAL_TYPE, TERMINAL_TYPE_SEND, WILL, WONT,
+    };
 
     #[test]
     fn session_event_appends_id_suffix() {
@@ -381,19 +486,18 @@ mod tests {
     #[test]
     fn telnet_refuses_do_with_wont() {
         let mut filter = TelnetIacFilter::new();
-        // Server: IAC DO ECHO(1) -> client refuses: IAC WONT ECHO.
-        let out = filter.push(&[IAC, DO, 1]);
+        // Unknown options are refused.
+        let out = filter.push(&[IAC, DO, 42]);
         assert!(out.data.is_empty());
-        assert_eq!(out.response, vec![IAC, WONT, 1]);
+        assert_eq!(out.response, vec![IAC, WONT, 42]);
     }
 
     #[test]
     fn telnet_refuses_will_with_dont() {
         let mut filter = TelnetIacFilter::new();
-        // Server: IAC WILL SGA(3) -> client refuses: IAC DONT SGA.
-        let out = filter.push(&[IAC, WILL, 3]);
+        let out = filter.push(&[IAC, WILL, 42]);
         assert!(out.data.is_empty());
-        assert_eq!(out.response, vec![IAC, DONT, 3]);
+        assert_eq!(out.response, vec![IAC, DONT, 42]);
     }
 
     #[test]
@@ -416,12 +520,50 @@ mod tests {
     #[test]
     fn telnet_handles_sequence_split_across_pushes() {
         let mut filter = TelnetIacFilter::new();
-        // IAC DO ECHO split: IAC arrives, then DO 1 in the next read.
+        // An unsupported option split across reads is still refused.
         let first = filter.push(&[b'a', IAC]);
         assert_eq!(first.data, b"a");
         assert!(first.response.is_empty());
-        let second = filter.push(&[DO, 1, b'b']);
+        let second = filter.push(&[DO, 42, b'b']);
         assert_eq!(second.data, b"b");
-        assert_eq!(second.response, vec![IAC, WONT, 1]);
+        assert_eq!(second.response, vec![IAC, WONT, 42]);
+    }
+
+    #[test]
+    fn telnet_accepts_echo_and_reports_window_size() {
+        let mut filter = TelnetIacFilter::with_window_size(120, 40);
+        let echo = filter.push(&[IAC, WILL, TELNET_ECHO]);
+        assert_eq!(echo.response, vec![IAC, DO, TELNET_ECHO]);
+
+        let naws = filter.push(&[IAC, DO, TELNET_NAWS]);
+        assert_eq!(
+            naws.response,
+            vec![IAC, WILL, TELNET_NAWS, IAC, SB, TELNET_NAWS, 0, 120, 0, 40, IAC, SE],
+        );
+        assert_eq!(
+            filter.update_window_size(132, 50),
+            vec![IAC, SB, TELNET_NAWS, 0, 132, 0, 50, IAC, SE],
+        );
+    }
+
+    #[test]
+    fn telnet_answers_terminal_type_subnegotiation() {
+        let mut filter = TelnetIacFilter::new();
+        assert_eq!(
+            filter.push(&[IAC, DO, TELNET_TERMINAL_TYPE]).response,
+            vec![IAC, WILL, TELNET_TERMINAL_TYPE],
+        );
+        let response = filter.push(&[
+            IAC,
+            SB,
+            TELNET_TERMINAL_TYPE,
+            TERMINAL_TYPE_SEND,
+            IAC,
+            SE,
+        ]).response;
+        let mut expected = vec![IAC, SB, TELNET_TERMINAL_TYPE, 0];
+        expected.extend_from_slice(b"xterm-256color");
+        expected.extend_from_slice(&[IAC, SE]);
+        assert_eq!(response, expected);
     }
 }

@@ -1,0 +1,19 @@
+.xterm-decoration-overview-ruler,
+.shell-command-marker {
+  pointer-events: none;
+}
+
+.shell-command-marker::before {
+  content: "";
+  display: block;
+  width: 5px;
+  height: 5px;
+  margin: 6px 0 0 2px;
+  border-radius: 50%;
+  background: var(--app-success, #6fbf73);
+  box-shadow: 0 0 4px currentColor;
+}
+
+.shell-command-marker.failed::before {
+  background: var(--app-danger, #e06c75);
+}

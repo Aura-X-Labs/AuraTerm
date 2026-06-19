@@ -130,7 +130,7 @@ pub fn ssh_generate_key_pair(
 #[derive(Default)]
 pub struct SshSessionState {
     /// PTY input forwarder — the channel whose receiver feeds the IO loop.
-    input_tx: Option<mpsc::Sender<String>>,
+    input_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Window-resize forwarder.
     resize_tx: Option<mpsc::Sender<(u32, u32)>>,
     /// MFA / keyboard-interactive answer forwarder.
@@ -230,8 +230,8 @@ impl SshState {
         guard.get(id).and_then(f)
     }
 
-    /// Clone the cheap `mpsc::Sender<String>` for PTY input, if any.
-    async fn input_sender(&self, id: &str) -> Option<mpsc::Sender<String>> {
+    /// Clone the cheap raw-byte sender for PTY input, if any.
+    async fn input_sender(&self, id: &str) -> Option<mpsc::Sender<Vec<u8>>> {
         self.snapshot(id, |s| s.input_tx.clone()).await
     }
 
@@ -573,7 +573,7 @@ pub async fn write_ssh_pty_input(
     let tx = state.input_sender(&id).await;
 
     if let Some(tx) = tx {
-        if tx.send(data).await.is_err() {
+        if tx.send(data.into_bytes()).await.is_err() {
             let message = "SSH connection lost; input was not sent".to_string();
             let _ = app.emit(
                 &crate::util::session_event("pty-output", &id),
@@ -589,6 +589,16 @@ pub async fn write_ssh_pty_input(
     } else {
         Err("Connection not found".to_string())
     }
+}
+
+#[tauri::command]
+pub async fn write_ssh_pty_bytes(
+    state: State<'_, SshState>,
+    id: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let tx = state.input_sender(&id).await.ok_or_else(|| "Connection not found".to_string())?;
+    tx.send(data).await.map_err(|_| "SSH connection lost; bytes were not sent".to_string())
 }
 
 #[tauri::command]
@@ -611,10 +621,12 @@ pub async fn resize_ssh_pty(
 pub async fn close_ssh_pty(
     state: State<'_, SshState>,
     forwarding: State<'_, ForwardingState>,
+    zmodem: State<'_, crate::zmodem::ZmodemState>,
     id: String,
 ) -> Result<(), String> {
     // Tear down any port forwards bound to this session before the handle dies.
     forwarding::stop_session_tunnels(forwarding.inner(), &id).await;
+    zmodem.reset_session(&id);
 
     // For session-persistence modes (tmux/screen), try to destroy the remote session first.
     let config = state.reconnect_config(&id).await;
@@ -1170,6 +1182,7 @@ async fn open_pty_channel(
 pub async fn start_ssh_pty(
     app: AppHandle,
     state: State<'_, SshState>,
+    zmodem: State<'_, crate::zmodem::ZmodemState>,
     id: String,
     host: String,
     port: u16,
@@ -1191,6 +1204,7 @@ pub async fn start_ssh_pty(
 
     // Stop any previous session for this id.
     stop_and_cleanup_ssh_session(state.inner(), &id).await;
+    zmodem.reset_session(&id);
 
     let rt = reconnect_type.unwrap_or_else(|| {
         if auto_reconnect.unwrap_or(false) {
@@ -1238,6 +1252,7 @@ pub async fn start_ssh_pty(
             .await;
 
         let state_clone = state.inner().clone();
+        let zmodem_clone = zmodem.inner().clone();
         let app_clone = app.clone();
         let id_clone = id.clone();
 
@@ -1246,6 +1261,7 @@ pub async fn start_ssh_pty(
             run_reconnect_loop(
                 app_clone,
                 state_clone,
+                zmodem_clone,
                 id_clone,
                 cancel_notify,
             ).await;
@@ -1263,6 +1279,7 @@ pub async fn start_ssh_pty(
         let result = do_single_ssh_connect(
             app.clone(),
             state.inner().clone(),
+            zmodem.inner().clone(),
             id.clone(),
             host.clone(),
             port,
@@ -1297,6 +1314,7 @@ pub async fn start_ssh_pty(
 async fn run_reconnect_loop(
     app: AppHandle,
     state: SshState,
+    zmodem: crate::zmodem::ZmodemState,
     id: String,
     cancel_notify: Arc<ReconnectCancellation>,
 ) {
@@ -1365,6 +1383,7 @@ async fn run_reconnect_loop(
         let result = do_single_ssh_connect(
             app.clone(),
             state.clone(),
+            zmodem.clone(),
             id.clone(),
             cfg.host.clone(),
             cfg.port,
@@ -1458,6 +1477,7 @@ fn is_auth_error(err: &str) -> bool {
 fn do_single_ssh_connect(
     app: AppHandle,
     state: SshState,
+    zmodem: crate::zmodem::ZmodemState,
     id: String,
     host: String,
     port: u16,
@@ -1553,7 +1573,7 @@ fn do_single_ssh_connect(
         set_reconnect_session_metadata(state.clone(), id.clone(), Some(selected_session_name.clone()), None).await;
     }
 
-    let (input_tx, input_rx) = mpsc::channel::<String>(512);
+    let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(512);
     let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
     // Register all runtime channels/handles for this session in a single
@@ -1613,6 +1633,7 @@ fn do_single_ssh_connect(
         run_channel_io_loop(
             app_handle,
             state_clone,
+            zmodem,
             connection_id,
             session_handle_for_io,
             channel,
@@ -1732,10 +1753,11 @@ fn line_input(value: &str) -> String {
 async fn run_channel_io_loop(
     app: AppHandle,
     state: SshState,
+    zmodem: crate::zmodem::ZmodemState,
     id: String,
     handle: SharedSshHandle,
     mut channel: russh::Channel<client::Msg>,
-    mut input_rx: mpsc::Receiver<String>,
+    mut input_rx: mpsc::Receiver<Vec<u8>>,
     mut resize_rx: mpsc::Receiver<(u32, u32)>,
     auto_login_rules: Vec<AutoLoginRule>,
     post_connect_commands: Vec<String>,
@@ -1765,15 +1787,17 @@ async fn run_channel_io_loop(
                     Some(ChannelMsg::Data { ref data }) => {
                         data_msg_count += 1;
                         data_bytes_total += data.len() as u64;
-                        let output = stdout_decoder.push(data);
+                        let (output, response) = crate::util::pump_stream_chunk(
+                            &app,
+                            &id,
+                            &mut stdout_decoder,
+                            data,
+                            &zmodem,
+                        );
+                        if !response.is_empty() {
+                            let _ = write_interactive_input(&mut channel, &handle, &response).await;
+                        }
                         if !output.is_empty() {
-                            let _ = app.emit(
-                                &crate::util::session_event("pty-output", &id),
-                                TerminalDataPayload {
-                                    id: id.clone(),
-                                    data: output.clone(),
-                                },
-                            );
                             for input in automation.on_output(&output) {
                                 let _ = write_interactive_input(&mut channel, &handle, input.as_bytes()).await;
                             }
@@ -1862,8 +1886,7 @@ async fn run_channel_io_loop(
                 }
             }
             Some(input) = input_rx.recv() => {
-                let input_bytes = input.into_bytes();
-                match write_interactive_input(&mut channel, &handle, input_bytes.as_slice()).await {
+                match write_interactive_input(&mut channel, &handle, input.as_slice()).await {
                     InteractiveWriteOutcome::Sent => {}
                     InteractiveWriteOutcome::Dropped(message) => {
                         crate::debug_log!("[ssh-debug] {} write dropped: {}", id, message);

@@ -20,11 +20,13 @@
 - **🛡️ Powerful Connection Protocols**:
   - **SSH2**: Password and key-based authentication, MFA support, built-in SFTP file manager.
   - **Serial Port**: Auto device enumeration, customizable baud rate, data bits, stop bits, flow control.
-  - **Telnet**: Full Telnet protocol support.
+  - **Telnet**: Stateful IAC negotiation with terminal type and window-size support.
   - **Local Shell**: Customizable local shell (PowerShell, Git Bash, zsh, etc.).
 - **🎭 Modern UI/UX**:
   - **Tab Management**: Drag-and-drop reordering, custom renaming, auto-generated NATO alphabet suffixes.
-  - **Bookmark Management**: Grouped connections with quick search and one-click connect.
+  - **Bookmark Management**: Nested folders, quick search, and OpenSSH/PuTTY imports.
+  - **Inline Zmodem**: Automatic `rz`/`sz` upload and download across local, SSH, Telnet, and Serial sessions.
+  - **Shell Integration**: OSC 133 command markers, exit status, navigation, rerun, and copy actions.
   - **Split Panes**: Flexible terminal layout within a single window.
 - **📈 High Performance**: Powered by Xterm.js with WebGL plugin for smooth rendering and low resource usage.
 - **📋 Session Logging**: Flexible log saving with customizable filename templates.

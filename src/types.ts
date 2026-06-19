@@ -145,6 +145,20 @@ export interface RemoteDirectoryListing {
   entries: RemoteFileEntry[];
 }
 
+export type ZmodemDirection = "upload" | "download";
+export type ZmodemStatus = "detected" | "started" | "progress" | "completed" | "failed" | "cancelled";
+
+export interface ZmodemTransferEvent {
+  id: string;
+  direction: ZmodemDirection;
+  status: ZmodemStatus;
+  fileName?: string | null;
+  localPath?: string | null;
+  transferredBytes: number;
+  totalBytes?: number | null;
+  message?: string | null;
+}
+
 export interface TelnetConfig {
   host: string;
   port: number;
@@ -236,4 +250,8 @@ export interface TerminalHandle {
   findPrevious: (text: string, options?: TerminalSearchOptions) => boolean;
   clearSearch: () => void;
   clearSearchActiveDecoration: () => void;
+  previousCommand: () => boolean;
+  nextCommand: () => boolean;
+  rerunLastCommand: () => boolean;
+  copyLastCommand: () => Promise<boolean>;
 }

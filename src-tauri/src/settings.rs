@@ -172,6 +172,9 @@ pub struct Settings {
     /// Automatically open the SFTP browser for the active SSH session.
     #[serde(default)]
     pub auto_open_sftp: bool,
+    /// Destination directory for files received through inline Zmodem.
+    #[serde(default = "default_zmodem_download_path")]
+    pub zmodem_download_path: String,
     /// Most recently used serial connection parameters
     #[serde(default)]
     pub last_serial_config: Option<SerialHistoryItem>,
@@ -210,6 +213,7 @@ fn default_global_scope() -> String { "global".to_string() }
 fn default_rule_cooldown() -> u64 { 1000 }
 fn default_log_save_path() -> String { "~/AuraTerm/logs".to_string() }
 fn default_log_file_name_template() -> String { "{session}_{timestamp}".to_string() }
+fn default_zmodem_download_path() -> String { "~/AuraTerm/downloads".to_string() }
 
 
 impl Default for Settings {
@@ -231,6 +235,7 @@ impl Default for Settings {
             quick_buttons: vec![],
             output_rules: vec![],
             auto_open_sftp: false,
+            zmodem_download_path: default_zmodem_download_path(),
             last_serial_config: None,
             recent_serial_configs: vec![],
             input_history: vec![],
