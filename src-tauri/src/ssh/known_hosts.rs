@@ -46,6 +46,7 @@ pub(super) struct ClientHandler {
     /// channel for a remote (`-R`) port forward. Empty for connections without
     /// any active remote forward.
     remote_forwards: super::forwarding::RemoteForwardRegistry,
+    agent_forwarding: bool,
 }
 
 impl ClientHandler {
@@ -53,11 +54,13 @@ impl ClientHandler {
         expected_fingerprint: Option<String>,
         observed_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
         remote_forwards: super::forwarding::RemoteForwardRegistry,
+        agent_forwarding: bool,
     ) -> Self {
         Self {
             expected_fingerprint,
             observed_fingerprint,
             remote_forwards,
+            agent_forwarding,
         }
     }
 }
@@ -112,6 +115,25 @@ impl client::Handler for ClientHandler {
                     target.host,
                     target.port,
                 ));
+            }
+            Ok(())
+        }
+    }
+
+    fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        _session: &mut russh::client::Session,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        let enabled = self.agent_forwarding;
+        async move {
+            if enabled {
+                tokio::spawn(async move {
+                    if let Ok(mut agent) = super::connect_local_agent_stream().await {
+                        let mut stream = channel.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut agent).await;
+                    }
+                });
             }
             Ok(())
         }
@@ -283,16 +305,18 @@ pub(super) fn observed_fingerprint_value(
 /// On error the observed fingerprint (if any) is returned alongside the error
 /// string so that the caller can emit a host-key-mismatch prompt.
 pub(super) async fn connect_with_expected_fingerprint(
-    host: &str,
+    host: String,
     port: u16,
     expected_fingerprint: Option<String>,
     remote_forwards: super::forwarding::RemoteForwardRegistry,
+    agent_forwarding: bool,
 ) -> Result<(client::Handle<ClientHandler>, Option<String>), (String, Option<String>)> {
     let observed_fingerprint = Arc::new(std::sync::Mutex::new(None));
     let handler = ClientHandler::new(
         expected_fingerprint,
         observed_fingerprint.clone(),
         remote_forwards,
+        agent_forwarding,
     );
     let config = Arc::new(client::Config {
         // Send a keepalive every 15 s; disconnect only after 8 consecutive
@@ -305,6 +329,37 @@ pub(super) async fn connect_with_expected_fingerprint(
 
     let addr = format!("{host}:{port}");
     match client::connect(config, addr, handler).await {
+        Ok(session) => Ok((session, observed_fingerprint_value(&observed_fingerprint))),
+        Err(error) => Err((
+            format!("Connection error: {error}"),
+            observed_fingerprint_value(&observed_fingerprint),
+        )),
+    }
+}
+
+pub(super) async fn connect_stream_with_expected_fingerprint<R>(
+    stream: R,
+    expected_fingerprint: Option<String>,
+    remote_forwards: super::forwarding::RemoteForwardRegistry,
+    agent_forwarding: bool,
+) -> Result<(client::Handle<ClientHandler>, Option<String>), (String, Option<String>)>
+where
+    R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let observed_fingerprint = Arc::new(std::sync::Mutex::new(None));
+    let handler = ClientHandler::new(
+        expected_fingerprint,
+        observed_fingerprint.clone(),
+        remote_forwards,
+        agent_forwarding,
+    );
+    let config = Arc::new(client::Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(15)),
+        keepalive_max: 8,
+        ..Default::default()
+    });
+
+    match client::connect_stream(config, stream, handler).await {
         Ok(session) => Ok((session, observed_fingerprint_value(&observed_fingerprint))),
         Err(error) => Err((
             format!("Connection error: {error}"),

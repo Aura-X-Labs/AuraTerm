@@ -1,4 +1,6 @@
-use crate::encryption::{self, CredentialStore, MasterPasswordState, StoredCredential};
+use crate::encryption::{
+    self, CredentialStore, MasterPasswordState, StoredCredential, StoredJumpCredential,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use tauri::{AppHandle, Manager, State};
@@ -29,13 +31,23 @@ pub struct SavedConnection {
     #[serde(default)]
     pub user: String,
     #[serde(default = "default_auth_type")]
-    pub auth_type: String, // "password" | "key" | "none"
+    pub auth_type: String, // "password" | "key" | "agent" | "none"
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_forwarding: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jump_hosts: Vec<SavedJumpHost>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_login_rules: Vec<SavedAutoLoginRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_connect_commands: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +73,40 @@ pub struct SavedConnection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tunnels: Vec<SavedTunnel>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedJumpHost {
+    pub id: String,
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default = "default_auth_type")]
+    pub auth_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedAutoLoginRule {
+    pub expect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub case_sensitive: bool,
+    #[serde(default = "default_expect_timeout", skip_serializing_if = "is_default_expect_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_ssh_port() -> u16 { 22 }
+fn default_expect_timeout() -> u64 { 30 }
+fn is_default_expect_timeout(value: &u64) -> bool { *value == 30 }
 
 /// Persisted definition of a single port-forwarding tunnel. Mirrors the
 /// frontend `TunnelConfig`; behaviour lives in `ssh::forwarding`.
@@ -94,6 +140,16 @@ fn is_default_reconnect_type(value: &str) -> bool {
 fn sanitize_connection_for_storage(connection: &mut SavedConnection) {
     connection.password = None;
     connection.private_key = None;
+    connection.passphrase = None;
+    for jump in &mut connection.jump_hosts {
+        jump.password = None;
+        jump.private_key = None;
+        jump.passphrase = None;
+    }
+    for rule in &mut connection.auto_login_rules {
+        rule.response = None;
+    }
+    connection.post_connect_commands.clear();
 }
 
 fn hydrate_connection_secrets(
@@ -103,13 +159,14 @@ fn hydrate_connection_secrets(
     if connection.protocol != "ssh" {
         connection.password = None;
         connection.private_key = None;
+        connection.passphrase = None;
         return;
     }
 
     if connection.auth_type == "none" {
         connection.password = None;
         connection.private_key = None;
-        return;
+        connection.passphrase = None;
     }
 
     // 从凭据存储中查找并恢复凭据
@@ -118,12 +175,37 @@ fn hydrate_connection_secrets(
         .iter()
         .find(|c| c.connection_id == connection.id)
     {
-        connection.password = stored.password.clone();
+        connection.password = if connection.auth_type == "password" {
+            stored.password.clone()
+        } else {
+            None
+        };
         connection.private_key = if connection.auth_type == "key" {
             stored.private_key.clone()
         } else {
             None
         };
+        // Phase 2 stored key passphrases in the password field.
+        connection.passphrase = if connection.auth_type == "key" {
+            stored.passphrase.clone().or_else(|| stored.password.clone())
+        } else {
+            None
+        };
+        for jump in &mut connection.jump_hosts {
+            if let Some(secret) = stored.jump_hosts.iter().find(|item| item.id == jump.id) {
+                jump.password = secret.password.clone();
+                jump.private_key = secret.private_key.clone();
+                jump.passphrase = secret.passphrase.clone();
+            }
+        }
+        for (rule, response) in connection
+            .auto_login_rules
+            .iter_mut()
+            .zip(stored.auto_login_responses.iter())
+        {
+            rule.response = Some(response.clone());
+        }
+        connection.post_connect_commands = stored.post_connect_commands.clone();
     }
 }
 
@@ -148,8 +230,12 @@ fn persist_connection_secrets(
         "key" => {
             credential_store.credentials.push(StoredCredential {
                 connection_id: connection.id.clone(),
-                password: connection.password.clone(),
+                password: None,
                 private_key: connection.private_key.clone(),
+                passphrase: connection.passphrase.clone(),
+                jump_hosts: collect_jump_credentials(connection),
+                auto_login_responses: collect_auto_login_responses(connection),
+                post_connect_commands: connection.post_connect_commands.clone(),
             });
         }
         "password" => {
@@ -157,14 +243,42 @@ fn persist_connection_secrets(
                 connection_id: connection.id.clone(),
                 password: connection.password.clone(),
                 private_key: None,
+                passphrase: None,
+                jump_hosts: collect_jump_credentials(connection),
+                auto_login_responses: collect_auto_login_responses(connection),
+                post_connect_commands: connection.post_connect_commands.clone(),
             });
         }
         _ => {
+            credential_store.credentials.push(StoredCredential {
+                connection_id: connection.id.clone(),
+                password: None,
+                private_key: None,
+                passphrase: None,
+                jump_hosts: collect_jump_credentials(connection),
+                auto_login_responses: collect_auto_login_responses(connection),
+                post_connect_commands: connection.post_connect_commands.clone(),
+            });
             // "none" 认证方式，不存储凭据
         }
     }
 
     Ok(())
+}
+
+fn collect_jump_credentials(connection: &SavedConnection) -> Vec<StoredJumpCredential> {
+    connection.jump_hosts.iter().map(|jump| StoredJumpCredential {
+        id: jump.id.clone(),
+        password: jump.password.clone(),
+        private_key: jump.private_key.clone(),
+        passphrase: jump.passphrase.clone(),
+    }).collect()
+}
+
+fn collect_auto_login_responses(connection: &SavedConnection) -> Vec<String> {
+    connection.auto_login_rules.iter()
+        .map(|rule| rule.response.clone().unwrap_or_default())
+        .collect()
 }
 
 fn connections_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -227,6 +341,16 @@ pub fn get_connections(
         for connection in &mut connections {
             connection.password = None;
             connection.private_key = None;
+            connection.passphrase = None;
+            for jump in &mut connection.jump_hosts {
+                jump.password = None;
+                jump.private_key = None;
+                jump.passphrase = None;
+            }
+            for rule in &mut connection.auto_login_rules {
+                rule.response = None;
+            }
+            connection.post_connect_commands.clear();
         }
     }
 

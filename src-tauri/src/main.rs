@@ -1078,6 +1078,7 @@ fn main() {
             resize_pty,
             close_pty,
             ssh::start_ssh_pty,
+            ssh::ssh_generate_key_pair,
             ssh::write_ssh_pty_input,
             ssh::resize_ssh_pty,
             ssh::close_ssh_pty,

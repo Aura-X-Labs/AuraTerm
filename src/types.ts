@@ -33,12 +33,38 @@ export function isReconnectEnabled(reconnectType: ReconnectType): boolean {
   return reconnectType !== "manual";
 }
 
+export type SshAuthType = "password" | "key" | "agent" | "none";
+
+export interface JumpHostConfig {
+  id: string;
+  host: string;
+  port: number;
+  user: string;
+  authType: SshAuthType;
+  password?: string;
+  privateKey?: string;
+  passphrase?: string;
+}
+
+export interface AutoLoginRule {
+  expect: string;
+  response?: string;
+  caseSensitive?: boolean;
+  timeoutSecs?: number;
+}
+
 export interface SshConfig {
   host: string;
   port: number;
   user: string;
   password?: string;
   privateKey?: string;
+  passphrase?: string;
+  authType?: SshAuthType;
+  agentForwarding?: boolean;
+  jumpHosts?: JumpHostConfig[];
+  autoLoginRules?: AutoLoginRule[];
+  postConnectCommands?: string[];
   savedConnectionId?: string;
   savedConnectionGroup?: string;
   /** Legacy compatibility field; reconnect behavior is driven by reconnectType */
@@ -152,9 +178,14 @@ export interface SavedConnection {
   host: string;
   port: number;
   user: string;
-  authType: "password" | "key" | "none";
+  authType: SshAuthType;
   password?: string;
   privateKey?: string;
+  passphrase?: string;
+  agentForwarding?: boolean;
+  jumpHosts?: JumpHostConfig[];
+  autoLoginRules?: AutoLoginRule[];
+  postConnectCommands?: string[];
   portName?: string;
   baudRate?: number;
   dataBits?: 5 | 6 | 7 | 8;

@@ -209,6 +209,27 @@ describe("usePaneLayout — workspace round-trip", () => {
     expect(restoredTabIds.has("t2")).toBe(true);
   });
 
+  it("does not persist SSH credentials in workspace snapshots", () => {
+    const sshSession: SessionConfig = {
+      protocol: "ssh",
+      sshConfig: {
+        host: "target.internal", port: 22, user: "alice", authType: "key",
+        password: "password-secret", privateKey: "private-key-secret",
+        passphrase: "passphrase-secret", savedConnectionId: "saved-1",
+        jumpHosts: [{ id: "jump-1", host: "bastion", port: 22, user: "alice", authType: "password", password: "jump-secret" }],
+        autoLoginRules: [{ expect: "Password:", response: "expect-secret" }],
+        postConnectCommands: ["export TOKEN=secret"],
+      },
+    };
+    const { layout } = createHarness([makeTab("ssh-1", "SSH", sshSession)]);
+    const snapshot = JSON.stringify(layout.createPersistedWorkspaceState(true));
+
+    expect(snapshot).toContain("saved-1");
+    for (const secret of ["password-secret", "private-key-secret", "passphrase-secret", "jump-secret", "expect-secret", "TOKEN=secret"]) {
+      expect(snapshot).not.toContain(secret);
+    }
+  });
+
   it("rejects workspace snapshots with the wrong version", () => {
     const { layout } = createHarness();
     expect(layout.restoreWorkspaceState(null)).toBeNull();
