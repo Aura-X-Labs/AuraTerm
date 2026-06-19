@@ -397,6 +397,22 @@ onMounted(async () => {
       : null;
 
     if (restoredWorkspaceState) {
+      try {
+        const savedConnections = await invoke<SavedConnection[]>("get_connections");
+        const savedById = new Map(savedConnections.map((connection) => [connection.id, connection]));
+        for (const tab of restoredWorkspaceState.tabs) {
+          if (tab.session.protocol !== "ssh") {
+            continue;
+          }
+          const savedId = tab.session.sshConfig.savedConnectionId;
+          const saved = savedId ? savedById.get(savedId) : undefined;
+          if (saved) {
+            tab.session = buildSessionFromSavedConnection(saved);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to hydrate restored SSH credentials", error);
+      }
       applyRestoredWorkspaceState(restoredWorkspaceState);
       syncTabIdCounter(restoredWorkspaceState.tabs);
     } else {

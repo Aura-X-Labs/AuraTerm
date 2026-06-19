@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings, type SerialHistoryItem } from "./settings";
 import { buildDefaultLogPath } from "./logging";
-import { isReconnectEnabled, type ConnectResult, type ConnectionProtocol, type ReconnectType, type SerialConfig } from "./types";
+import { isReconnectEnabled, type AutoLoginRule, type ConnectResult, type ConnectionProtocol, type JumpHostConfig, type ReconnectType, type SerialConfig, type SshAuthType } from "./types";
 import "./ConnectDialog.css";
 
 interface SerialPortInfo {
@@ -13,6 +13,12 @@ interface SerialPortInfo {
   serialNumber?: string | null;
   vid?: number | null;
   pid?: number | null;
+}
+
+interface GeneratedSshKeyPair {
+  privateKey: string;
+  publicKey: string;
+  fingerprint: string;
 }
 
 interface SerialPresetOption {
@@ -67,11 +73,17 @@ const host = ref("");
 const port = ref("22");
 const user = ref("");
 const password = ref("");
+const passphrase = ref("");
 const privateKey = ref("");
 const privateKeyFileName = ref("");
 const privateKeyError = ref("");
+const generatedPublicKey = ref("");
 const privateKeyFileInput = ref<HTMLInputElement | null>(null);
-const authType = ref<"password" | "key">("password");
+const authType = ref<SshAuthType>("password");
+const agentForwarding = ref(false);
+const jumpHosts = ref<JumpHostConfig[]>([]);
+const autoLoginRules = ref<AutoLoginRule[]>([]);
+const postConnectCommands = ref("");
 const saveConnection = ref(true);
 const connectionName = ref("");
 const connectionGroup = ref("");
@@ -196,7 +208,8 @@ const canConnect = computed(() => {
     return Boolean(
       host.value.trim()
       && user.value.trim()
-      && (authType.value !== "key" || privateKey.value.trim()),
+      && (authType.value !== "key" || privateKey.value.trim())
+      && jumpHosts.value.every((jump) => jump.host.trim() && jump.user.trim() && (jump.authType !== "key" || jump.privateKey?.trim()))
     );
   }
   if (isTelnet.value) {
@@ -215,6 +228,24 @@ function handleSerialPresetChange(event: Event) {
   if (preset) {
     applySerialOption(preset);
   }
+}
+
+function addJumpHost() {
+  jumpHosts.value.push({
+    id: crypto.randomUUID(), host: "", port: 22, user: "", authType: "agent",
+  });
+}
+
+function removeJumpHost(index: number) {
+  jumpHosts.value.splice(index, 1);
+}
+
+function addAutoLoginRule() {
+  autoLoginRules.value.push({ expect: "", response: "", timeoutSecs: 30 });
+}
+
+function removeAutoLoginRule(index: number) {
+  autoLoginRules.value.splice(index, 1);
 }
 
 function triggerPrivateKeyPicker() {
@@ -248,9 +279,29 @@ function clearPrivateKeySelection() {
   privateKey.value = "";
   privateKeyFileName.value = "";
   privateKeyError.value = "";
+  generatedPublicKey.value = "";
   if (privateKeyFileInput.value) {
     privateKeyFileInput.value.value = "";
   }
+}
+
+async function generatePrivateKey() {
+  privateKeyError.value = "";
+  try {
+    const generated = await invoke<GeneratedSshKeyPair>("ssh_generate_key_pair", {
+      passphrase: passphrase.value || null,
+      comment: user.value && host.value ? `${user.value}@${host.value}` : "AuraTerm",
+    });
+    privateKey.value = generated.privateKey;
+    privateKeyFileName.value = `Generated Ed25519 (${generated.fingerprint})`;
+    generatedPublicKey.value = generated.publicKey;
+  } catch (error) {
+    privateKeyError.value = String(error);
+  }
+}
+
+async function copyGeneratedPublicKey() {
+  await navigator.clipboard.writeText(generatedPublicKey.value);
 }
 
 function handleSubmit(event: Event) {
@@ -288,6 +339,12 @@ function handleSubmit(event: Event) {
       user: user.value,
       password: sshSecret,
       privateKey: authType.value === "key" ? privateKey.value : undefined,
+      passphrase: authType.value === "key" && passphrase.value ? passphrase.value : undefined,
+      authType: authType.value,
+      agentForwarding: agentForwarding.value,
+      jumpHosts: jumpHosts.value.map((jump) => ({ ...jump, host: jump.host.trim(), user: jump.user.trim() })),
+      autoLoginRules: autoLoginRules.value.filter((rule) => rule.expect.trim()).map((rule) => ({ ...rule, expect: rule.expect.trim() })),
+      postConnectCommands: postConnectCommands.value.split(/\r?\n/).map((command) => command.trim()).filter(Boolean),
       autoReconnect: isReconnectEnabled(reconnectType.value),
       reconnectType: reconnectType.value,
     } : undefined,
@@ -441,6 +498,8 @@ function handleSubmit(event: Event) {
             <select v-model="authType">
               <option value="password">Password</option>
               <option value="key">Private Key</option>
+              <option value="agent">SSH Agent / Pageant</option>
+              <option value="none">Keyboard Interactive</option>
             </select>
           </div>
 
@@ -449,7 +508,7 @@ function handleSubmit(event: Event) {
             <input v-model="password" type="password">
           </div>
 
-          <div v-else class="form-group">
+          <div v-else-if="authType === 'key'" class="form-group">
             <label>Private Key:</label>
             <input
               ref="privateKeyFileInput"
@@ -465,6 +524,7 @@ function handleSubmit(event: Event) {
                 readonly
               >
               <button type="button" class="private-key-picker-btn" @click="triggerPrivateKeyPicker">Browse...</button>
+              <button type="button" class="private-key-picker-btn" @click="generatePrivateKey">Generate</button>
               <button
                 v-if="privateKeyFileName"
                 type="button"
@@ -475,8 +535,64 @@ function handleSubmit(event: Event) {
               </button>
             </div>
             <div v-if="privateKeyError" class="form-hint error">{{ privateKeyError }}</div>
-            <input v-model="password" type="password" placeholder="Key Passphrase (optional)" style="margin-top: 8px">
+            <input v-model="passphrase" type="password" placeholder="Key Passphrase (optional)" style="margin-top: 8px">
+            <div v-if="generatedPublicKey" class="generated-public-key">
+              <textarea :value="generatedPublicKey" rows="2" readonly />
+              <button type="button" class="private-key-picker-btn" @click="copyGeneratedPublicKey">Copy public key</button>
+            </div>
           </div>
+
+          <details class="ssh-advanced">
+            <summary>ProxyJump and login automation</summary>
+
+            <label class="ssh-checkbox">
+              <input v-model="agentForwarding" type="checkbox">
+              Forward local SSH agent to the target
+            </label>
+
+            <div class="ssh-advanced-heading">
+              <strong>Jump hosts</strong>
+              <button type="button" @click="addJumpHost">Add jump host</button>
+            </div>
+            <div v-for="(jump, index) in jumpHosts" :key="jump.id" class="ssh-advanced-card">
+              <div class="ssh-card-grid">
+                <input v-model="jump.host" type="text" placeholder="Jump host">
+                <input v-model.number="jump.port" type="number" min="1" max="65535" placeholder="Port">
+                <input v-model="jump.user" type="text" placeholder="User">
+                <select v-model="jump.authType">
+                  <option value="password">Password</option>
+                  <option value="key">Private Key</option>
+                  <option value="agent">SSH Agent / Pageant</option>
+                  <option value="none">Keyboard Interactive</option>
+                </select>
+              </div>
+              <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" placeholder="Jump host password">
+              <template v-else-if="jump.authType === 'key'">
+                <textarea v-model="jump.privateKey" rows="3" placeholder="Private key (PEM/OpenSSH)" />
+                <input v-model="jump.passphrase" type="password" placeholder="Key passphrase (optional)">
+              </template>
+              <button type="button" class="ssh-remove-btn" @click="removeJumpHost(index)">Remove</button>
+            </div>
+
+            <div class="ssh-advanced-heading">
+              <strong>Expect rules</strong>
+              <button type="button" @click="addAutoLoginRule">Add rule</button>
+            </div>
+            <div v-for="(rule, index) in autoLoginRules" :key="index" class="ssh-advanced-card">
+              <div class="ssh-card-grid ssh-card-grid--automation">
+                <input v-model="rule.expect" type="text" placeholder="Wait for text, e.g. Password:">
+                <input v-model="rule.response" type="password" placeholder="Send response">
+                <input v-model.number="rule.timeoutSecs" type="number" min="1" max="300" title="Timeout seconds">
+              </div>
+              <label class="ssh-checkbox"><input v-model="rule.caseSensitive" type="checkbox"> Case sensitive</label>
+              <button type="button" class="ssh-remove-btn" @click="removeAutoLoginRule(index)">Remove</button>
+            </div>
+
+            <div class="form-group">
+              <label>Commands after login (one per line)</label>
+              <textarea v-model="postConnectCommands" rows="3" placeholder="source /etc/profile" />
+            </div>
+          </details>
         </template>
 
         <div class="form-group save-connection-group">

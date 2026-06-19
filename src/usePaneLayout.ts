@@ -164,6 +164,16 @@ function restoreSessionConfig(value: unknown): SessionConfig | null {
         user: sshConfig.user,
         password: typeof sshConfig.password === "string" ? sshConfig.password : undefined,
         privateKey: typeof sshConfig.privateKey === "string" ? sshConfig.privateKey : undefined,
+        passphrase: typeof sshConfig.passphrase === "string" ? sshConfig.passphrase : undefined,
+        authType: sshConfig.authType === "password" || sshConfig.authType === "key" || sshConfig.authType === "agent" || sshConfig.authType === "none"
+          ? sshConfig.authType
+          : undefined,
+        agentForwarding: typeof sshConfig.agentForwarding === "boolean" ? sshConfig.agentForwarding : undefined,
+        jumpHosts: Array.isArray(sshConfig.jumpHosts) ? sshConfig.jumpHosts as never : undefined,
+        autoLoginRules: Array.isArray(sshConfig.autoLoginRules) ? sshConfig.autoLoginRules as never : undefined,
+        postConnectCommands: Array.isArray(sshConfig.postConnectCommands)
+          ? sshConfig.postConnectCommands.filter((item): item is string => typeof item === "string")
+          : undefined,
         savedConnectionId: typeof sshConfig.savedConnectionId === "string" ? sshConfig.savedConnectionId : undefined,
         autoReconnect: typeof sshConfig.autoReconnect === "boolean" ? sshConfig.autoReconnect : undefined,
         reconnectType: sshConfig.reconnectType === "manual"
@@ -218,6 +228,31 @@ function restoreSessionConfig(value: unknown): SessionConfig | null {
   }
 
   return null;
+}
+
+function sanitizeSessionForPersistence(session: SessionConfig): SessionConfig {
+  if (session.protocol !== "ssh") {
+    return session;
+  }
+
+  const config = session.sshConfig;
+  return {
+    protocol: "ssh",
+    sshConfig: {
+      ...config,
+      password: undefined,
+      privateKey: undefined,
+      passphrase: undefined,
+      jumpHosts: config.jumpHosts?.map((jump) => ({
+        ...jump,
+        password: undefined,
+        privateKey: undefined,
+        passphrase: undefined,
+      })),
+      autoLoginRules: config.autoLoginRules?.map((rule) => ({ ...rule, response: undefined })),
+      postConnectCommands: undefined,
+    },
+  };
 }
 
 function restorePersistedTabSnapshot(value: unknown): PaneLayoutTab | null {
@@ -646,7 +681,7 @@ export function usePaneLayout({ tabs, isWindowFocused, terminalContainerRef }: U
       tabs: tabs.value.map((tab) => ({
         id: tab.id,
         title: tab.title,
-        session: tab.session,
+        session: sanitizeSessionForPersistence(tab.session),
         logPath: tab.logPath,
       })),
       paneLayout: paneLayout.value,

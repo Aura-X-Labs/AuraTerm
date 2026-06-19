@@ -185,11 +185,32 @@ pub struct CredentialStore {
     pub credentials: Vec<StoredCredential>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct StoredCredential {
     pub connection_id: String,
+    #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
     pub private_key: Option<String>,
+    #[serde(default)]
+    pub passphrase: Option<String>,
+    #[serde(default)]
+    pub jump_hosts: Vec<StoredJumpCredential>,
+    #[serde(default)]
+    pub auto_login_responses: Vec<String>,
+    #[serde(default)]
+    pub post_connect_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct StoredJumpCredential {
+    pub id: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub passphrase: Option<String>,
 }
 
 /// 加密文件头
@@ -923,11 +944,19 @@ mod tests {
                     connection_id: "conn-1".to_string(),
                     password: Some("pw".to_string()),
                     private_key: None,
+                    passphrase: None,
+                    jump_hosts: Vec::new(),
+                    auto_login_responses: Vec::new(),
+                    post_connect_commands: Vec::new(),
                 },
                 StoredCredential {
                     connection_id: "conn-2".to_string(),
                     password: None,
                     private_key: Some("KEY".to_string()),
+                    passphrase: None,
+                    jump_hosts: Vec::new(),
+                    auto_login_responses: Vec::new(),
+                    post_connect_commands: Vec::new(),
                 },
             ],
         };
@@ -951,6 +980,10 @@ mod tests {
                 connection_id: "host-a".to_string(),
                 password: Some("p@ss".to_string()),
                 private_key: None,
+                passphrase: None,
+                jump_hosts: Vec::new(),
+                auto_login_responses: Vec::new(),
+                post_connect_commands: Vec::new(),
             }],
         };
 
@@ -1008,6 +1041,10 @@ mod tests {
                 connection_id: "x".to_string(),
                 password: Some("y".to_string()),
                 private_key: None,
+                passphrase: None,
+                jump_hosts: Vec::new(),
+                auto_login_responses: Vec::new(),
+                post_connect_commands: Vec::new(),
             }],
         };
 
@@ -1097,6 +1134,10 @@ mod tests {
                 connection_id: "old-host".to_string(),
                 password: Some("legacy-secret".to_string()),
                 private_key: None,
+                passphrase: None,
+                jump_hosts: Vec::new(),
+                auto_login_responses: Vec::new(),
+                post_connect_commands: Vec::new(),
             }],
         };
 
@@ -1181,6 +1222,10 @@ mod tests {
                 connection_id: "lk-host".to_string(),
                 password: Some("local-secret".to_string()),
                 private_key: None,
+                passphrase: None,
+                jump_hosts: Vec::new(),
+                auto_login_responses: Vec::new(),
+                post_connect_commands: Vec::new(),
             }],
         };
 

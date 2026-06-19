@@ -7,6 +7,49 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JumpHostConfig {
+    pub id: String,
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default = "default_password_auth")]
+    pub auth_type: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub passphrase: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoLoginRule {
+    pub expect: String,
+    #[serde(default)]
+    pub response: Option<String>,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_expect_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_ssh_port() -> u16 { 22 }
+fn default_password_auth() -> String { "password".to_string() }
+fn default_expect_timeout() -> u64 { 30 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedSshKeyPair {
+    pub private_key: String,
+    pub public_key: String,
+    pub fingerprint: String,
+}
+
+
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SshTransferMode {

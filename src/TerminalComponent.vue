@@ -104,6 +104,10 @@ function isAuthError(errorText: string): boolean {
   );
 }
 
+function usesPasswordAuth(config: SshConfig): boolean {
+  return (config.authType ?? (config.privateKey ? "key" : "password")) === "password";
+}
+
 function writePasswordRetryPrompt(target: Terminal | null) {
   target?.writeln("\r\n[Authentication failed] Incorrect password. Please enter a new password to retry.");
 }
@@ -443,7 +447,7 @@ async function reconnectSshSession() {
   } catch (error) {
     const errorText = String(error);
     ptyId.value = null;
-    if (isAuthError(errorText)) {
+    if (isAuthError(errorText) && usesPasswordAuth(activeSessionRef.value.sshConfig)) {
       writePasswordRetryPrompt(terminal);
       showRetryOverlay.value = true;
     } else {
@@ -789,7 +793,9 @@ onMounted(() => {
         if (activeSessionRef.value.protocol === "serial") {
           notifySerialConnectionStateChange("closed");
         }
-        if (activeSessionRef.value.protocol === "ssh" && isAuthError(message)) {
+        if (activeSessionRef.value.protocol === "ssh"
+          && isAuthError(message)
+          && usesPasswordAuth(activeSessionRef.value.sshConfig)) {
           ptyId.value = null;
           writePasswordRetryPrompt(terminal);
           showRetryOverlay.value = true;
@@ -882,7 +888,7 @@ onMounted(() => {
         if (session.protocol === "serial") {
           notifySerialConnectionStateChange("error");
         }
-        if (session.protocol === "ssh" && isAuthError(errorText)) {
+        if (session.protocol === "ssh" && isAuthError(errorText) && usesPasswordAuth(session.sshConfig)) {
           writePasswordRetryPrompt(terminal);
           showRetryOverlay.value = true;
         } else {

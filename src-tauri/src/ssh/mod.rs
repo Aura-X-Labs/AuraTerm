@@ -1,21 +1,51 @@
 use russh::{
     client,
-    keys::{decode_secret_key, PrivateKeyWithHashAlg},
+    keys::{
+        agent::{client::AgentClient, AgentIdentity}, decode_secret_key, PrivateKeyWithHashAlg,
+    },
     ChannelMsg,
 };
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 type SharedSshHandle = Arc<Mutex<client::Handle<known_hosts::ClientHandler>>>;
+type LocalAgentStream = Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin + 'static>;
 pub(super) const SSH_TRANSFER_PROGRESS_EVENT: &str = "ssh-transfer-progress";
 pub(super) const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
 pub(super) const TRANSFER_PROGRESS_EMIT_STEP: u64 = 256 * 1024;
 const AURATERM_RECONNECT_SESSION_PREFIX: &str = "at-";
 pub(super) const SSH_KNOWN_HOSTS_FILE: &str = "ssh_known_hosts.json";
 pub(super) const SECURITY_AUDIT_LOG_FILE: &str = "security_audit.log";
+
+#[cfg(unix)]
+pub(super) async fn connect_local_agent_stream() -> Result<LocalAgentStream, String> {
+    AgentClient::<tokio::net::UnixStream>::connect_env()
+        .await
+        .map(AgentClient::into_inner)
+        .map_err(|error| format!("SSH agent unavailable: {error}"))
+}
+
+#[cfg(windows)]
+pub(super) async fn connect_local_agent_stream() -> Result<LocalAgentStream, String> {
+    use tokio::net::windows::named_pipe::NamedPipeClient;
+
+    let pipe = std::env::var_os("SSH_AUTH_SOCK")
+        .unwrap_or_else(|| std::ffi::OsString::from(r"\\.\pipe\openssh-ssh-agent"));
+    if let Ok(client) = AgentClient::<NamedPipeClient>::connect_named_pipe(pipe).await {
+        return Ok(client.into_inner());
+    }
+
+    AgentClient::connect_pageant()
+        .await
+        .map(AgentClient::into_inner)
+        .map_err(|error| format!("OpenSSH agent and Pageant are unavailable: {error}"))
+}
 
 mod types;
 mod known_hosts;
@@ -29,7 +59,7 @@ mod forwarding;
 // specific module — hence the allow attribute.
 #[allow(unused_imports)]
 pub use types::{
-    KeyboardInteractivePromptPayload, PtyExitPayload, ReconnectSessionPromptPayload,
+    AutoLoginRule, GeneratedSshKeyPair, JumpHostConfig, KeyboardInteractivePromptPayload, PtyExitPayload, ReconnectSessionPromptPayload,
     RemoteDirectoryListing, RemoteFileEntry, SshHostKeyMismatchPromptPayload, SshMfaPrompt,
     SshTransferDirection, SshTransferMode, SshTransferProgressPayload, SshTransferStatus,
     TerminalDataPayload, TrustedSshHostKeyEntry,
@@ -47,6 +77,42 @@ pub use transfer::*;
 // Port-forwarding / tunnel manager commands + `ForwardingState` (managed in
 // `main.rs`). Glob re-export so `generate_handler!` resolves `ssh::__cmd__*`.
 pub use forwarding::*;
+
+#[tauri::command]
+pub fn ssh_generate_key_pair(
+    passphrase: Option<String>,
+    comment: Option<String>,
+) -> Result<GeneratedSshKeyPair, String> {
+    use russh::keys::{Algorithm, HashAlg, PrivateKey};
+    use ssh_key::LineEnding;
+
+    let mut rng = russh::keys::key::safe_rng();
+    let mut key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
+        .map_err(|error| format!("Failed to generate Ed25519 key: {error}"))?;
+    let comment = comment
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(comment) = &comment {
+        key.set_comment(comment);
+    }
+    if let Some(passphrase) = passphrase.filter(|value| !value.is_empty()) {
+        key = key.encrypt(&mut rng, passphrase.as_bytes())
+            .map_err(|error| format!("Failed to encrypt private key: {error}"))?;
+    }
+
+    let private_key = key.to_openssh(LineEnding::LF)
+        .map_err(|error| format!("Failed to encode private key: {error}"))?
+        .to_string();
+    let mut public = key.public_key().clone();
+    if let Some(comment) = comment {
+        public.set_comment(comment);
+    }
+    let public_key = public.to_openssh()
+        .map_err(|error| format!("Failed to encode public key: {error}"))?;
+    let fingerprint = public.fingerprint(HashAlg::Sha256).to_string();
+    Ok(GeneratedSshKeyPair { private_key, public_key, fingerprint })
+}
+
 
 /// Per-session state consolidated into a single record.
 ///
@@ -76,13 +142,30 @@ pub struct SshSessionState {
     /// Underlying russh handle shared across PTY / SFTP / kill paths.
     handle: Option<SharedSshHandle>,
     /// When `Some`, an auto-reconnect loop is active; notifying it stops the loop.
-    reconnect_flag: Option<Arc<tokio::sync::Notify>>,
+    reconnect_flag: Option<Arc<ReconnectCancellation>>,
     /// When `Some`, auto-reconnect is enabled and this config is used on every retry.
     reconnect_config: Option<ReconnectConfig>,
     /// Per-session remote (`-R`) forward registry, shared with the russh
     /// `ClientHandler`. Created lazily and reused across reconnects so the
     /// handler always sees the same map.
     remote_forwards: Option<forwarding::RemoteForwardRegistry>,
+}
+
+#[derive(Default)]
+struct ReconnectCancellation {
+    cancelled: AtomicBool,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl ReconnectCancellation {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Clone)]
@@ -99,6 +182,12 @@ struct ReconnectConfig {
     user: String,
     password: Option<String>,
     private_key: Option<String>,
+    passphrase: Option<String>,
+    auth_type: Option<String>,
+    agent_forwarding: bool,
+    jump_hosts: Vec<JumpHostConfig>,
+    auto_login_rules: Vec<AutoLoginRule>,
+    post_connect_commands: Vec<String>,
     reconnect_type: ReconnectType,
     session_name: String,
     checked_existing_sessions: bool,
@@ -211,6 +300,17 @@ impl SshState {
             .clone()
     }
 
+    async fn ensure_remote_forwards_owned(self, id: String) -> forwarding::RemoteForwardRegistry {
+        self.ensure_remote_forwards(&id).await
+    }
+
+    async fn upsert_session_owned<F>(self, id: String, f: F)
+    where
+        F: FnOnce(&mut SshSessionState) + Send,
+    {
+        self.upsert_session(&id, f).await;
+    }
+
     /// Read-only access to the remote-forward registry, if one exists.
     async fn remote_forwards_opt(&self, id: &str) -> Option<forwarding::RemoteForwardRegistry> {
         let guard = self.sessions.read().await;
@@ -316,7 +416,7 @@ async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) {
         notify
     };
     if let Some(notify) = notify {
-        notify.notify_waiters();
+        notify.cancel();
     }
 }
 
@@ -328,13 +428,13 @@ async fn get_ssh_handle(state: &SshState, id: &str) -> Result<SharedSshHandle, S
 }
 
 async fn set_reconnect_session_metadata(
-    state: &SshState,
-    id: &str,
+    state: SshState,
+    id: String,
     session_name: Option<String>,
     checked_existing_sessions: Option<bool>,
 ) {
     state
-        .with_session_mut(id, |s| {
+        .with_session_mut(&id, |s| {
             if let Some(config) = s.reconnect_config.as_mut() {
                 if let Some(name) = session_name {
                     config.session_name = name;
@@ -447,7 +547,7 @@ pub async fn rename_ssh_session(
     };
 
     let handle = get_ssh_handle(&state, &id).await?;
-    run_remote_command_capture(&handle, rename_cmd).await?;
+    run_remote_command_capture(handle, rename_cmd).await?;
 
     state
         .with_session_mut(&id, |s| {
@@ -556,189 +656,291 @@ pub async fn close_ssh_pty(
 }
 
 /// Authenticate an SSH session and return a connected handle.
-async fn authenticate_ssh(
-    host: &str,
+fn authenticate_ssh(
+    host: String,
     port: u16,
-    user: &str,
-    password: Option<&str>,
-    private_key: Option<&str>,
-    app: &AppHandle,
-    id: &str,
+    user: String,
+    password: Option<String>,
+    private_key: Option<String>,
+    passphrase: Option<String>,
+    auth_type: Option<String>,
+    agent_forwarding: bool,
+    jump_hosts: Vec<JumpHostConfig>,
+    app: AppHandle,
+    id: String,
     auth_response_rx: &mut mpsc::Receiver<String>,
     remote_forwards: forwarding::RemoteForwardRegistry,
-) -> Result<SharedSshHandle, String> {
-    let scope = known_hosts::known_host_scope(host, port);
-    let mut known_hosts_store = known_hosts::load_known_hosts(app).await?;
-    let expected_fingerprint = known_hosts_store.hosts.get(&scope).cloned();
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SharedSshHandle, String>> + Send + '_>> {
+    Box::pin(async move {
+    let mut current: Option<SharedSshHandle> = None;
 
-    let (mut session, observed_fingerprint) = match known_hosts::connect_with_expected_fingerprint(
-        host,
-        port,
-        expected_fingerprint.clone(),
-        remote_forwards.clone(),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err((connection_error, observed)) => {
-            let mismatch = expected_fingerprint
-                .as_ref()
-                .zip(observed.as_ref())
-                .is_some_and(|(expected, actual)| expected != actual);
-
-            if !mismatch {
-                return Err(connection_error);
-            }
-
-            let expected_value = expected_fingerprint
-                .clone()
-                .ok_or_else(|| "Missing expected fingerprint".to_string())?;
-            let observed_value = observed
-                .clone()
-                .ok_or_else(|| "Missing observed fingerprint".to_string())?;
-            let ssh_state = app.state::<SshState>().inner().clone();
-
-            let trust_new = known_hosts::prompt_for_host_key_override(
-                app,
-                ssh_state,
-                id,
-                host,
-                port,
-                &expected_value,
-                &observed_value,
+    for jump in jump_hosts {
+        let (mut session, observed) = if let Some(previous) = current.as_ref() {
+            let channel = open_proxy_channel(previous.clone(), jump.host.clone(), jump.port)?;
+            known_hosts::connect_stream_with_expected_fingerprint(
+                channel.into_stream(),
+                None,
+                forwarding::new_remote_forward_registry(),
+                false,
             )
-            .await?;
-
-            if !trust_new {
-                return Err(format!(
-                    "SSH host key changed for {scope}. Connection cancelled by user."
-                ));
-            }
-
-            known_hosts_store
-                .hosts
-                .insert(scope.clone(), observed_value.clone());
-            known_hosts::save_known_hosts(app, &known_hosts_store).await?;
-            known_hosts::append_host_key_override_audit_log(
-                app,
-                host,
-                port,
-                &expected_value,
-                &observed_value,
-            )
-            .await?;
-
+            .await
+            .map_err(|(error, _)| error)?
+        } else {
             known_hosts::connect_with_expected_fingerprint(
-                host,
-                port,
-                Some(observed_value.clone()),
-                remote_forwards.clone(),
+                jump.host.clone(),
+                jump.port,
+                None,
+                forwarding::new_remote_forward_registry(),
+                false,
             )
             .await
-            .map_err(|(error, _)| {
-                format!("Failed to reconnect after trusting new host key: {error}")
-            })?
-        }
-    };
+            .map_err(|(error, _)| error)?
+        };
 
-    crate::debug_log!("Authenticating as {}...", user);
+        verify_host_fingerprint(app.clone(), id.clone(), jump.host.clone(), jump.port, observed).await?;
+        session = authenticate_connected_session(
+            session,
+            jump.user.clone(),
+            Some(jump.auth_type.clone()),
+            jump.password.clone(),
+            jump.private_key.clone(),
+            jump.passphrase.clone(),
+            app.clone(),
+            id.clone(),
+            auth_response_rx,
+        )
+        .await
+        .map_err(|error| format!("ProxyJump {}@{}:{}: {error}", jump.user, jump.host, jump.port))?;
+        current = Some(Arc::new(Mutex::new(session)));
+    }
 
-    let password = password.filter(|v| !v.is_empty());
-    let private_key = private_key.filter(|v| !v.trim().is_empty());
-
-    let auth_res_start = if let Some(pk) = private_key {
-        let decoded_key = decode_secret_key(pk, password)
-            .map_err(|error| format!("Private key parse error: {error}"))?;
-        let rsa_hash = session
-            .best_supported_rsa_hash()
-            .await
-            .map_err(|error| format!("Failed to determine RSA hash algorithm: {error}"))?
-            .flatten();
-
-        match session
-            .authenticate_publickey(user.to_string(), PrivateKeyWithHashAlg::new(Arc::new(decoded_key), rsa_hash))
-            .await
-        {
-            Ok(russh::client::AuthResult::Success) => {
-                crate::debug_log!("Public key authentication successful!");
-                None
-            }
-            Ok(russh::client::AuthResult::Failure { .. }) => {
-                return Err("Private key authentication failed".to_string());
-            }
-            Err(error) => return Err(format!("Private key auth error: {error}")),
-        }
-    } else if let Some(pwd) = password {
-        match session.authenticate_password(user.to_string(), pwd.to_string()).await {
-            Ok(russh::client::AuthResult::Success) => {
-                crate::debug_log!("Password authentication successful!");
-                None
-            }
-            Ok(russh::client::AuthResult::Failure { .. }) => {
-                crate::debug_log!("Password auth failed, falling back to keyboard-interactive");
-                Some(session.authenticate_keyboard_interactive_start(user.to_string(), None).await)
-            }
-            Err(error) => return Err(format!("Password auth error: {error}")),
-        }
+    let (mut session, observed) = if let Some(previous) = current.as_ref() {
+        let channel = open_proxy_channel(previous.clone(), host.clone(), port)?;
+        known_hosts::connect_stream_with_expected_fingerprint(
+            channel.into_stream(),
+            None,
+            remote_forwards,
+            agent_forwarding,
+        )
+        .await
+        .map_err(|(error, _)| error)?
     } else {
-        Some(session.authenticate_keyboard_interactive_start(user.to_string(), None).await)
+        known_hosts::connect_with_expected_fingerprint(
+            host.clone(),
+            port,
+            None,
+            remote_forwards,
+            agent_forwarding,
+        )
+        .await
+        .map_err(|(error, _)| error)?
     };
 
-    if let Some(auth_res_future) = auth_res_start {
-        let mut auth_res = auth_res_future
-            .map_err(|error| format!("Keyboard interactive init failed: {error}"))?;
-
-        loop {
-            match auth_res {
-                russh::client::KeyboardInteractiveAuthResponse::Success => {
-                    crate::debug_log!("Authentication successful!");
-                    break;
-                }
-                russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
-                    return Err("Authentication failed".to_string());
-                }
-                russh::client::KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
-                    let payload = KeyboardInteractivePromptPayload {
-                        id: id.to_string(),
-                        name: name.clone(),
-                        instruction: instructions.clone(),
-                        prompts: prompts.iter().map(|p| SshMfaPrompt { text: p.prompt.clone(), echo: p.echo }).collect(),
-                    };
-                    let _ = app.emit(&crate::util::session_event("ssh-mfa-prompt", id), payload);
-
-                    let mut answers = Vec::new();
-                    for _ in &prompts {
-                        match auth_response_rx.recv().await {
-                            Some(response) => answers.push(response),
-                            None => return Err("Failed to collect MFA response".to_string()),
-                        }
-                    }
-
-                    auth_res = session
-                        .authenticate_keyboard_interactive_respond(answers)
-                        .await
-                        .map_err(|error| format!("Failed auth step: {error}"))?;
-                }
-            }
-        }
-    }
-
-    if expected_fingerprint.is_none() {
-        if let Some(observed) = observed_fingerprint {
-            known_hosts_store.hosts.insert(scope, observed);
-            known_hosts::save_known_hosts(app, &known_hosts_store).await?;
-        }
-    }
+    verify_host_fingerprint(app.clone(), id.clone(), host.clone(), port, observed).await?;
+    session = authenticate_connected_session(
+        session,
+        user,
+        auth_type,
+        password,
+        private_key,
+        passphrase,
+        app,
+        id,
+        auth_response_rx,
+    )
+    .await?;
 
     Ok(Arc::new(Mutex::new(session)))
+    })
+}
+
+fn open_proxy_channel(
+    handle: SharedSshHandle,
+    host: String,
+    port: u16,
+) -> Result<russh::Channel<client::Msg>, String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async move {
+            let guard = handle.lock().await;
+            guard
+                .channel_open_direct_tcpip(host.clone(), port.into(), "127.0.0.1".to_string(), 0)
+                .await
+                .map_err(|error| format!("ProxyJump channel to {host}:{port} failed: {error}"))
+        })
+    })
+}
+
+async fn verify_host_fingerprint(
+    app: AppHandle,
+    id: String,
+    host: String,
+    port: u16,
+    observed: Option<String>,
+) -> Result<(), String> {
+    let observed = observed.ok_or_else(|| format!("SSH server {host}:{port} did not present a host key"))?;
+    let scope = known_hosts::known_host_scope(&host, port);
+    let mut store = known_hosts::load_known_hosts(&app).await?;
+
+    if let Some(expected) = store.hosts.get(&scope).cloned() {
+        if expected == observed {
+            return Ok(());
+        }
+        let trust = known_hosts::prompt_for_host_key_override(
+            &app,
+            app.state::<SshState>().inner().clone(),
+            &id,
+            &host,
+            port,
+            &expected,
+            &observed,
+        )
+        .await?;
+        if !trust {
+            return Err(format!("SSH host key changed for {scope}. Connection cancelled by user."));
+        }
+        known_hosts::append_host_key_override_audit_log(&app, &host, port, &expected, &observed).await?;
+    }
+
+    store.hosts.insert(scope, observed);
+    known_hosts::save_known_hosts(&app, &store).await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authenticate_connected_session(
+    mut session: client::Handle<known_hosts::ClientHandler>,
+    user: String,
+    auth_type: Option<String>,
+    password: Option<String>,
+    private_key: Option<String>,
+    passphrase: Option<String>,
+    app: AppHandle,
+    id: String,
+    auth_response_rx: &mut mpsc::Receiver<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, String>> + Send + '_>> {
+    Box::pin(async move {
+    let password = password.filter(|value| !value.is_empty());
+    let private_key = private_key.filter(|value| !value.trim().is_empty());
+    let method = auth_type.unwrap_or_else(|| {
+        if private_key.is_some() { "key".to_string() }
+        else if password.is_some() { "password".to_string() }
+        else { "none".to_string() }
+    });
+
+    let interactive = match method.as_str() {
+        "key" => {
+            let key = private_key.ok_or_else(|| "Private key is required".to_string())?;
+            let decoded = decode_secret_key(&key, passphrase.as_deref().filter(|value| !value.is_empty()))
+                .map_err(|error| format!("Private key parse error: {error}"))?;
+            let rsa_hash = session.best_supported_rsa_hash().await
+                .map_err(|error| format!("Failed to determine RSA hash algorithm: {error}"))?
+                .flatten();
+            match session.authenticate_publickey(
+                user.clone(),
+                PrivateKeyWithHashAlg::new(Arc::new(decoded), rsa_hash),
+            ).await {
+                Ok(client::AuthResult::Success) => None,
+                Ok(client::AuthResult::Failure { .. }) => return Err("Private key authentication failed".to_string()),
+                Err(error) => return Err(format!("Private key auth error: {error}")),
+            }
+        }
+        "agent" => {
+            return authenticate_with_agent(session, user);
+        }
+        "password" => {
+            let password = password.ok_or_else(|| "Password is required".to_string())?;
+            match session.authenticate_password(user.clone(), password).await {
+                Ok(client::AuthResult::Success) => None,
+                Ok(client::AuthResult::Failure { .. }) => {
+                    Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await)
+                }
+                Err(error) => return Err(format!("Password auth error: {error}")),
+            }
+        }
+        "none" => Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await),
+        other => return Err(format!("Unsupported SSH auth type: {other}")),
+    };
+
+    if let Some(result) = interactive {
+        run_keyboard_interactive(&mut session, result, app, id, auth_response_rx).await?;
+    }
+    Ok(session)
+    })
+}
+
+fn authenticate_with_agent(
+    mut session: client::Handle<known_hosts::ClientHandler>,
+    user: String,
+) -> Result<client::Handle<known_hosts::ClientHandler>, String> {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
+    let stream = connect_local_agent_stream().await?;
+    let mut agent = AgentClient::connect(stream);
+    let identities = agent.request_identities().await
+        .map_err(|error| format!("Failed to list SSH agent identities: {error}"))?;
+    if identities.is_empty() {
+        return Err("SSH agent has no identities".to_string());
+    }
+    let rsa_hash = session.best_supported_rsa_hash().await
+        .map_err(|error| format!("Failed to determine RSA hash algorithm: {error}"))?
+        .flatten();
+
+    for identity in identities {
+        let key = match identity {
+            AgentIdentity::PublicKey { key, .. } => key,
+            AgentIdentity::Certificate { certificate, .. } => {
+                russh::keys::PublicKey::new(certificate.public_key().clone(), "")
+            }
+        };
+        match session.authenticate_publickey_with(user.clone(), key, rsa_hash, &mut agent).await {
+            Ok(client::AuthResult::Success) => return Ok(session),
+            Ok(client::AuthResult::Failure { .. }) => continue,
+            Err(error) => return Err(format!("SSH agent signing failed: {error}")),
+        }
+    }
+    Err("SSH agent authentication failed for every identity".to_string())
+    }))
+}
+
+async fn run_keyboard_interactive(
+    session: &mut client::Handle<known_hosts::ClientHandler>,
+    result: Result<client::KeyboardInteractiveAuthResponse, russh::Error>,
+    app: AppHandle,
+    id: String,
+    auth_response_rx: &mut mpsc::Receiver<String>,
+) -> Result<(), String> {
+    let mut response = result.map_err(|error| format!("Keyboard interactive init failed: {error}"))?;
+    loop {
+        match response {
+            client::KeyboardInteractiveAuthResponse::Success => return Ok(()),
+            client::KeyboardInteractiveAuthResponse::Failure { .. } => return Err("Authentication failed".to_string()),
+            client::KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
+                let payload = KeyboardInteractivePromptPayload {
+                    id: id.to_string(),
+                    name,
+                    instruction: instructions,
+                    prompts: prompts.iter().map(|prompt| SshMfaPrompt {
+                        text: prompt.prompt.clone(),
+                        echo: prompt.echo,
+                    }).collect(),
+                };
+                let _ = app.emit(&crate::util::session_event("ssh-mfa-prompt", &id), payload);
+                let mut answers = Vec::with_capacity(prompts.len());
+                for _ in &prompts {
+                    answers.push(auth_response_rx.recv().await
+                        .ok_or_else(|| "Failed to collect MFA response".to_string())?);
+                }
+                response = session.authenticate_keyboard_interactive_respond(answers).await
+                    .map_err(|error| format!("Failed auth step: {error}"))?;
+            }
+        }
+    }
 }
 
 /// Re-issue `tcpip-forward` requests for every registered remote (`-R`) forward
 /// on a freshly connected handle. Used after a reconnect so server-side
 /// listeners are recreated; best-effort, errors are ignored.
 async fn reissue_remote_forwards(
-    handle: &SharedSshHandle,
-    registry: &forwarding::RemoteForwardRegistry,
+    handle: SharedSshHandle,
+    registry: forwarding::RemoteForwardRegistry,
 ) {
     let binds: Vec<(String, u32)> = match registry.lock() {
         Ok(map) => map
@@ -757,7 +959,7 @@ async fn reissue_remote_forwards(
 }
 
 /// Check whether a command exists on the remote host.
-async fn run_remote_command_capture(handle: &SharedSshHandle, command: String) -> Result<String, String> {
+async fn run_remote_command_capture(handle: SharedSshHandle, command: String) -> Result<String, String> {
     let Ok(channel) = ({
         let guard = handle.lock().await;
         guard.channel_open_session().await
@@ -785,7 +987,7 @@ async fn run_remote_command_capture(handle: &SharedSshHandle, command: String) -
     Ok(output)
 }
 
-async fn remote_command_exists(handle: &SharedSshHandle, cmd: &str) -> bool {
+async fn remote_command_exists(handle: SharedSshHandle, cmd: String) -> bool {
     let check_cmd = format!("command -v {} >/dev/null 2>&1 && echo __EXISTS__", cmd);
     match run_remote_command_capture(handle, check_cmd).await {
         Ok(output) => output.contains("__EXISTS__"),
@@ -794,14 +996,14 @@ async fn remote_command_exists(handle: &SharedSshHandle, cmd: &str) -> bool {
 }
 
 async fn list_detached_auraterm_sessions(
-    handle: &SharedSshHandle,
+    handle: SharedSshHandle,
     reconnect_type: ReconnectType,
 ) -> Result<Vec<String>, String> {
     let output = match reconnect_type {
         ReconnectType::Manual => return Ok(vec![]),
         ReconnectType::Simple => return Ok(vec![]),
         ReconnectType::Tmux => run_remote_command_capture(
-            handle,
+            handle.clone(),
             "tmux list-sessions -F '#{session_name} #{?session_attached,1,0}' 2>/dev/null || true".to_string(),
         )
         .await?,
@@ -843,9 +1045,9 @@ async fn list_detached_auraterm_sessions(
 }
 
 async fn prompt_for_existing_reconnect_session(
-    app: &AppHandle,
-    state: &SshState,
-    id: &str,
+    app: AppHandle,
+    state: SshState,
+    id: String,
     reconnect_type: ReconnectType,
     sessions: Vec<String>,
 ) -> Result<Option<String>, String> {
@@ -855,7 +1057,7 @@ async fn prompt_for_existing_reconnect_session(
 
     let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
     state
-        .upsert_session(id, |s| s.reconnect_prompt_tx = Some(tx))
+        .upsert_session(&id, |s| s.reconnect_prompt_tx = Some(tx))
         .await;
 
     let tool = match reconnect_type {
@@ -867,9 +1069,9 @@ async fn prompt_for_existing_reconnect_session(
 
     if app
         .emit(
-            &crate::util::session_event("ssh-reconnect-session-prompt", id),
+            &crate::util::session_event("ssh-reconnect-session-prompt", &id),
             ReconnectSessionPromptPayload {
-                id: id.to_string(),
+                id: id.clone(),
                 tool: tool.to_string(),
                 sessions,
             },
@@ -877,7 +1079,7 @@ async fn prompt_for_existing_reconnect_session(
         .is_err()
     {
         state
-            .with_session_mut(id, |s| s.reconnect_prompt_tx = None)
+            .with_session_mut(&id, |s| s.reconnect_prompt_tx = None)
             .await;
         return Ok(None);
     }
@@ -889,7 +1091,7 @@ async fn prompt_for_existing_reconnect_session(
         .flatten();
 
     state
-        .with_session_mut(id, |s| s.reconnect_prompt_tx = None)
+        .with_session_mut(&id, |s| s.reconnect_prompt_tx = None)
         .await;
     Ok(response)
 }
@@ -898,11 +1100,12 @@ async fn prompt_for_existing_reconnect_session(
 /// For Manual/Simple mode or when the multiplexer is unavailable, falls back to a plain shell.
 /// Returns (channel, used_multiplexer: bool).
 async fn open_pty_channel(
-    handle: &SharedSshHandle,
-    session_name: &str,
+    handle: SharedSshHandle,
+    session_name: String,
     cols: u32,
     rows: u32,
     reconnect_type: Option<ReconnectType>,
+    agent_forwarding: bool,
 ) -> Result<(russh::Channel<client::Msg>, bool), String> {
     let guard = handle.lock().await;
     let channel = guard
@@ -916,6 +1119,13 @@ async fn open_pty_channel(
         .await
         .map_err(|error| format!("PTY request failed: {error}"))?;
 
+    if agent_forwarding {
+        channel
+            .agent_forward(false)
+            .await
+            .map_err(|error| format!("Agent forwarding request failed: {error}"))?;
+    }
+
     if let Some(rt) = reconnect_type {
         match rt {
             // Manual/Simple modes skip the multiplexer and go straight to the shell.
@@ -928,12 +1138,12 @@ async fn open_pty_channel(
                     ReconnectType::Manual => unreachable!(),
                     ReconnectType::Simple => unreachable!(),
                 };
-                let tool_available = remote_command_exists(handle, tool_name).await;
+                let tool_available = remote_command_exists(handle.clone(), tool_name.to_string()).await;
 
                 if tool_available {
                     let attach_cmd = match rt {
-                        ReconnectType::Tmux => build_tmux_attach_command(session_name),
-                        ReconnectType::Screen => build_screen_attach_command(session_name),
+                        ReconnectType::Tmux => build_tmux_attach_command(&session_name),
+                        ReconnectType::Screen => build_screen_attach_command(&session_name),
                         ReconnectType::Manual => unreachable!(),
                         ReconnectType::Simple => unreachable!(),
                     };
@@ -966,6 +1176,12 @@ pub async fn start_ssh_pty(
     user: String,
     password: Option<String>,
     private_key: Option<String>,
+    passphrase: Option<String>,
+    auth_type: Option<String>,
+    agent_forwarding: Option<bool>,
+    jump_hosts: Option<Vec<JumpHostConfig>>,
+    auto_login_rules: Option<Vec<AutoLoginRule>>,
+    post_connect_commands: Option<Vec<String>>,
     cols: u32,
     rows: u32,
     auto_reconnect: Option<bool>,
@@ -994,7 +1210,7 @@ pub async fn start_ssh_pty(
     if use_reconnect {
         // Store reconnect configuration + cancellation notifier in a single
         // write-lock acquisition.
-        let cancel_notify = Arc::new(tokio::sync::Notify::new());
+        let cancel_notify = Arc::new(ReconnectCancellation::default());
         let cancel_notify_clone = cancel_notify.clone();
         state
             .upsert_session(&id, |s| {
@@ -1004,6 +1220,12 @@ pub async fn start_ssh_pty(
                     user: user.clone(),
                     password: password.clone(),
                     private_key: private_key.clone(),
+                    passphrase: passphrase.clone(),
+                    auth_type: auth_type.clone(),
+                    agent_forwarding: agent_forwarding.unwrap_or(false),
+                    jump_hosts: jump_hosts.clone().unwrap_or_default(),
+                    auto_login_rules: auto_login_rules.clone().unwrap_or_default(),
+                    post_connect_commands: post_connect_commands.clone().unwrap_or_default(),
                     reconnect_type: rt,
                     session_name: auraterm_reconnect_session_name(&id),
                     checked_existing_sessions: false,
@@ -1039,14 +1261,20 @@ pub async fn start_ssh_pty(
             other => Some(other),
         };
         let result = do_single_ssh_connect(
-            &app,
-            state.inner(),
-            &id,
-            &host,
+            app.clone(),
+            state.inner().clone(),
+            id.clone(),
+            host.clone(),
             port,
-            &user,
-            password.as_deref(),
-            private_key.as_deref(),
+            user.clone(),
+            password.clone(),
+            private_key.clone(),
+            passphrase.clone(),
+            auth_type.clone(),
+            agent_forwarding.unwrap_or(false),
+            jump_hosts.unwrap_or_default(),
+            auto_login_rules.unwrap_or_default(),
+            post_connect_commands.unwrap_or_default(),
             cols,
             rows,
             mux_type,
@@ -1070,13 +1298,13 @@ async fn run_reconnect_loop(
     app: AppHandle,
     state: SshState,
     id: String,
-    cancel_notify: Arc<tokio::sync::Notify>,
+    cancel_notify: Arc<ReconnectCancellation>,
 ) {
     let mut first_attempt = true;
 
     loop {
         // Check for cancellation before each attempt.
-        if is_cancelled(&cancel_notify) {
+        if cancel_notify.is_cancelled() {
             break;
         }
 
@@ -1107,10 +1335,10 @@ async fn run_reconnect_loop(
             // Wait 5 seconds, but abort early if cancelled.
             tokio::select! {
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
-                _ = cancel_notify.notified() => { break; }
+                _ = cancel_notify.notify.clone().notified_owned() => { break; }
             }
 
-            if is_cancelled(&cancel_notify) {
+            if cancel_notify.is_cancelled() {
                 break;
             }
         }
@@ -1135,14 +1363,20 @@ async fn run_reconnect_loop(
             other => Some(other),
         };
         let result = do_single_ssh_connect(
-            &app,
-            &state,
-            &id,
-            &cfg.host,
+            app.clone(),
+            state.clone(),
+            id.clone(),
+            cfg.host.clone(),
             cfg.port,
-            &cfg.user,
-            cfg.password.as_deref(),
-            cfg.private_key.as_deref(),
+            cfg.user.clone(),
+            cfg.password.clone(),
+            cfg.private_key.clone(),
+            cfg.passphrase.clone(),
+            cfg.auth_type.clone(),
+            cfg.agent_forwarding,
+            cfg.jump_hosts.clone(),
+            cfg.auto_login_rules.clone(),
+            cfg.post_connect_commands.clone(),
             cfg.cols,
             cfg.rows,
             mux_type,
@@ -1161,7 +1395,7 @@ async fn run_reconnect_loop(
                             let gone = state.handle(&id).await.is_none();
                             if gone { break; }
                         }
-                        _ = cancel_notify.notified() => { return; }
+                        _ = cancel_notify.notify.clone().notified_owned() => { return; }
                     }
                 }
             }
@@ -1218,59 +1452,50 @@ fn is_auth_error(err: &str) -> bool {
         || lower.contains("private key authentication failed")
 }
 
-fn is_cancelled(notify: &Arc<tokio::sync::Notify>) -> bool {
-    // Peek whether any waiters have been notified already by trying a non-blocking check.
-    // Tokio Notify does not expose a "is_notified" API, so we use a workaround:
-    // register a waker, immediately poll it.
-    use std::future::Future;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |p| RawWaker::new(p, &VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
-    let raw = RawWaker::new(std::ptr::null(), &VTABLE);
-    let waker = unsafe { Waker::from_raw(raw) };
-    let mut cx = Context::from_waker(&waker);
-    let mut fut = std::pin::pin!(notify.notified());
-    matches!(fut.as_mut().poll(&mut cx), Poll::Ready(()))
-}
-
 /// Connect once to SSH, open a PTY, and spawn the IO loop.
 /// Returns Ok(auth_response_rx) on success (ownership moved into caller for reuse),
 /// or Err on failure.
-async fn do_single_ssh_connect(
-    app: &AppHandle,
-    state: &SshState,
-    id: &str,
-    host: &str,
+fn do_single_ssh_connect(
+    app: AppHandle,
+    state: SshState,
+    id: String,
+    host: String,
     port: u16,
-    user: &str,
-    password: Option<&str>,
-    private_key: Option<&str>,
+    user: String,
+    password: Option<String>,
+    private_key: Option<String>,
+    passphrase: Option<String>,
+    auth_type: Option<String>,
+    agent_forwarding: bool,
+    jump_hosts: Vec<JumpHostConfig>,
+    auto_login_rules: Vec<AutoLoginRule>,
+    post_connect_commands: Vec<String>,
     cols: u32,
     rows: u32,
     reconnect_type: Option<ReconnectType>,
     reconnect_session_name: Option<String>,
     should_prompt_existing_sessions: bool,
     mut auth_response_rx: mpsc::Receiver<String>,
-) -> Result<mpsc::Receiver<String>, String> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<mpsc::Receiver<String>, String>> + Send + 'static>> {
+    Box::pin(async move {
     let addr = format!("{host}:{port}");
     crate::debug_log!("Connecting to {}...", addr);
 
     // Per-session remote-forward registry, reused across reconnects. Empty on a
     // fresh connect; populated once the user starts a remote (`-R`) tunnel.
-    let remote_forwards = state.ensure_remote_forwards(id).await;
+    let remote_forwards = state.clone().ensure_remote_forwards_owned(id.clone()).await;
     let session_handle = authenticate_ssh(
-        host,
+        host.clone(),
         port,
-        user,
-        password,
-        private_key,
-        app,
-        id,
+        user.clone(),
+        password.clone(),
+        private_key.clone(),
+        passphrase.clone(),
+        auth_type.clone(),
+        agent_forwarding,
+        jump_hosts.clone(),
+        app.clone(),
+        id.clone(),
         &mut auth_response_rx,
         remote_forwards.clone(),
     )
@@ -1281,10 +1506,10 @@ async fn do_single_ssh_connect(
     // server-side listener is lost when the transport drops, so re-issue the
     // `tcpip-forward` request for each registered bind port (no-op on a fresh
     // connect where the registry is empty).
-    reissue_remote_forwards(&session_handle, &remote_forwards).await;
+    reissue_remote_forwards(session_handle.clone(), remote_forwards.clone()).await;
 
     crate::debug_log!("Requesting PTY and shell...");
-    let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(id));
+    let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(&id));
 
     if let Some(rt) = reconnect_type {
         let tool_name = match rt {
@@ -1295,18 +1520,18 @@ async fn do_single_ssh_connect(
         };
 
         if should_prompt_existing_sessions {
-            if remote_command_exists(&session_handle, tool_name).await {
-                let sessions = list_detached_auraterm_sessions(&session_handle, rt).await?;
+            if remote_command_exists(session_handle.clone(), tool_name.to_string()).await {
+                let sessions = list_detached_auraterm_sessions(session_handle.clone(), rt).await?;
                 if let Some(existing_session) =
-                    prompt_for_existing_reconnect_session(app, state, id, rt, sessions).await?
+                    prompt_for_existing_reconnect_session(app.clone(), state.clone(), id.clone(), rt, sessions).await?
                 {
                     selected_session_name = existing_session;
                 }
             }
 
             set_reconnect_session_metadata(
-                state,
-                id,
+                state.clone(),
+                id.clone(),
                 Some(selected_session_name.clone()),
                 Some(true),
             )
@@ -1315,16 +1540,17 @@ async fn do_single_ssh_connect(
     }
 
     let (channel, used_multiplexer) = open_pty_channel(
-        &session_handle,
-        &selected_session_name,
+        session_handle.clone(),
+        selected_session_name.clone(),
         cols,
         rows,
         reconnect_type,
+        agent_forwarding,
     )
     .await?;
 
     if reconnect_type.is_some() {
-        set_reconnect_session_metadata(state, id, Some(selected_session_name.clone()), None).await;
+        set_reconnect_session_metadata(state.clone(), id.clone(), Some(selected_session_name.clone()), None).await;
     }
 
     let (input_tx, input_rx) = mpsc::channel::<String>(512);
@@ -1334,8 +1560,8 @@ async fn do_single_ssh_connect(
     // write-lock acquisition.
     {
         let session_handle_entry = session_handle.clone();
-        state
-            .upsert_session(id, move |s| {
+        state.clone()
+            .upsert_session_owned(id.clone(), move |s| {
                 s.input_tx = Some(input_tx);
                 s.resize_tx = Some(resize_tx);
                 s.handle = Some(session_handle_entry);
@@ -1344,8 +1570,8 @@ async fn do_single_ssh_connect(
     }
 
     let _ = app.emit(
-        &crate::util::session_event("ssh-connected", id),
-        TerminalDataPayload { id: id.to_string(), data: String::new() },
+        &crate::util::session_event("ssh-connected", &id),
+        TerminalDataPayload { id: id.clone(), data: String::new() },
     );
 
     if !used_multiplexer {
@@ -1358,9 +1584,9 @@ async fn do_single_ssh_connect(
             };
             if let Some(tool_name) = tool {
                 let _ = app.emit(
-                    &crate::util::session_event("pty-output", id),
+                    &crate::util::session_event("pty-output", &id),
                     TerminalDataPayload {
-                        id: id.to_string(),
+                        id: id.clone(),
                         data: format!(
                             "\r\n\x1b[33m[Reconnect mode: {} not found on remote host, using plain shell]\x1b[0m\r\n",
                             tool_name
@@ -1371,10 +1597,12 @@ async fn do_single_ssh_connect(
         }
     }
 
-    let connection_id = id.to_string();
-    let app_handle = app.clone();
-    let state_clone = state.clone();
+    let connection_id = id;
+    let app_handle = app;
+    let state_clone = state;
     let session_handle_for_io = session_handle.clone();
+    let automation_rules = auto_login_rules;
+    let automation_commands = post_connect_commands;
 
     crate::debug_log!(
         "[ssh-debug] {} PTY channel established (used_multiplexer={}); entering IO loop",
@@ -1390,11 +1618,114 @@ async fn do_single_ssh_connect(
             channel,
             input_rx,
             resize_rx,
+            automation_rules,
+            automation_commands,
         )
         .await;
     });
 
     Ok(auth_response_rx)
+    })
+}
+
+struct LoginAutomation {
+    rules: Vec<AutoLoginRule>,
+    next_rule: usize,
+    buffer: String,
+    post_connect_commands: Vec<String>,
+    post_commands_sent: bool,
+    deadline: tokio::time::Instant,
+    cancelled: bool,
+}
+
+impl LoginAutomation {
+    fn new(rules: Vec<AutoLoginRule>, post_connect_commands: Vec<String>) -> Self {
+        let timeout = rules.first().map(|rule| rule.timeout_secs).unwrap_or(30).max(1);
+        Self {
+            rules,
+            next_rule: 0,
+            buffer: String::new(),
+            post_connect_commands,
+            post_commands_sent: false,
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(timeout),
+            cancelled: false,
+        }
+    }
+
+    fn initial_inputs(&mut self) -> Vec<String> {
+        if self.rules.is_empty() {
+            return self.take_post_commands();
+        }
+        Vec::new()
+    }
+
+    fn on_output(&mut self, output: &str) -> Vec<String> {
+        if !self.is_waiting() {
+            return Vec::new();
+        }
+        self.buffer.push_str(output);
+        if self.buffer.len() > 16 * 1024 {
+            let mut keep_from = self.buffer.len() - 16 * 1024;
+            while keep_from < self.buffer.len() && !self.buffer.is_char_boundary(keep_from) {
+                keep_from += 1;
+            }
+            self.buffer.drain(..keep_from);
+        }
+
+        let rule = &self.rules[self.next_rule];
+        let matched = if rule.case_sensitive {
+            self.buffer.contains(&rule.expect)
+        } else {
+            self.buffer.to_lowercase().contains(&rule.expect.to_lowercase())
+        };
+        if !matched {
+            return Vec::new();
+        }
+
+        let mut inputs = vec![line_input(rule.response.as_deref().unwrap_or_default())];
+        self.next_rule += 1;
+        self.buffer.clear();
+        if self.next_rule < self.rules.len() {
+            let timeout = self.rules[self.next_rule].timeout_secs.max(1);
+            self.deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
+        } else {
+            inputs.extend(self.take_post_commands());
+        }
+        inputs
+    }
+
+    fn take_post_commands(&mut self) -> Vec<String> {
+        if self.post_commands_sent {
+            return Vec::new();
+        }
+        self.post_commands_sent = true;
+        self.post_connect_commands
+            .iter()
+            .filter(|command| !command.trim().is_empty())
+            .map(|command| line_input(command))
+            .collect()
+    }
+
+    fn is_waiting(&self) -> bool {
+        !self.cancelled && self.next_rule < self.rules.len()
+    }
+
+    fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+        self.buffer.clear();
+    }
+}
+
+fn line_input(value: &str) -> String {
+    if value.ends_with('\n') || value.ends_with('\r') {
+        value.to_string()
+    } else {
+        format!("{value}\r")
+    }
 }
 
 /// Drive the SSH channel: forward data to the frontend, forward input/resize to the channel.
@@ -1406,6 +1737,8 @@ async fn run_channel_io_loop(
     mut channel: russh::Channel<client::Msg>,
     mut input_rx: mpsc::Receiver<String>,
     mut resize_rx: mpsc::Receiver<(u32, u32)>,
+    auto_login_rules: Vec<AutoLoginRule>,
+    post_connect_commands: Vec<String>,
 ) {
     let mut last_write_error_notice_at: Option<std::time::Instant> = None;
     let final_exit_message;
@@ -1417,6 +1750,11 @@ async fn run_channel_io_loop(
     // other. Each buffers trailing bytes of a UTF-8 char split across packets.
     let mut stdout_decoder = crate::util::Utf8StreamDecoder::new();
     let mut stderr_decoder = crate::util::Utf8StreamDecoder::new();
+    let mut automation = LoginAutomation::new(auto_login_rules, post_connect_commands);
+
+    for input in automation.initial_inputs() {
+        let _ = write_interactive_input(&mut channel, &handle, input.as_bytes()).await;
+    }
 
     crate::debug_log!("[ssh-debug] {} run_channel_io_loop started", id);
 
@@ -1433,9 +1771,12 @@ async fn run_channel_io_loop(
                                 &crate::util::session_event("pty-output", &id),
                                 TerminalDataPayload {
                                     id: id.clone(),
-                                    data: output,
+                                    data: output.clone(),
                                 },
                             );
+                            for input in automation.on_output(&output) {
+                                let _ = write_interactive_input(&mut channel, &handle, input.as_bytes()).await;
+                            }
                         }
                     }
                     Some(ChannelMsg::ExtendedData { ref data, ext }) => {
@@ -1451,9 +1792,12 @@ async fn run_channel_io_loop(
                                 &crate::util::session_event("pty-output", &id),
                                 TerminalDataPayload {
                                     id: id.clone(),
-                                    data: output,
+                                    data: output.clone(),
                                 },
                             );
+                            for input in automation.on_output(&output) {
+                                let _ = write_interactive_input(&mut channel, &handle, input.as_bytes()).await;
+                            }
                         }
                     }
                     Some(ChannelMsg::Eof) => {
@@ -1551,6 +1895,16 @@ async fn run_channel_io_loop(
                     })
                     .await;
             }
+            _ = tokio::time::sleep_until(automation.deadline()), if automation.is_waiting() => {
+                automation.cancel();
+                let _ = app.emit(
+                    &crate::util::session_event("pty-output", &id),
+                    TerminalDataPayload {
+                        id: id.clone(),
+                        data: "\r\n\x1b[33m[Login automation timed out; continuing interactively]\x1b[0m\r\n".to_string(),
+                    },
+                );
+            }
             else => {
                 crate::debug_log!("[ssh-debug] {} select!/else branch hit — all sources closed", id);
                 final_exit_message = Some("Interactive IO loop ended unexpectedly".to_string());
@@ -1632,7 +1986,8 @@ mod tests {
     use super::known_hosts::{known_host_scope, parse_known_host_scope, summarize_fingerprint};
     use super::{
         auraterm_reconnect_session_name, build_screen_attach_command, build_tmux_attach_command,
-        is_auth_error, shell_escape, ReconnectType, AURATERM_RECONNECT_SESSION_PREFIX,
+        is_auth_error, shell_escape, ssh_generate_key_pair, AutoLoginRule, LoginAutomation,
+        ReconnectType, AURATERM_RECONNECT_SESSION_PREFIX,
     };
 
     #[test]
@@ -1792,4 +2147,56 @@ mod tests {
         assert!(serde_json::from_str::<ReconnectType>("\"bogus\"").is_err());
         assert!(serde_json::from_str::<ReconnectType>("\"Manual\"").is_err()); // case sensitive
     }
+
+    #[test]
+    fn login_automation_runs_rules_in_order_then_commands() {
+        let rules = vec![
+            AutoLoginRule {
+                expect: "login:".to_string(),
+                response: Some("admin".to_string()),
+                case_sensitive: false,
+                timeout_secs: 30,
+            },
+            AutoLoginRule {
+                expect: "Password:".to_string(),
+                response: Some("secret".to_string()),
+                case_sensitive: true,
+                timeout_secs: 30,
+            },
+        ];
+        let mut automation = LoginAutomation::new(rules, vec!["enable".to_string()]);
+
+        assert!(automation.on_output("LOGIN:").contains(&"admin\r".to_string()));
+        assert!(automation.on_output("password:").is_empty());
+        assert_eq!(
+            automation.on_output("Password:"),
+            vec!["secret\r".to_string(), "enable\r".to_string()]
+        );
+        assert!(!automation.is_waiting());
+    }
+
+    #[test]
+    fn login_automation_without_expect_rules_runs_commands_immediately() {
+        let mut automation = LoginAutomation::new(
+            Vec::new(),
+            vec!["whoami".to_string(), "".to_string()],
+        );
+        assert_eq!(automation.initial_inputs(), vec!["whoami\r".to_string()]);
+        assert!(automation.initial_inputs().is_empty());
+    }
+
+    #[test]
+    fn generated_ed25519_key_uses_the_separate_passphrase() {
+        let generated = ssh_generate_key_pair(
+            Some("key-passphrase".to_string()),
+            Some("alice@example".to_string()),
+        ).expect("key generation should succeed");
+
+        assert!(generated.private_key.contains("OPENSSH PRIVATE KEY"));
+        assert!(generated.public_key.starts_with("ssh-ed25519 "));
+        assert!(generated.public_key.ends_with(" alice@example"));
+        assert!(russh::keys::decode_secret_key(&generated.private_key, Some("key-passphrase")).is_ok());
+        assert!(russh::keys::decode_secret_key(&generated.private_key, Some("wrong")).is_err());
+    }
+
 }

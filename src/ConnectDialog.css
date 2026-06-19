@@ -202,6 +202,28 @@
   color: var(--app-danger);
 }
 
+.generated-public-key { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 8px; align-items: stretch; }
+
+
+.ssh-advanced {
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 15px;
+}
+
+.ssh-advanced summary { cursor: pointer; color: var(--app-text-secondary); }
+.ssh-advanced[open] summary { margin-bottom: 12px; }
+.ssh-advanced-heading { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 8px; }
+.ssh-advanced-heading button, .ssh-remove-btn { border: 1px solid var(--app-border); border-radius: 4px; background: var(--app-input-bg); color: var(--app-text-secondary); padding: 5px 8px; cursor: pointer; }
+.ssh-advanced-card { padding: 10px; margin-bottom: 8px; border: 1px solid var(--app-border); border-radius: 5px; background: var(--app-surface-0); }
+.ssh-card-grid { display: grid; grid-template-columns: 2fr 80px 1.2fr 1.4fr; gap: 8px; margin-bottom: 8px; }
+.ssh-card-grid--automation { grid-template-columns: 1.4fr 1.4fr 70px; }
+.ssh-advanced-card input, .ssh-advanced-card select, .ssh-advanced-card textarea { width: 100%; box-sizing: border-box; padding: 7px; background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 4px; color: var(--app-text); }
+.ssh-advanced-card textarea { margin-bottom: 6px; resize: vertical; }
+.ssh-checkbox { display: flex !important; flex-direction: row !important; align-items: center; gap: 7px; margin: 8px 0; color: var(--app-text-secondary); }
+.ssh-remove-btn { margin-top: 7px; color: var(--app-danger); }
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -298,6 +320,8 @@
   .serial-settings-grid {
     grid-template-columns: 1fr;
   }
+
+  .ssh-card-grid, .ssh-card-grid--automation { grid-template-columns: 1fr; }
 
   .serial-settings-grid-span-2 {
     grid-column: span 1;

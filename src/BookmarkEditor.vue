@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { buildConnectionLogContext, buildDefaultLogPath, normalizeOptionalLogPath } from "./logging";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
-import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection } from "./types";
+import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection, type SshAuthType } from "./types";
 
 const props = withDefaults(defineProps<{
   connection: SavedConnection;
@@ -16,8 +17,20 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-const editDraft = ref<SavedConnection>({ ...props.connection });
+const editDraft = ref<SavedConnection>({
+  ...props.connection,
+  jumpHosts: props.connection.jumpHosts?.map((jump) => ({ ...jump })) ?? [],
+  autoLoginRules: props.connection.autoLoginRules?.map((rule) => ({ ...rule })) ?? [],
+  postConnectCommands: [...(props.connection.postConnectCommands ?? [])],
+});
 const editError = ref("");
+const generatedPublicKey = ref("");
+
+interface GeneratedSshKeyPair {
+  privateKey: string;
+  publicKey: string;
+  fingerprint: string;
+}
 
 // Initialize reconnect type and autoReconnect from connection
 const initialReconnectType = normalizeReconnectType(props.connection);
@@ -59,12 +72,57 @@ function toFlowControl(value: string): "none" | "hardware" | "software" {
   return "none";
 }
 
-function toAuthType(value: string): "password" | "key" | "none" {
-  if (value === "key" || value === "none") {
+function toAuthType(value: string): SshAuthType {
+  if (value === "key" || value === "agent" || value === "none") {
     return value;
   }
   return "password";
 }
+
+function addJumpHost() {
+  editDraft.value.jumpHosts = [
+    ...(editDraft.value.jumpHosts ?? []),
+    { id: crypto.randomUUID(), host: "", port: 22, user: "", authType: "agent" },
+  ];
+}
+
+function removeJumpHost(index: number) {
+  editDraft.value.jumpHosts = (editDraft.value.jumpHosts ?? []).filter((_, itemIndex) => itemIndex !== index);
+}
+
+function addAutoLoginRule() {
+  editDraft.value.autoLoginRules = [
+    ...(editDraft.value.autoLoginRules ?? []),
+    { expect: "", response: "", timeoutSecs: 30 },
+  ];
+}
+
+function removeAutoLoginRule(index: number) {
+  editDraft.value.autoLoginRules = (editDraft.value.autoLoginRules ?? []).filter((_, itemIndex) => itemIndex !== index);
+}
+
+function updatePostConnectCommands(value: string) {
+  editDraft.value.postConnectCommands = value.split(/\r?\n/);
+}
+
+async function generatePrivateKey() {
+  editError.value = "";
+  try {
+    const generated = await invoke<GeneratedSshKeyPair>("ssh_generate_key_pair", {
+      passphrase: editDraft.value.passphrase || null,
+      comment: `${editDraft.value.user}@${editDraft.value.host}`,
+    });
+    updateDraft("privateKey", generated.privateKey);
+    generatedPublicKey.value = generated.publicKey;
+  } catch (error) {
+    editError.value = String(error);
+  }
+}
+
+async function copyGeneratedPublicKey() {
+  await navigator.clipboard.writeText(generatedPublicKey.value);
+}
+
 
 function toReconnectType(value: string): ReconnectType {
   if (value === "simple" || value === "screen" || value === "tmux") {
@@ -86,6 +144,10 @@ function updateLogEnabled(enabled: boolean) {
 
 function handleLogEnabledChange(event: Event) {
   updateLogEnabled((event.target as HTMLInputElement).checked);
+}
+
+function handleAgentForwardingChange(event: Event) {
+  updateDraft("agentForwarding", (event.target as HTMLInputElement).checked);
 }
 
 const editDraftDefaultLogPath = computed(() => {
@@ -127,6 +189,15 @@ function handleSave() {
     authType: protocol === "ssh" ? editDraft.value.authType : "none",
     password: protocol === "ssh" ? editDraft.value.password : undefined,
     privateKey: protocol === "ssh" && editDraft.value.authType === "key" ? editDraft.value.privateKey : undefined,
+    passphrase: protocol === "ssh" && editDraft.value.authType === "key" ? editDraft.value.passphrase : undefined,
+    agentForwarding: protocol === "ssh" ? editDraft.value.agentForwarding : undefined,
+    jumpHosts: protocol === "ssh" ? editDraft.value.jumpHosts : undefined,
+    autoLoginRules: protocol === "ssh"
+      ? editDraft.value.autoLoginRules?.filter((rule) => rule.expect.trim())
+      : undefined,
+    postConnectCommands: protocol === "ssh"
+      ? editDraft.value.postConnectCommands?.map((command) => command.trim()).filter(Boolean)
+      : undefined,
     autoReconnect: protocol === "ssh" && reconnectType ? isReconnectEnabled(reconnectType) : undefined,
     reconnectType,
     portName: protocol === "serial" ? editDraft.value.portName?.trim() : undefined,
@@ -272,6 +343,8 @@ function handleSave() {
                 <select :value="editDraft.authType" @change="updateDraft('authType', toAuthType(inputValue($event)))">
                   <option value="password">Password</option>
                   <option value="key">Private Key</option>
+                  <option value="agent">SSH Agent / Pageant</option>
+                  <option value="none">Keyboard Interactive</option>
                 </select>
               </div>
             </div>
@@ -288,7 +361,7 @@ function handleSave() {
               >
             </div>
 
-            <div v-else class="form-group">
+            <div v-else-if="editDraft.authType === 'key'" class="form-group">
               <label>Private Key (PEM)</label>
               <textarea
                 rows="5"
@@ -298,7 +371,77 @@ function handleSave() {
                 autocorrect="off"
                 spellcheck="false"
               />
+              <button type="button" class="bookmark-editor-btn secondary" @click="generatePrivateKey">Generate Ed25519 key</button>
+              <label>Passphrase</label>
+              <input
+                type="password"
+                :value="editDraft.passphrase ?? ''"
+                @input="updateDraft('passphrase', inputValue($event))"
+              >
+              <div v-if="generatedPublicKey" class="generated-key-row">
+                <textarea :value="generatedPublicKey" rows="2" readonly />
+                <button type="button" class="bookmark-editor-btn secondary" @click="copyGeneratedPublicKey">Copy public key</button>
+              </div>
             </div>
+
+            <details class="bookmark-advanced">
+              <summary>ProxyJump and login automation</summary>
+              <label class="bookmark-inline-check">
+                <input
+                  type="checkbox"
+                  :checked="editDraft.agentForwarding ?? false"
+                  @change="handleAgentForwardingChange"
+                >
+                Forward local SSH agent to target
+              </label>
+
+              <div class="bookmark-advanced-heading">
+                <strong>Jump hosts</strong>
+                <button type="button" @click="addJumpHost">Add</button>
+              </div>
+              <div v-for="(jump, index) in editDraft.jumpHosts ?? []" :key="jump.id" class="bookmark-advanced-card">
+                <div class="bookmark-advanced-grid">
+                  <input v-model="jump.host" type="text" placeholder="Host">
+                  <input v-model.number="jump.port" type="number" min="1" max="65535" placeholder="Port">
+                  <input v-model="jump.user" type="text" placeholder="User">
+                  <select v-model="jump.authType">
+                    <option value="password">Password</option>
+                    <option value="key">Private Key</option>
+                    <option value="agent">Agent</option>
+                    <option value="none">Keyboard Interactive</option>
+                  </select>
+                </div>
+                <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" placeholder="Password">
+                <template v-else-if="jump.authType === 'key'">
+                  <textarea v-model="jump.privateKey" rows="3" placeholder="Private key" />
+                  <input v-model="jump.passphrase" type="password" placeholder="Passphrase">
+                </template>
+                <button type="button" class="bookmark-remove" @click="removeJumpHost(index)">Remove</button>
+              </div>
+
+              <div class="bookmark-advanced-heading">
+                <strong>Expect rules</strong>
+                <button type="button" @click="addAutoLoginRule">Add</button>
+              </div>
+              <div v-for="(rule, index) in editDraft.autoLoginRules ?? []" :key="index" class="bookmark-advanced-card">
+                <div class="bookmark-automation-grid">
+                  <input v-model="rule.expect" type="text" placeholder="Wait for text">
+                  <input v-model="rule.response" type="password" placeholder="Send response">
+                  <input v-model.number="rule.timeoutSecs" type="number" min="1" max="300" title="Timeout seconds">
+                </div>
+                <label class="bookmark-inline-check"><input v-model="rule.caseSensitive" type="checkbox"> Case sensitive</label>
+                <button type="button" class="bookmark-remove" @click="removeAutoLoginRule(index)">Remove</button>
+              </div>
+
+              <div class="form-group">
+                <label>Commands after login (one per line)</label>
+                <textarea
+                  rows="3"
+                  :value="(editDraft.postConnectCommands ?? []).join('\n')"
+                  @input="updatePostConnectCommands(inputValue($event))"
+                />
+              </div>
+            </details>
 
             <div class="bookmark-editor-grid">
               <div class="form-group bookmark-editor-span-2">
@@ -527,5 +670,23 @@ function handleSave() {
 
 .bookmark-editor-btn.secondary:hover {
   background: var(--app-surface-4);
+}
+
+.bookmark-advanced { border: 1px solid var(--app-border); border-radius: 6px; padding: 10px 12px; margin-bottom: 16px; }
+.bookmark-advanced summary { cursor: pointer; color: var(--app-text-secondary); }
+.bookmark-advanced[open] summary { margin-bottom: 12px; }
+.bookmark-inline-check { display: flex; align-items: center; gap: 7px; margin: 9px 0; color: var(--app-text-secondary); font-size: 0.82rem; }
+.bookmark-advanced-heading { display: flex; justify-content: space-between; align-items: center; margin: 14px 0 8px; }
+.bookmark-advanced-heading button, .bookmark-remove { border: 1px solid var(--app-border); border-radius: 4px; background: var(--app-input-bg); color: var(--app-text-secondary); padding: 5px 8px; cursor: pointer; }
+.bookmark-advanced-card { border: 1px solid var(--app-border); border-radius: 5px; padding: 9px; margin-bottom: 8px; background: var(--app-surface-0); }
+.bookmark-advanced-grid { display: grid; grid-template-columns: 2fr 70px 1.2fr 1.2fr; gap: 7px; margin-bottom: 7px; }
+.bookmark-automation-grid { display: grid; grid-template-columns: 1fr 1fr 65px; gap: 7px; }
+.bookmark-advanced-card input, .bookmark-advanced-card select, .bookmark-advanced-card textarea { width: 100%; box-sizing: border-box; background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 4px; color: var(--app-text); padding: 7px; }
+.bookmark-advanced-card textarea { resize: vertical; margin-bottom: 6px; }
+.bookmark-remove { margin-top: 7px; color: var(--app-danger); }
+.generated-key-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: stretch; }
+
+@media (max-width: 560px) {
+  .bookmark-advanced-grid, .bookmark-automation-grid { grid-template-columns: 1fr; }
 }
 </style>
