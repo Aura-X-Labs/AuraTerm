@@ -2,6 +2,12 @@
 ## Doing
 
 ### 新增
+- **Phase 5: 协议打磨、嵌套书签与 Shell 集成**
+  - Telnet IAC 支持 BINARY/ECHO/SGA、终端类型协商和 NAWS 窗口尺寸更新，未知选项保持安全拒绝
+  - Local/SSH/Telnet/Serial 原始流自动识别 `rz`/`sz`，内置 Zmodem 上传、下载、进度、取消及安全文件名处理
+  - 书签分组升级为任意层级文件夹，支持导入 OpenSSH config 与 PuTTY `.reg` 会话并自动去重
+  - xterm OSC 133 Shell 集成记录命令、退出码和滚动标记，支持命令导航、重跑、复制及提示符降级识别
+  - 四类会话统一复用 stream pump，避免协议帧进入 UTF-8 解码与终端渲染
 - **Phase 4: SFTP、Snippets 与输出规则**
   - 输出规则引擎统一支持关键字/正则高亮、响铃、桌面通知、自动应答、冷却时间及全局/主机作用域
   - Quick Buttons 升级为 Snippets:多套工具栏、分组、主机/书签组绑定、`{{变量}}` 参数和 Raw 控制字符发送

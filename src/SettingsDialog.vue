@@ -733,6 +733,20 @@ async function toggleRememberMasterPassword(enabled: boolean) {
             >
           </label>
 
+          <label class="settings-field settings-field--full">
+            <span>Zmodem download directory</span>
+            <input
+              type="text"
+              :value="settings.zmodemDownloadPath"
+              placeholder="~/AuraTerm/downloads"
+              @input="update('zmodemDownloadPath', inputValue($event))"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+            >
+            <small>Files sent by remote <code>sz</code> sessions are saved here automatically.</small>
+          </label>
+
           <label class="settings-field settings-field--toggle">
             <span>
               <strong>Open SFTP after SSH connects</strong>

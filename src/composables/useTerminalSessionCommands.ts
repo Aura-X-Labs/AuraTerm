@@ -33,6 +33,7 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       case "local":
         return invoke("resize_pty", { id, cols, rows });
       case "telnet":
+        return invoke("resize_telnet", { id, cols, rows });
       case "serial":
         return Promise.resolve();
     }
@@ -77,12 +78,35 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
     });
   }
 
-  async function startTelnetSession(sessionId: string, host: string, port: number) {
+  async function startTelnetSession(sessionId: string, host: string, port: number, cols: number, rows: number) {
     await invoke("start_telnet_session", {
       id: sessionId,
       host,
       port,
+      cols,
+      rows,
     });
+  }
+
+  function writeSessionBytes(id: string, data: number[], session: SessionConfig) {
+    switch (session.protocol) {
+      case "ssh":
+        return invoke("write_ssh_pty_bytes", { id, data });
+      case "telnet":
+        return invoke("write_telnet_bytes", { id, data });
+      case "serial":
+        return invoke("write_serial_bytes", { id, data });
+      case "local":
+        return invoke("write_pty_bytes", { id, data });
+    }
+  }
+
+  function startZmodemSend(id: string, fileName: string, data: number[]) {
+    return invoke<number[]>("zmodem_start_send", { id, fileName, data });
+  }
+
+  function cancelZmodem(id: string) {
+    return invoke<number[]>("zmodem_cancel", { id });
   }
 
   async function startSerialSession(sessionId: string, serialConfig: SerialConfig) {
@@ -194,6 +218,7 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
 
   return {
     writeSessionInput,
+    writeSessionBytes,
     resizeSession,
     closeSession,
     getSshReconnectType,
@@ -201,6 +226,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
     startTelnetSession,
     startSerialSession,
     startLocalSession,
+    startZmodemSend,
+    cancelZmodem,
     persistUpdatedSshPassword,
     saveTerminalLog,
     appendToLog,

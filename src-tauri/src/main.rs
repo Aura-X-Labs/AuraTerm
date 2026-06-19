@@ -29,10 +29,11 @@ mod settings;
 mod ssh;
 mod telnet;
 mod util;
+mod zmodem;
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send>,
 }
 
@@ -328,7 +329,15 @@ fn setup_window_bounds_persistence(app: &AppHandle) -> Result<(), String> {
 }
 
 #[command]
-fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, id: String, cwd: Option<String>) -> Result<String, String> {
+fn start_pty(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    zmodem: State<'_, zmodem::ZmodemState>,
+    cols: u16,
+    rows: u16,
+    id: String,
+    cwd: Option<String>,
+) -> Result<String, String> {
 
     let pty_system = native_pty_system();
     let pty_pair = pty_system
@@ -371,10 +380,10 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
 
     drop(pty_pair.slave);
 
-    let writer = pty_pair
+    let writer = Arc::new(Mutex::new(pty_pair
         .master
         .take_writer()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?));
 
     let mut reader = pty_pair
         .master
@@ -387,7 +396,7 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
             id.clone(),
             PtySession {
                 master: pty_pair.master,
-                writer,
+                writer: writer.clone(),
                 child,
             },
         );
@@ -395,6 +404,9 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
 
     let app_handle = app.clone();
     let pty_id = id.clone();
+    let pty_writer = writer.clone();
+    let zmodem_state = zmodem.inner().clone();
+    zmodem_state.reset_session(&id);
     thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
         let mut decoder = util::Utf8StreamDecoder::new();
@@ -405,7 +417,19 @@ fn start_pty(app: AppHandle, state: State<'_, AppState>, cols: u16, rows: u16, i
                     break;
                 }
                 Ok(size) => {
-                    util::emit_pty_output(&app_handle, &pty_id, &mut decoder, &buffer[..size]);
+                    let (_, response) = util::pump_stream_chunk(
+                        &app_handle,
+                        &pty_id,
+                        &mut decoder,
+                        &buffer[..size],
+                        &zmodem_state,
+                    );
+                    if !response.is_empty() {
+                        if let Ok(mut writer) = pty_writer.lock() {
+                            let _ = writer.write_all(&response);
+                            let _ = writer.flush();
+                        }
+                    }
                 }
                 Err(_) => {
                     util::emit_pty_exit(&app_handle, &pty_id, "PTY read error");
@@ -425,13 +449,22 @@ fn write_pty_input(state: State<'_, AppState>, id: String, data: String) -> Resu
         return Err("PTY session not found".to_string());
     };
 
-    session
-        .writer
+    let mut writer = session.writer.lock().map_err(|error| error.to_string())?;
+    writer
         .write_all(data.as_bytes())
         .map_err(|error| error.to_string())?;
-    session.writer.flush().map_err(|error| error.to_string())?;
+    writer.flush().map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+#[command]
+fn write_pty_bytes(state: State<'_, AppState>, id: String, data: Vec<u8>) -> Result<(), String> {
+    let guard = state.sessions.lock().map_err(|error| error.to_string())?;
+    let session = guard.get(&id).ok_or_else(|| "PTY session not found".to_string())?;
+    let mut writer = session.writer.lock().map_err(|error| error.to_string())?;
+    writer.write_all(&data).map_err(|error| error.to_string())?;
+    writer.flush().map_err(|error| error.to_string())
 }
 
 #[command]
@@ -455,11 +488,16 @@ fn resize_pty(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> R
 }
 
 #[command]
-fn close_pty(state: State<'_, AppState>, id: String) -> Result<(), String> {
+fn close_pty(
+    state: State<'_, AppState>,
+    zmodem: State<'_, zmodem::ZmodemState>,
+    id: String,
+) -> Result<(), String> {
     let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
     if let Some(mut session) = guard.remove(&id) {
         let _ = session.child.kill();
     }
+    zmodem.reset_session(&id);
     Ok(())
 }
 
@@ -1069,17 +1107,20 @@ fn main() {
         .manage(ssh::ForwardingState::default())
         .manage(telnet::TelnetState::default())
         .manage(serial::SerialState::default())
+        .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
         .invoke_handler(tauri::generate_handler![
             get_version_info,
             get_startup_dir,
             start_pty,
             write_pty_input,
+            write_pty_bytes,
             resize_pty,
             close_pty,
             ssh::start_ssh_pty,
             ssh::ssh_generate_key_pair,
             ssh::write_ssh_pty_input,
+            ssh::write_ssh_pty_bytes,
             ssh::resize_ssh_pty,
             ssh::close_ssh_pty,
             ssh::answer_ssh_mfa,
@@ -1101,11 +1142,16 @@ fn main() {
             ssh::ssh_list_tunnels,
             telnet::start_telnet_session,
             telnet::write_telnet_input,
+            telnet::write_telnet_bytes,
+            telnet::resize_telnet,
             telnet::close_telnet_session,
             serial::list_serial_ports,
             serial::start_serial_session,
             serial::write_serial_input,
+            serial::write_serial_bytes,
             serial::close_serial_session,
+            zmodem::zmodem_start_send,
+            zmodem::zmodem_cancel,
             settings::get_settings,
             settings::save_settings,
             get_credential_security_state,
@@ -1123,6 +1169,7 @@ fn main() {
             connections::save_connection,
             connections::delete_connection,
             connections::touch_connection,
+            connections::import_bookmarks,
             save_terminal_log,
             append_to_log,
         ])

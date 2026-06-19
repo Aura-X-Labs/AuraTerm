@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { type SavedConnection } from "./types";
+import { buildBookmarkTree, flattenBookmarkTree } from "./bookmarks";
 import BookmarkEditor from "./BookmarkEditor.vue";
 
 const props = withDefaults(defineProps<{
@@ -18,12 +19,7 @@ const emit = defineEmits<{
   connect: [connection: SavedConnection];
 }>();
 
-const UNGROUPED_LABEL = "Ungrouped";
 const RECENTLY_USED_LABEL = "Recently Used";
-
-function toDisplayGroup(value?: string) {
-  return value?.trim() || UNGROUPED_LABEL;
-}
 
 function buildSubtitle(connection: SavedConnection) {
   if (connection.protocol === "serial") {
@@ -51,6 +47,14 @@ const editingConnection = ref<SavedConnection | null>(null);
 const contextMenuRef = ref<HTMLDivElement | null>(null);
 const collapsedGroups = ref<Set<string>>(new Set());
 const searchQuery = ref("");
+const importFileInput = ref<HTMLInputElement | null>(null);
+const importMessage = ref("");
+
+interface BookmarkImportResult {
+  imported: number;
+  skipped: number;
+  warnings: string[];
+}
 
 const STORAGE_KEY_COLLAPSED = "auraterm:collapsed-groups";
 
@@ -139,43 +143,15 @@ const filteredConnections = computed(() => {
   });
 });
 
-const groupedConnections = computed(() => {
-  const groups = new Map<string, SavedConnection[]>();
-
-  const recentlyUsed = [...connections.value]
+const recentlyUsed = computed(() => [...connections.value]
     .filter(c => c.lastUsed)
     .sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))
-    .slice(0, 5);
+    .slice(0, 5));
 
-  if (recentlyUsed.length > 0 && !searchQuery.value.trim()) {
-    groups.set(RECENTLY_USED_LABEL, recentlyUsed);
-  }
-
-  for (const connection of filteredConnections.value) {
-    const group = toDisplayGroup(connection.group);
-    const list = groups.get(group) ?? [];
-    list.push(connection);
-    groups.set(group, list);
-  }
-
-  const result = Array.from(groups.entries()).sort(([left], [right]) => {
-    if (left === RECENTLY_USED_LABEL) {
-      return -1;
-    }
-    if (right === RECENTLY_USED_LABEL) {
-      return 1;
-    }
-    if (left === UNGROUPED_LABEL) {
-      return 1;
-    }
-    if (right === UNGROUPED_LABEL) {
-      return -1;
-    }
-    return left.localeCompare(right, "zh-CN");
-  });
-
-  return result;
-});
+const bookmarkRows = computed(() => flattenBookmarkTree(
+  buildBookmarkTree(filteredConnections.value),
+  collapsedGroups.value,
+));
 
 async function handleDoubleClick(connection: SavedConnection) {
   try {
@@ -223,14 +199,41 @@ async function handleSaveConnection(normalized: SavedConnection) {
     alert(`Failed to save: ${error}`);
   }
 }
+
+async function handleImportFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  importMessage.value = "Importing...";
+  try {
+    const format = file.name.toLowerCase().endsWith(".reg") ? "putty" : "openssh";
+    const result = await invoke<BookmarkImportResult>("import_bookmarks", {
+      format,
+      content: await file.text(),
+      group: null,
+    });
+    importMessage.value = `Imported ${result.imported}; skipped ${result.skipped}${result.warnings.length ? `. ${result.warnings.join(" ")}` : ""}`;
+    await loadConnections();
+  } catch (error) {
+    importMessage.value = `Import failed: ${String(error)}`;
+  } finally {
+    input.value = "";
+  }
+}
 </script>
 
 <template>
   <div class="bookmark-sidebar">
     <div class="bookmark-sidebar-header">
       <span class="bookmark-sidebar-title">🔖 Quick Connect</span>
-      <button class="bookmark-refresh-btn" title="Refresh list" @click="() => loadConnections()">↻</button>
+      <div class="bookmark-header-actions">
+        <input ref="importFileInput" type="file" accept=".reg,.conf,.config,text/plain" hidden @change="handleImportFile">
+        <button class="bookmark-refresh-btn" title="Import OpenSSH config or PuTTY registry" @click="importFileInput?.click()">Import</button>
+        <button class="bookmark-refresh-btn" title="Refresh list" @click="() => loadConnections()">↻</button>
+      </div>
     </div>
+
+    <div v-if="importMessage" class="bookmark-import-message" @click="importMessage = ''">{{ importMessage }}</div>
 
     <div class="bookmark-search-container">
       <input
@@ -258,23 +261,17 @@ async function handleSaveConnection(normalized: SavedConnection) {
     </div>
 
     <div v-else class="bookmark-list">
-        <div
-          v-for="[group, items] in groupedConnections"
-          :key="group"
-          class="bookmark-group"
-          :class="{ collapsed: isGroupCollapsed(group) }"
-          :data-group="group"
-        >
-          <div class="bookmark-group-header" @click="toggleGroup(group)">
+      <div v-if="recentlyUsed.length && !searchQuery.trim()" class="bookmark-group" :class="{ collapsed: isGroupCollapsed(RECENTLY_USED_LABEL) }">
+        <div class="bookmark-group-header" @click="toggleGroup(RECENTLY_USED_LABEL)">
           <div class="bookmark-group-header-left">
             <span class="bookmark-group-arrow">›</span>
-            <span class="bookmark-group-name">{{ group }}</span>
+            <span class="bookmark-group-name">{{ RECENTLY_USED_LABEL }}</span>
           </div>
-          <span class="bookmark-group-count">{{ items.length }}</span>
+          <span class="bookmark-group-count">{{ recentlyUsed.length }}</span>
         </div>
-        <ul v-if="!isGroupCollapsed(group)" class="bookmark-group-list">
+        <ul v-if="!isGroupCollapsed(RECENTLY_USED_LABEL)" class="bookmark-group-list">
           <li
-            v-for="connection in items"
+            v-for="connection in recentlyUsed"
             :key="connection.id"
             class="bookmark-item"
             :title="`${buildSubtitle(connection)}\nDouble-click to connect`"
@@ -289,6 +286,36 @@ async function handleSaveConnection(normalized: SavedConnection) {
           </li>
         </ul>
       </div>
+
+      <template v-for="row in bookmarkRows" :key="row.key">
+        <div
+          v-if="row.kind === 'folder'"
+          class="bookmark-group-header bookmark-tree-folder"
+          :class="{ collapsed: isGroupCollapsed(row.folder.path) }"
+          :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
+          @click="toggleGroup(row.folder.path)"
+        >
+          <div class="bookmark-group-header-left">
+            <span class="bookmark-group-arrow">›</span>
+            <span class="bookmark-group-name">{{ row.folder.name }}</span>
+          </div>
+          <span class="bookmark-group-count">{{ row.folder.count }}</span>
+        </div>
+        <div
+          v-else
+          class="bookmark-item"
+          :style="{ paddingLeft: `${16 + row.depth * 14}px` }"
+          :title="`${buildSubtitle(row.connection)}\nDouble-click to connect`"
+          @dblclick="handleDoubleClick(row.connection)"
+          @contextmenu="handleContextMenu($event, row.connection)"
+        >
+          <span class="bookmark-icon">{{ buildIcon(row.connection) }}</span>
+          <div class="bookmark-info">
+            <span class="bookmark-name">{{ row.connection.name }}</span>
+            <span class="bookmark-host">{{ buildSubtitle(row.connection) }}</span>
+          </div>
+        </div>
+      </template>
     </div>
 
     <div

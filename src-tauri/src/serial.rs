@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex,
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 struct SerialSession {
-    writer: Box<dyn SerialPort>,
+    writer: Arc<StdMutex<Box<dyn SerialPort>>>,
     stop_flag: Arc<AtomicBool>,
 }
 
@@ -108,6 +108,7 @@ pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 pub async fn start_serial_session(
     app: AppHandle,
     state: State<'_, SerialState>,
+    zmodem: State<'_, crate::zmodem::ZmodemState>,
     id: String,
     port_name: String,
     baud_rate: u32,
@@ -126,6 +127,7 @@ pub async fn start_serial_session(
         .map_err(|e| e.to_string())?;
 
     let reader = port.try_clone().map_err(|e| e.to_string())?;
+    let writer = Arc::new(StdMutex::new(port));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     {
@@ -133,7 +135,7 @@ pub async fn start_serial_session(
         guard.insert(
             id.clone(),
             SerialSession {
-                writer: port,
+                writer: writer.clone(),
                 stop_flag: stop_flag.clone(),
             },
         );
@@ -148,6 +150,8 @@ pub async fn start_serial_session(
 
     let app_handle = app.clone();
     let session_id = id.clone();
+    let zmodem_state = zmodem.inner().clone();
+    zmodem_state.reset_session(&id);
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buffer = [0_u8; 4096];
@@ -156,7 +160,19 @@ pub async fn start_serial_session(
         while !stop_flag.load(Ordering::Relaxed) {
             match reader.read(&mut buffer) {
                 Ok(size) if size > 0 => {
-                    crate::util::emit_pty_output(&app_handle, &session_id, &mut decoder, &buffer[..size]);
+                    let (_, response) = crate::util::pump_stream_chunk(
+                        &app_handle,
+                        &session_id,
+                        &mut decoder,
+                        &buffer[..size],
+                        &zmodem_state,
+                    );
+                    if !response.is_empty() {
+                        if let Ok(mut writer) = writer.lock() {
+                            let _ = writer.write_all(&response);
+                            let _ = writer.flush();
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
@@ -188,22 +204,37 @@ pub async fn write_serial_input(
         return Err("Serial session not found".to_string());
     };
 
-    session
-        .writer
+    let mut writer = session.writer.lock().map_err(|e| e.to_string())?;
+    writer
         .write_all(data.as_bytes())
         .map_err(|e| e.to_string())?;
-    session.writer.flush().map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn write_serial_bytes(
+    state: State<'_, SerialState>,
+    id: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let guard = state.sessions.lock().await;
+    let session = guard.get(&id).ok_or_else(|| "Serial session not found".to_string())?;
+    let mut writer = session.writer.lock().map_err(|e| e.to_string())?;
+    writer.write_all(&data).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn close_serial_session(
     state: State<'_, SerialState>,
+    zmodem: State<'_, crate::zmodem::ZmodemState>,
     id: String,
 ) -> Result<(), String> {
     let mut guard = state.sessions.lock().await;
     if let Some(session) = guard.remove(&id) {
         session.stop_flag.store(true, Ordering::Relaxed);
     }
+    zmodem.reset_session(&id);
     Ok(())
 }

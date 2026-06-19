@@ -4,6 +4,7 @@ use crate::encryption::{
 use serde::{Deserialize, Serialize};
 use std::fs;
 use tauri::{AppHandle, Manager, State};
+use std::collections::HashMap;
 
 fn default_protocol() -> String {
     "ssh".to_string()
@@ -435,4 +436,308 @@ pub fn touch_connection(app: AppHandle, id: String, timestamp: u64) -> Result<()
         write_connections(&app, &connections)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookmarkImportResult {
+    imported: usize,
+    skipped: usize,
+    warnings: Vec<String>,
+}
+
+#[tauri::command]
+pub fn import_bookmarks(
+    app: AppHandle,
+    format: String,
+    content: String,
+    group: Option<String>,
+) -> Result<BookmarkImportResult, String> {
+    let base_group = group
+        .map(|value| normalize_group_path(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("Imported/{}", if format.eq_ignore_ascii_case("putty") { "PuTTY" } else { "OpenSSH" }));
+    let (candidates, mut warnings) = if format.eq_ignore_ascii_case("putty") {
+        parse_putty_registry(&content, &base_group)
+    } else if format.eq_ignore_ascii_case("openssh") {
+        parse_openssh_config(&content, &base_group)
+    } else {
+        return Err("Unsupported bookmark import format".to_string());
+    };
+
+    let mut connections = load_connections(&app)?;
+    let mut imported = 0;
+    let mut skipped = 0;
+    for candidate in candidates {
+        let duplicate = connections.iter().any(|existing| {
+            existing.protocol == candidate.protocol
+                && existing.host.eq_ignore_ascii_case(&candidate.host)
+                && existing.port == candidate.port
+                && existing.user == candidate.user
+                && existing.name.eq_ignore_ascii_case(&candidate.name)
+        });
+        if duplicate {
+            skipped += 1;
+        } else {
+            connections.push(candidate);
+            imported += 1;
+        }
+    }
+    if imported == 0 && skipped == 0 {
+        warnings.push("No concrete hosts were found in the selected file".to_string());
+    }
+    write_connections(&app, &connections)?;
+    Ok(BookmarkImportResult { imported, skipped, warnings })
+}
+
+fn normalize_group_path(value: &str) -> String {
+    value
+        .replace('\\', "/")
+        .split('/')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn imported_connection(name: String, group: String, protocol: &str, host: String, port: u16, user: String) -> SavedConnection {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64);
+    SavedConnection {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        group: Some(group),
+        log_path: None,
+        protocol: protocol.to_string(),
+        host,
+        port,
+        user,
+        auth_type: if protocol == "ssh" { "agent".to_string() } else { "none".to_string() },
+        password: None,
+        private_key: None,
+        passphrase: None,
+        agent_forwarding: false,
+        jump_hosts: Vec::new(),
+        auto_login_rules: Vec::new(),
+        post_connect_commands: Vec::new(),
+        port_name: None,
+        baud_rate: None,
+        data_bits: None,
+        stop_bits: None,
+        parity: None,
+        flow_control: None,
+        created_at: now,
+        last_used: None,
+        auto_reconnect: false,
+        reconnect_type: default_reconnect_type(),
+        tunnels: Vec::new(),
+    }
+}
+
+fn parse_openssh_config(content: &str, base_group: &str) -> (Vec<SavedConnection>, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    let mut global = HashMap::<String, String>::new();
+    let mut aliases = Vec::<String>::new();
+    let mut options = HashMap::<String, String>::new();
+
+    let flush = |aliases: &mut Vec<String>, options: &mut HashMap<String, String>, entries: &mut Vec<SavedConnection>, warnings: &mut Vec<String>| {
+        for alias in aliases.drain(..) {
+            if alias.contains('*') || alias.contains('?') || alias.starts_with('!') {
+                warnings.push(format!("Skipped wildcard Host entry: {alias}"));
+                continue;
+            }
+            let host = options.get("hostname").cloned().unwrap_or_else(|| alias.clone());
+            let port = options.get("port").and_then(|value| value.parse::<u16>().ok()).unwrap_or(22);
+            let user = options.get("user").cloned().unwrap_or_default();
+            let normalized_alias = normalize_group_path(&alias);
+            let (name, group) = match normalized_alias.rsplit_once('/') {
+                Some((folder, name)) => (name.to_string(), format!("{base_group}/{folder}")),
+                None => (alias.clone(), base_group.to_string()),
+            };
+            let mut connection = imported_connection(name, group, "ssh", host, port, user);
+            connection.agent_forwarding = options.get("forwardagent").is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+            if let Some(proxy) = options.get("proxyjump").and_then(|value| value.split(',').next()) {
+                if let Some(jump) = parse_jump_host(proxy, &connection.user) {
+                    connection.jump_hosts.push(jump);
+                }
+            }
+            entries.push(connection);
+        }
+        options.clear();
+    };
+
+    for raw_line in content.lines() {
+        let line = raw_line.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = split_config_line(line) else { continue };
+        let key = key.to_ascii_lowercase();
+        if key == "host" {
+            flush(&mut aliases, &mut options, &mut entries, &mut warnings);
+            aliases = value.split_whitespace().map(str::to_string).collect();
+            options = global.clone();
+        } else if aliases.is_empty() {
+            global.entry(key).or_insert(value.to_string());
+        } else {
+            options.entry(key).or_insert(value.to_string());
+        }
+    }
+    flush(&mut aliases, &mut options, &mut entries, &mut warnings);
+    (entries, warnings)
+}
+
+fn split_config_line(line: &str) -> Option<(&str, &str)> {
+    if let Some((key, value)) = line.split_once('=') {
+        return Some((key.trim(), value.trim().trim_matches('"')));
+    }
+    let index = line.find(char::is_whitespace)?;
+    Some((line[..index].trim(), line[index..].trim().trim_matches('"')))
+}
+
+fn parse_jump_host(value: &str, default_user: &str) -> Option<SavedJumpHost> {
+    if value.eq_ignore_ascii_case("none") || value.contains('%') {
+        return None;
+    }
+    let (user, address) = value.rsplit_once('@').map_or((default_user, value), |(user, address)| (user, address));
+    let (host, port) = address.rsplit_once(':')
+        .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)))
+        .unwrap_or((address, 22));
+    (!host.trim().is_empty()).then(|| SavedJumpHost {
+        id: uuid::Uuid::new_v4().to_string(),
+        host: host.to_string(),
+        port,
+        user: user.to_string(),
+        auth_type: "agent".to_string(),
+        password: None,
+        private_key: None,
+        passphrase: None,
+    })
+}
+
+fn parse_putty_registry(content: &str, base_group: &str) -> (Vec<SavedConnection>, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    let mut session_name: Option<String> = None;
+    let mut values = HashMap::<String, String>::new();
+
+    let flush = |name: &mut Option<String>, values: &mut HashMap<String, String>, entries: &mut Vec<SavedConnection>| {
+        let Some(raw_name) = name.take() else { return };
+        let host = values.get("HostName").cloned().unwrap_or_default();
+        if host.is_empty() || raw_name == "Default Settings" {
+            values.clear();
+            return;
+        }
+        let protocol = values.get("Protocol").map(String::as_str).unwrap_or("ssh");
+        if protocol != "ssh" && protocol != "telnet" {
+            values.clear();
+            return;
+        }
+        let port = values.get("PortNumber")
+            .and_then(|value| u16::from_str_radix(value.trim_start_matches("dword:"), 16).ok())
+            .unwrap_or(if protocol == "telnet" { 23 } else { 22 });
+        let decoded_name = decode_putty_name(&raw_name);
+        let normalized = normalize_group_path(&decoded_name);
+        let (display_name, group) = normalized.rsplit_once('/')
+            .map(|(folder, name)| (name.to_string(), format!("{base_group}/{folder}")))
+            .unwrap_or((decoded_name, base_group.to_string()));
+        entries.push(imported_connection(
+            display_name,
+            group,
+            protocol,
+            host,
+            port,
+            values.get("UserName").cloned().unwrap_or_default(),
+        ));
+        values.clear();
+    };
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            flush(&mut session_name, &mut values, &mut entries);
+            let marker = "\\PuTTY\\Sessions\\";
+            session_name = line.find(marker).map(|index| line[index + marker.len()..line.len() - 1].to_string());
+            continue;
+        }
+        if session_name.is_none() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim_matches('"').to_string();
+            let value = value.trim().trim_matches('"').replace("\\\\", "\\").replace("\\\"", "\"");
+            values.insert(key, value);
+        }
+    }
+    flush(&mut session_name, &mut values, &mut entries);
+    if content.contains("PublicKeyFile") {
+        warnings.push("PuTTY private-key paths were not imported; PPK conversion is required before use".to_string());
+    }
+    (entries, warnings)
+}
+
+fn decode_putty_name(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    output.push(byte);
+                    index += 3;
+                    continue;
+                }
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::{parse_openssh_config, parse_putty_registry};
+
+    #[test]
+    fn imports_concrete_openssh_hosts_and_nested_aliases() {
+        let config = r#"
+            User global-user
+            Host prod/web
+              HostName web.internal
+              Port 2222
+              ProxyJump ops@bastion:2200
+              ForwardAgent yes
+            Host *.wildcard
+              HostName ignored
+        "#;
+        let (entries, warnings) = parse_openssh_config(config, "Imported/OpenSSH");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "web");
+        assert_eq!(entries[0].group.as_deref(), Some("Imported/OpenSSH/prod"));
+        assert_eq!(entries[0].host, "web.internal");
+        assert_eq!(entries[0].port, 2222);
+        assert_eq!(entries[0].jump_hosts[0].host, "bastion");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn imports_putty_registry_sessions() {
+        let registry = r#"
+            Windows Registry Editor Version 5.00
+            [HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\Prod%20Router]
+            "HostName"="10.0.0.1"
+            "PortNumber"=dword:00000016
+            "UserName"="admin"
+            "Protocol"="ssh"
+        "#;
+        let (entries, warnings) = parse_putty_registry(registry, "Imported/PuTTY");
+        assert!(warnings.is_empty());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Prod Router");
+        assert_eq!(entries[0].port, 22);
+    }
 }
