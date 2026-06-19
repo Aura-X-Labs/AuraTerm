@@ -150,12 +150,22 @@ vi.mock("@xterm/addon-unicode11", () => ({
   Unicode11Addon: class {},
 }));
 
+vi.mock("@xterm/addon-web-links", () => ({
+  WebLinksAddon: class {
+    constructor(_handler?: unknown) {}
+  },
+}));
+
 vi.mock("@tauri-apps/api/event", () => ({
   listen: mockState.listen,
 }));
 
 vi.mock("@tauri-apps/plugin-os", () => ({
   type: () => "macos",
+}));
+
+vi.mock("@tauri-apps/plugin-shell", () => ({
+  open: vi.fn(async () => undefined),
 }));
 
 vi.mock("../composables/useTerminalSearch", () => ({

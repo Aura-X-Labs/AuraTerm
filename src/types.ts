@@ -141,6 +141,9 @@ export interface TerminalSearchResults {
 export interface TerminalHandle {
   saveLog: (tabTitle: string) => Promise<string>;
   sendData: (text: string) => void;
+  /** Write raw input to this session's pty, bypassing the newline append of
+   *  sendData. Used to fan out broadcast (MultiExec) keystrokes to target panes. */
+  writeInput: (data: string) => void;
   fit: () => void;
   focus: () => void;
   findNext: (text: string, options?: TerminalSearchOptions) => boolean;

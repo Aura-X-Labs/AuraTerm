@@ -394,3 +394,13 @@
   color: var(--app-accent);
 }
 
+.tab-broadcast-btn {
+  width: 34px;
+  font-size: 14px;
+}
+
+.tab-broadcast-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+

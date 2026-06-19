@@ -78,6 +78,9 @@ const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
 const sidebarExpandGroup = ref<string | undefined>(undefined);
 const showRemoteFileManager = ref(false);
+// MultiExec: when on, keystrokes typed into the focused pane are fanned out to
+// every other currently-visible pane. Targets are the visible split panes only.
+const broadcastInput = ref(false);
 const isWindowFocused = ref(true);
 // Immutable Record updates ({ ...obj, [k]: v }) pair best with shallowRef:
 // the whole map is swapped, so shallow reactivity is enough and skips per-key proxies.
@@ -841,6 +844,39 @@ function fitActiveTerminal() {
   fitVisibleTerminals();
 }
 
+// Number of panes currently shown in the split layout — the candidate broadcast
+// targets. Broadcast is only meaningful with at least two.
+const broadcastTargetCount = computed(() => Object.keys(paneByTabId.value).length);
+
+function toggleBroadcastInput() {
+  if (broadcastTargetCount.value < 2) {
+    return;
+  }
+  broadcastInput.value = !broadcastInput.value;
+}
+
+// Fan a focused pane's keystroke out to the other visible panes. writeInput on a
+// target does not re-fire its onData, so this cannot loop back.
+function handleBroadcastInput(sourceTabId: string, data: string) {
+  if (!broadcastInput.value) {
+    return;
+  }
+  for (const tabId of Object.keys(paneByTabId.value)) {
+    if (tabId === sourceTabId) {
+      continue;
+    }
+    termRefs.get(tabId)?.writeInput(data);
+  }
+}
+
+// Closing/merging panes can drop the visible count below 2; silently disable
+// broadcast so it can't keep firing into a single pane.
+watch(broadcastTargetCount, (count) => {
+  if (count < 2 && broadcastInput.value) {
+    broadcastInput.value = false;
+  }
+});
+
 watch(() => settings.value.showInputBar, () => {
   void nextTick(() => {
     fitActiveTerminal();
@@ -1480,6 +1516,26 @@ function handleBookmarkConnect(connection: SavedConnection) {
         <!-- 工具组 -->
         <div class="tab-bar-action-group">
           <button
+            class="tab-new-btn tab-broadcast-btn"
+            :class="{ active: broadcastInput }"
+            type="button"
+            :disabled="broadcastTargetCount < 2"
+            :title="broadcastTargetCount < 2
+              ? 'Broadcast input (split into 2+ panes to enable)'
+              : broadcastInput
+                ? `Broadcast ON — input goes to all ${broadcastTargetCount} visible panes`
+                : 'Broadcast input to all visible panes'"
+            @mousedown.stop
+            @click.stop="toggleBroadcastInput"
+          >
+            <!-- 广播波纹图标 -->
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="8" cy="8" r="1.6" fill="currentColor" />
+              <path d="M5 5a4.3 4.3 0 000 6M11 5a4.3 4.3 0 010 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              <path d="M3 3a7.1 7.1 0 000 10M13 3a7.1 7.1 0 010 10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            </svg>
+          </button>
+          <button
             v-if="activeSshConfig"
             class="tab-new-btn tab-files-btn"
             :class="{ active: showRemoteFileManager }"
@@ -1637,7 +1693,11 @@ function handleBookmarkConnect(connection: SavedConnection) {
               :key="tab.id"
               :ref="(instance) => setPaneViewportRef(tab.id, instance as Element | null)"
               class="terminal-instance-shell"
-              :class="{ visible: Boolean(paneByTabId[tab.id]), focused: activeTabId === tab.id }"
+              :class="{
+                visible: Boolean(paneByTabId[tab.id]),
+                focused: activeTabId === tab.id,
+                'broadcast-target': broadcastInput && Boolean(paneByTabId[tab.id]),
+              }"
               :style="getTerminalViewportStyle(paneByTabId[tab.id]?.rect ?? { left: 0, top: 0, width: 0, height: 0 }, Boolean(paneByTabId[tab.id]))"
               @mousedown="paneByTabId[tab.id] ? focusPane(paneByTabId[tab.id].paneId) : null"
             >
@@ -1649,10 +1709,12 @@ function handleBookmarkConnect(connection: SavedConnection) {
                 :session="tab.session"
                 :log-path="tab.logPath"
                 :settings="settings"
+                :broadcast="broadcastInput"
                 @search-results-change="(results) => updateTerminalSearchResults(tab.id, results)"
                 @session-update="(session) => updateTabSession(tab.id, session)"
                 @ssh-password-updated="sidebarRefreshToken += 1"
                 @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"
+                @broadcast-input="(data) => handleBroadcastInput(tab.id, data)"
               />
             </div>
           </div>
