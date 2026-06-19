@@ -872,7 +872,9 @@ fn main() {
                 let close_tab_item = MenuItem::with_id(_app, "menu-close-tab", "Close Tab", true, None::<&str>)?;
                 let settings_item = MenuItem::with_id(_app, "menu-open-settings", "Settings", true, None::<&str>)?;
                 let toggle_bookmarks_item = MenuItem::with_id(_app, "menu-toggle-bookmarks", "Toggle Bookmarks", true, None::<&str>)?;
+                let command_palette_item = MenuItem::with_id(_app, "menu-open-command-palette", "Command Palette", true, Some("Cmd+Shift+P"))?;
                 let toggle_remote_files_item = MenuItem::with_id(_app, "menu-toggle-remote-files", "Toggle Remote Files", true, None::<&str>)?;
+                let toggle_tunnels_item = MenuItem::with_id(_app, "menu-toggle-tunnels", "Port Forwarding…", true, None::<&str>)?;
                 let increase_font_size_item = MenuItem::with_id(
                     _app,
                     "menu-increase-font-size",
@@ -931,13 +933,17 @@ fn main() {
                     .build()?;
                 let view_menu = SubmenuBuilder::new(_app, "View")
                     .item(&toggle_bookmarks_item)
-                    .item(&toggle_remote_files_item)
+                    .item(&command_palette_item)
                     .separator()
                     .item(&increase_font_size_item)
                     .item(&decrease_font_size_item)
                     .item(&reset_font_size_item)
                     .separator()
                     .item(&fullscreen_item)
+                    .build()?;
+                let tools_menu = SubmenuBuilder::new(_app, "Tools")
+                    .item(&toggle_remote_files_item)
+                    .item(&toggle_tunnels_item)
                     .build()?;
                 let window_menu = SubmenuBuilder::new(_app, "Window")
                     .item(&new_window_item)
@@ -953,6 +959,7 @@ fn main() {
                     .item(&file_menu)
                     .item(&edit_menu)
                     .item(&view_menu)
+                    .item(&tools_menu)
                     .item(&window_menu)
                     .item(&help_menu)
                     .build()?;
@@ -1036,6 +1043,12 @@ fn main() {
                 "menu-toggle-remote-files" => {
                     let _ = app.emit("menu-toggle-remote-files", ());
                 }
+                "menu-toggle-tunnels" => {
+                    let _ = app.emit("menu-toggle-tunnels", ());
+                }
+                "menu-open-command-palette" => {
+                    let _ = app.emit("menu-open-command-palette", ());
+                }
                 "menu-increase-font-size" => {
                     let _ = app.emit("menu-increase-font-size", ());
                 }
@@ -1053,6 +1066,7 @@ fn main() {
         })
         .manage(app_state)
         .manage(ssh::SshState::default())
+        .manage(ssh::ForwardingState::default())
         .manage(telnet::TelnetState::default())
         .manage(serial::SerialState::default())
         .manage(encryption::MasterPasswordState::default())
@@ -1079,6 +1093,9 @@ fn main() {
             ssh::ssh_remove_remote_entry,
             ssh::ssh_upload_file,
             ssh::ssh_download_file,
+            ssh::ssh_start_tunnel,
+            ssh::ssh_stop_tunnel,
+            ssh::ssh_list_tunnels,
             telnet::start_telnet_session,
             telnet::write_telnet_input,
             telnet::close_telnet_session,

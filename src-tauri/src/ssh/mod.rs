@@ -20,6 +20,7 @@ pub(super) const SECURITY_AUDIT_LOG_FILE: &str = "security_audit.log";
 mod types;
 mod known_hosts;
 mod transfer;
+mod forwarding;
 
 // Types consumed externally (`main.rs`, frontend payloads) are re-exported at
 // the module root. A few of them (`SshHostKeyMismatchPromptPayload`,
@@ -43,6 +44,9 @@ pub use known_hosts::*;
 // Same rationale for the transfer submodule: `tauri::generate_handler!` needs
 // to see `ssh::__cmd__<name>` for each `#[tauri::command]`.
 pub use transfer::*;
+// Port-forwarding / tunnel manager commands + `ForwardingState` (managed in
+// `main.rs`). Glob re-export so `generate_handler!` resolves `ssh::__cmd__*`.
+pub use forwarding::*;
 
 /// Per-session state consolidated into a single record.
 ///
@@ -75,6 +79,10 @@ pub struct SshSessionState {
     reconnect_flag: Option<Arc<tokio::sync::Notify>>,
     /// When `Some`, auto-reconnect is enabled and this config is used on every retry.
     reconnect_config: Option<ReconnectConfig>,
+    /// Per-session remote (`-R`) forward registry, shared with the russh
+    /// `ClientHandler`. Created lazily and reused across reconnects so the
+    /// handler always sees the same map.
+    remote_forwards: Option<forwarding::RemoteForwardRegistry>,
 }
 
 #[derive(Clone)]
@@ -189,6 +197,24 @@ impl SshState {
         let mut guard = self.sessions.write().await;
         let entry = guard.entry(id.to_string()).or_default();
         f(entry);
+    }
+
+    /// Get (or lazily create) the per-session remote-forward registry. Used both
+    /// by the connect path (handed to the `ClientHandler`) and by the tunnel
+    /// commands when registering a remote (`-R`) forward target.
+    async fn ensure_remote_forwards(&self, id: &str) -> forwarding::RemoteForwardRegistry {
+        let mut guard = self.sessions.write().await;
+        let entry = guard.entry(id.to_string()).or_default();
+        entry
+            .remote_forwards
+            .get_or_insert_with(forwarding::new_remote_forward_registry)
+            .clone()
+    }
+
+    /// Read-only access to the remote-forward registry, if one exists.
+    async fn remote_forwards_opt(&self, id: &str) -> Option<forwarding::RemoteForwardRegistry> {
+        let guard = self.sessions.read().await;
+        guard.get(id).and_then(|s| s.remote_forwards.clone())
     }
 }
 
@@ -484,8 +510,12 @@ pub async fn resize_ssh_pty(
 #[tauri::command]
 pub async fn close_ssh_pty(
     state: State<'_, SshState>,
+    forwarding: State<'_, ForwardingState>,
     id: String,
 ) -> Result<(), String> {
+    // Tear down any port forwards bound to this session before the handle dies.
+    forwarding::stop_session_tunnels(forwarding.inner(), &id).await;
+
     // For session-persistence modes (tmux/screen), try to destroy the remote session first.
     let config = state.reconnect_config(&id).await;
     if let Some(cfg) = config {
@@ -535,6 +565,7 @@ async fn authenticate_ssh(
     app: &AppHandle,
     id: &str,
     auth_response_rx: &mut mpsc::Receiver<String>,
+    remote_forwards: forwarding::RemoteForwardRegistry,
 ) -> Result<SharedSshHandle, String> {
     let scope = known_hosts::known_host_scope(host, port);
     let mut known_hosts_store = known_hosts::load_known_hosts(app).await?;
@@ -544,6 +575,7 @@ async fn authenticate_ssh(
         host,
         port,
         expected_fingerprint.clone(),
+        remote_forwards.clone(),
     )
     .await
     {
@@ -596,11 +628,16 @@ async fn authenticate_ssh(
             )
             .await?;
 
-            known_hosts::connect_with_expected_fingerprint(host, port, Some(observed_value.clone()))
-                .await
-                .map_err(|(error, _)| {
-                    format!("Failed to reconnect after trusting new host key: {error}")
-                })?
+            known_hosts::connect_with_expected_fingerprint(
+                host,
+                port,
+                Some(observed_value.clone()),
+                remote_forwards.clone(),
+            )
+            .await
+            .map_err(|(error, _)| {
+                format!("Failed to reconnect after trusting new host key: {error}")
+            })?
         }
     };
 
@@ -694,6 +731,29 @@ async fn authenticate_ssh(
     }
 
     Ok(Arc::new(Mutex::new(session)))
+}
+
+/// Re-issue `tcpip-forward` requests for every registered remote (`-R`) forward
+/// on a freshly connected handle. Used after a reconnect so server-side
+/// listeners are recreated; best-effort, errors are ignored.
+async fn reissue_remote_forwards(
+    handle: &SharedSshHandle,
+    registry: &forwarding::RemoteForwardRegistry,
+) {
+    let binds: Vec<(String, u32)> = match registry.lock() {
+        Ok(map) => map
+            .iter()
+            .map(|(port, target)| (target.bind_address.clone(), *port))
+            .collect(),
+        Err(_) => return,
+    };
+    if binds.is_empty() {
+        return;
+    }
+    let guard = handle.lock().await;
+    for (bind_address, bind_port) in binds {
+        let _ = guard.tcpip_forward(bind_address, bind_port).await;
+    }
 }
 
 /// Check whether a command exists on the remote host.
@@ -1200,8 +1260,28 @@ async fn do_single_ssh_connect(
     let addr = format!("{host}:{port}");
     crate::debug_log!("Connecting to {}...", addr);
 
-    let session_handle = authenticate_ssh(host, port, user, password, private_key, app, id, &mut auth_response_rx).await?;
+    // Per-session remote-forward registry, reused across reconnects. Empty on a
+    // fresh connect; populated once the user starts a remote (`-R`) tunnel.
+    let remote_forwards = state.ensure_remote_forwards(id).await;
+    let session_handle = authenticate_ssh(
+        host,
+        port,
+        user,
+        password,
+        private_key,
+        app,
+        id,
+        &mut auth_response_rx,
+        remote_forwards.clone(),
+    )
+    .await?;
     crate::debug_log!("[ssh-debug] {} authenticated; opening PTY channel", id);
+
+    // Re-establish any remote (`-R`) forwards that survived a reconnect. The
+    // server-side listener is lost when the transport drops, so re-issue the
+    // `tcpip-forward` request for each registered bind port (no-op on a fresh
+    // connect where the registry is empty).
+    reissue_remote_forwards(&session_handle, &remote_forwards).await;
 
     crate::debug_log!("Requesting PTY and shell...");
     let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(id));

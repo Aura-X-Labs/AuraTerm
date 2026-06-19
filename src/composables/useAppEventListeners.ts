@@ -13,6 +13,8 @@ interface UseAppEventListenersOptions {
   handleCloseActiveTab: () => void;
   handleToggleBookmarks: () => void;
   handleToggleRemoteFileManager: () => void;
+  handleToggleTunnelManager: () => void;
+  handleToggleCommandPalette: () => void;
   handleSplitPaneFromView: (axis: PaneAxis) => void;
   handleClosePaneFromView: () => void;
   handleIncreaseTerminalFontSize: () => void;
@@ -31,6 +33,8 @@ export function useAppEventListeners({
   handleCloseActiveTab,
   handleToggleBookmarks,
   handleToggleRemoteFileManager,
+  handleToggleTunnelManager,
+  handleToggleCommandPalette,
   handleSplitPaneFromView,
   handleClosePaneFromView,
   handleIncreaseTerminalFontSize,
@@ -91,6 +95,12 @@ export function useAppEventListeners({
         }),
         listen("menu-toggle-remote-files", () => {
           handleToggleRemoteFileManager();
+        }),
+        listen("menu-toggle-tunnels", () => {
+          handleToggleTunnelManager();
+        }),
+        listen("menu-open-command-palette", () => {
+          handleToggleCommandPalette();
         }),
         listen("menu-split-right", () => {
           handleSplitPaneFromView("vertical");

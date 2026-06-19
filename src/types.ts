@@ -1,5 +1,18 @@
 export type ConnectionProtocol = "ssh" | "telnet" | "serial";
 
+/** A single action surfaced in the command palette (Ctrl/Cmd+Shift+P). */
+export interface PaletteCommand {
+  id: string;
+  title: string;
+  subtitle?: string;
+  group?: string;
+  /** Extra terms folded into fuzzy matching but not displayed. */
+  keywords?: string;
+  /** Whether the action can run right now; disabled commands are hidden. */
+  enabled?: boolean;
+  run: () => void | Promise<void>;
+}
+
 export type ReconnectType = "manual" | "simple" | "screen" | "tmux";
 
 type ReconnectConfigLike = {
@@ -31,6 +44,45 @@ export interface SshConfig {
   autoReconnect?: boolean;
   /** Reconnect behavior for SSH sessions */
   reconnectType?: ReconnectType;
+  /** Port-forwarding tunnels configured for this session. */
+  tunnels?: TunnelConfig[];
+}
+
+/** Forwarding direction, mirroring OpenSSH's `-L` / `-R` / `-D`. */
+export type TunnelType = "local" | "remote" | "dynamic";
+
+export type TunnelRuntimeStatus = "starting" | "active" | "error" | "stopped";
+
+export interface TunnelConfig {
+  id: string;
+  type: TunnelType;
+  /** Optional friendly label shown in the tunnel manager. */
+  name?: string;
+  /** Where to listen. Local/dynamic: a local interface (default 127.0.0.1).
+   *  Remote: the bind address on the SSH server. */
+  bindAddress?: string;
+  bindPort: number;
+  /** Destination host:port. Used by local (`-L`) and remote (`-R`); unused for
+   *  dynamic (`-D`), where the SOCKS client chooses the destination. */
+  destHost?: string;
+  destPort?: number;
+  /** Auto-start this tunnel once the SSH session connects. */
+  autoStart?: boolean;
+}
+
+/** Payload of the global `ssh-tunnel-status` event emitted by the backend. */
+export interface TunnelStatusEvent {
+  sessionId: string;
+  tunnelId: string;
+  tunnelType: TunnelType;
+  status: TunnelRuntimeStatus;
+  message?: string | null;
+}
+
+/** Result of `ssh_list_tunnels`: which tunnels are currently running. */
+export interface ActiveTunnelInfo {
+  tunnelId: string;
+  status: TunnelRuntimeStatus;
 }
 
 export type RemoteTransferMode = "sftp" | "scp";
@@ -114,6 +166,8 @@ export interface SavedConnection {
   autoReconnect?: boolean;
   /** Reconnect behavior for SSH sessions */
   reconnectType?: ReconnectType;
+  /** Saved port-forwarding tunnels (SSH only). */
+  tunnels?: TunnelConfig[];
 }
 
 export type SessionConfig =
