@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
@@ -187,6 +188,11 @@ const searchAddonRef = ref<SearchAddon | null>(null);
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
+let webglAddon: WebglAddon | null = null;
+// True once WebGL has hard-failed for this terminal (unavailable, or a context
+// loss with no successful restore). Once set, we stop retrying WebGL for the
+// lifetime of this terminal and stay on the DOM renderer.
+let webglDisabled = false;
 let terminalCleanup: (() => void) | null = null;
 let shellIntegration: ShellIntegration | null = null;
 let stopSessionWatch: (() => void) | null = null;
@@ -388,17 +394,74 @@ watch(() => props.isFocused, (isFocused) => {
   }, 0);
 });
 
+/**
+ * Attach the WebGL (GPU) renderer to this terminal.
+ *
+ * Only the visible terminal needs fast rendering, and every tab keeps its
+ * TerminalComponent mounted (hidden via CSS — see App.vue's `v-for="tab in
+ * tabs"`), so loading WebGL for all terminals at once would exhaust the
+ * browser's ~16 simultaneous WebGL context limit and trigger context-loss
+ * storms. We therefore attach on show and detach on hide, keeping the number
+ * of live GL contexts ≈ the number of on-screen panes.
+ */
+function attachRenderer() {
+  if (!terminal || webglAddon || webglDisabled) {
+    return;
+  }
+  if (effectiveSettings.value.rendererMode === "dom") {
+    return;
+  }
+  try {
+    const addon = new WebglAddon();
+    // If the GPU context is lost (browser reclaimed it, driver reset, etc.),
+    // dispose and fall back to the DOM renderer rather than leaving a blank or
+    // frozen terminal. Don't retry WebGL afterwards for this terminal.
+    addon.onContextLoss(() => {
+      detachRenderer();
+      webglDisabled = true;
+    });
+    terminal.loadAddon(addon); // must run after terminal.open()
+    webglAddon = addon;
+  } catch {
+    // WebGL unavailable in this webview (e.g. some WKWebGTK/WKWebView builds).
+    // Stay on the DOM renderer and stop retrying for this terminal.
+    webglDisabled = true;
+  }
+}
+
+function detachRenderer() {
+  webglAddon?.dispose();
+  webglAddon = null;
+}
+
 watch(() => props.isVisible, (isVisible) => {
   if (!isVisible) {
+    // Release the GPU context while hidden so it doesn't count against the
+    // browser's WebGL context limit.
+    detachRenderer();
     return;
   }
 
+  attachRenderer();
   setTimeout(() => {
     fitAddon?.fit();
     if (props.isFocused) {
       terminal?.focus();
     }
   }, 0);
+});
+
+// React to the user changing the renderer preference at runtime.
+watch(() => effectiveSettings.value.rendererMode, (mode) => {
+  if (mode === "dom") {
+    detachRenderer();
+    return;
+  }
+  // Switching back to a GPU mode re-enables WebGL; attach now if visible.
+  webglDisabled = false;
+  if (props.isVisible) {
+    attachRenderer();
+  }
 });
 
 function notifySerialConnectionStateChange(state: SerialConnectionState) {
@@ -555,6 +618,11 @@ onMounted(() => {
   terminal.loadAddon(unicode11Addon);
   terminal.loadAddon(webLinksAddon);
   terminal.open(terminalRootRef.value);
+  // The isVisible watch is not immediate, so attach the renderer here for a
+  // terminal that is already visible on first paint.
+  if (props.isVisible) {
+    attachRenderer();
+  }
   shellIntegration = new ShellIntegration(terminal as unknown as ConstructorParameters<typeof ShellIntegration>[0]);
   // Activate Unicode 11 so emoji and wide characters (e.g. 💰) are treated as
   // 2 columns wide, preventing them from overlapping the following character.
@@ -716,6 +784,7 @@ onMounted(() => {
       ptyId.value = null;
       void closeSession(id, activeSessionRef.value).catch(() => {});
     }
+      detachRenderer();
       terminal?.dispose();
       shellIntegration?.dispose();
       shellIntegration = null;

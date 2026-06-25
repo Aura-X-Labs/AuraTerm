@@ -37,6 +37,17 @@ export interface DerivedUiTheme {
 
 export type UiThemeMode = "follow-terminal" | ThemeAppearance;
 
+/**
+ * Terminal renderer selection.
+ * - "auto": attach the WebGL (GPU) renderer to the visible terminal and fall
+ *   back to the default DOM renderer if WebGL is unavailable or its context is
+ *   lost (recommended; safe across the different Tauri webviews).
+ * - "webgl": same as auto but never used as a soft preference — still falls
+ *   back on hard failure since a broken renderer would otherwise blank the view.
+ * - "dom": never load WebGL; always use the default DOM renderer.
+ */
+export type RendererMode = "auto" | "webgl" | "dom";
+
 export const TERMINAL_THEME_KEYS: Array<keyof TerminalTheme> = [
   "background",
   "foreground",
@@ -129,6 +140,8 @@ export interface AppSettings {
   theme: TerminalTheme;
   /** Whether UI follows terminal theme appearance or uses a fixed light/dark style */
   uiThemeMode: UiThemeMode;
+  /** Terminal renderer backend. See {@link RendererMode}. */
+  rendererMode: RendererMode;
 
   /** Copy on select: auto-copy selected text to clipboard; Ctrl+C consumes the key when selection exists (no ^C sent to PTY) */
   ctrlCCopy: boolean;
@@ -471,6 +484,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   logFileNameTemplate: "{session}_{timestamp}",
   theme: DEFAULT_THEME,
   uiThemeMode: "follow-terminal",
+  rendererMode: "auto",
 
   ctrlCCopy: true,
   ctrlVPaste: true,
@@ -504,6 +518,12 @@ function normalizeUiThemeMode(value?: string | null): UiThemeMode {
     : DEFAULT_SETTINGS.uiThemeMode;
 }
 
+function normalizeRendererMode(value?: string | null): RendererMode {
+  return value === "auto" || value === "webgl" || value === "dom"
+    ? value
+    : DEFAULT_SETTINGS.rendererMode;
+}
+
 function shouldMigrateLegacyTheme(theme?: Partial<TerminalTheme> | null) {
   return normalizeColor(theme?.background) === LEGACY_DEFAULT_THEME.background
     && normalizeColor(theme?.foreground) === LEGACY_DEFAULT_THEME.foreground
@@ -529,6 +549,7 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     ),
     theme: nextTheme,
     uiThemeMode: normalizeUiThemeMode(value?.uiThemeMode),
+    rendererMode: normalizeRendererMode(value?.rendererMode),
     quickButtons: (value?.quickButtons ?? DEFAULT_SETTINGS.quickButtons).map((button) => ({
       ...button,
       toolbar: button.toolbar?.trim() || "Default",

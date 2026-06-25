@@ -9,6 +9,7 @@ import {
   TERMINAL_THEME_PRESETS,
   type AppSettings,
   type OutputRule,
+  type RendererMode,
   type TerminalTheme,
   type UiThemeMode,
 } from "./settings";
@@ -50,6 +51,11 @@ const uiThemeModeOptions: Array<{ value: UiThemeMode; label: string }> = [
   { value: "follow-terminal", label: "Follow Terminal Theme" },
   { value: "light", label: "Light UI" },
   { value: "dark", label: "Dark UI" },
+];
+const rendererModeOptions: Array<{ value: RendererMode; label: string }> = [
+  { value: "auto", label: "Auto (GPU, fall back to DOM)" },
+  { value: "webgl", label: "WebGL (GPU)" },
+  { value: "dom", label: "DOM (compatibility)" },
 ];
 const basicThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
   { key: "background", label: "Background" },
@@ -129,6 +135,17 @@ const selectedUiThemeModeDescription = computed(() => {
       return "Use a dedicated dark UI, independent from the terminal preset.";
     default:
       return "Let the app UI follow the terminal theme appearance and accent direction.";
+  }
+});
+
+const selectedRendererModeDescription = computed(() => {
+  switch (settings.value.rendererMode) {
+    case "dom":
+      return "Always use the DOM renderer. Most compatible, but slowest on heavy output.";
+    case "webgl":
+      return "Use the WebGL (GPU) renderer for the visible terminal. Falls back to DOM if the GPU context is lost.";
+    default:
+      return "Recommended. Use the WebGL (GPU) renderer for the visible terminal, automatically falling back to DOM when WebGL is unavailable.";
   }
 });
 
@@ -223,6 +240,10 @@ function handleThemePresetChange(event: Event) {
 
 function handleUiThemeModeChange(event: Event) {
   update("uiThemeMode", inputValue(event) as UiThemeMode);
+}
+
+function handleRendererModeChange(event: Event) {
+  update("rendererMode", inputValue(event) as RendererMode);
 }
 
 function resetThemeToDefault() {
@@ -668,6 +689,16 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               @input="update('scrollback', Number(inputValue($event)))"
             >
           </label>
+
+          <label class="settings-field settings-field--stacked">
+            <span>Terminal Renderer</span>
+            <select :value="settings.rendererMode" @change="handleRendererModeChange">
+              <option v-for="option in rendererModeOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <div class="settings-field-full-hint">{{ selectedRendererModeDescription }}</div>
 
           <label class="settings-field">
             <span>Shell</span>
