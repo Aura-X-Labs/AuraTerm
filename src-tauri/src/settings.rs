@@ -133,6 +133,18 @@ pub enum UiThemeMode {
     Dark,
 }
 
+/// Terminal renderer backend. Mirrors the frontend `RendererMode` type
+/// (`"auto" | "webgl" | "dom"`). The frontend owns the actual rendering
+/// behaviour; this exists so the persisted settings schema stays in sync.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RendererMode {
+    #[default]
+    Auto,
+    Webgl,
+    Dom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -151,6 +163,9 @@ pub struct Settings {
     pub theme: TerminalTheme,
     #[serde(default)]
     pub ui_theme_mode: UiThemeMode,
+    /// Terminal renderer backend: "auto" | "webgl" | "dom".
+    #[serde(default)]
+    pub renderer_mode: RendererMode,
     /// Ctrl+C copies selection to clipboard when text is selected
     #[serde(default = "default_true")]
     pub ctrl_c_copy: bool,
@@ -228,6 +243,7 @@ impl Default for Settings {
             log_file_name_template: default_log_file_name_template(),
             theme: TerminalTheme::default(),
             ui_theme_mode: UiThemeMode::FollowTerminal,
+            renderer_mode: RendererMode::Auto,
             ctrl_c_copy: true,
             ctrl_v_paste: true,
             middle_click_paste: true,
