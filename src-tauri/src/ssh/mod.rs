@@ -688,7 +688,7 @@ fn authenticate_ssh(
 
     for jump in jump_hosts {
         let (mut session, observed) = if let Some(previous) = current.as_ref() {
-            let channel = open_proxy_channel(previous.clone(), jump.host.clone(), jump.port)?;
+            let channel = open_proxy_channel(previous.clone(), jump.host.clone(), jump.port).await?;
             known_hosts::connect_stream_with_expected_fingerprint(
                 channel.into_stream(),
                 None,
@@ -727,7 +727,7 @@ fn authenticate_ssh(
     }
 
     let (mut session, observed) = if let Some(previous) = current.as_ref() {
-        let channel = open_proxy_channel(previous.clone(), host.clone(), port)?;
+        let channel = open_proxy_channel(previous.clone(), host.clone(), port).await?;
         known_hosts::connect_stream_with_expected_fingerprint(
             channel.into_stream(),
             None,
@@ -766,20 +766,16 @@ fn authenticate_ssh(
     })
 }
 
-fn open_proxy_channel(
+async fn open_proxy_channel(
     handle: SharedSshHandle,
     host: String,
     port: u16,
 ) -> Result<russh::Channel<client::Msg>, String> {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async move {
-            let guard = handle.lock().await;
-            guard
-                .channel_open_direct_tcpip(host.clone(), port.into(), "127.0.0.1".to_string(), 0)
-                .await
-                .map_err(|error| format!("ProxyJump channel to {host}:{port} failed: {error}"))
-        })
-    })
+    let guard = handle.lock().await;
+    guard
+        .channel_open_direct_tcpip(host.clone(), port.into(), "127.0.0.1".to_string(), 0)
+        .await
+        .map_err(|error| format!("ProxyJump channel to {host}:{port} failed: {error}"))
 }
 
 async fn verify_host_fingerprint(
@@ -856,7 +852,7 @@ fn authenticate_connected_session(
             }
         }
         "agent" => {
-            return authenticate_with_agent(session, user);
+            return authenticate_with_agent(session, user).await;
         }
         "password" => {
             let password = password.ok_or_else(|| "Password is required".to_string())?;
@@ -882,8 +878,8 @@ fn authenticate_connected_session(
 fn authenticate_with_agent(
     mut session: client::Handle<known_hosts::ClientHandler>,
     user: String,
-) -> Result<client::Handle<known_hosts::ClientHandler>, String> {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, String>> + Send>> {
+    Box::pin(async move {
     let stream = connect_local_agent_stream().await?;
     let mut agent = AgentClient::connect(stream);
     let identities = agent.request_identities().await
@@ -902,14 +898,20 @@ fn authenticate_with_agent(
                 russh::keys::PublicKey::new(certificate.public_key().clone(), "")
             }
         };
-        match session.authenticate_publickey_with(user.clone(), key, rsa_hash, &mut agent).await {
+        // `authenticate_publickey_with` is generic over a `Signer` whose
+        // signing future is RPITIT (`impl Future + Send`). Awaiting it directly
+        // inside this boxed `Send` future trips a rustc higher-ranked-lifetime
+        // limitation, so we box the call to erase the opaque type first.
+        let auth: std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::AuthResult, russh::AgentAuthError>> + Send>> =
+            Box::pin(session.authenticate_publickey_with(user.clone(), key, rsa_hash, &mut agent));
+        match auth.await {
             Ok(client::AuthResult::Success) => return Ok(session),
             Ok(client::AuthResult::Failure { .. }) => continue,
             Err(error) => return Err(format!("SSH agent signing failed: {error}")),
         }
     }
     Err("SSH agent authentication failed for every identity".to_string())
-    }))
+    })
 }
 
 async fn run_keyboard_interactive(
