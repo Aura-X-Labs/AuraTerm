@@ -149,6 +149,41 @@ export const PROVIDER_LABELS: Record<Exclude<SyncProvider, "">, string> = {
   auraxlab: "AuraXLab Account",
 };
 
+// ---------------------------------------------------------------------------
+// Registration validation
+//
+// These MUST mirror the server's rules in AuraXLab `app/api/sync.py`
+// (`auraterm_sync_register`) so the client and server agree. Validating locally
+// first gives immediate feedback and avoids a pointless round-trip; the server
+// still re-validates (and is the only place that can detect duplicates).
+// ---------------------------------------------------------------------------
+
+export const SYNC_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+export const SYNC_USERNAME_RE = /^[A-Za-z][A-Za-z0-9_.]*$/;
+export const SYNC_MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * Validate AuraXLab account registration with the same rules the server
+ * enforces. Returns an error message, or `null` when the fields are valid.
+ * (Duplicate email/username can only be checked server-side.)
+ */
+export function validateRegistration(
+  email: string,
+  username: string,
+  password: string,
+): string | null {
+  if (!SYNC_EMAIL_RE.test(email.trim())) {
+    return "A valid email address is required";
+  }
+  if (!SYNC_USERNAME_RE.test(username.trim())) {
+    return "Username must start with a letter and contain only letters, numbers, dots or underscores";
+  }
+  if (password.length < SYNC_MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${SYNC_MIN_PASSWORD_LENGTH} characters`;
+  }
+  return null;
+}
+
 /** Build a fresh input patch from a view, leaving all secret fields untouched. */
 export function inputFromView(view: SyncConfigView): SyncSettingsInput {
   return {
