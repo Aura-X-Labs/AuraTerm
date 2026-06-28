@@ -13,8 +13,10 @@ import {
   auraxlabRegister,
   auraxlabLogout,
   inputFromView,
+  validateRegistration,
   PROVIDER_LABELS,
   DEFAULT_AURAXLAB_URL,
+  SYNC_MIN_PASSWORD_LENGTH,
   type SyncConfigView,
   type SyncProvider,
   type SyncResult,
@@ -219,6 +221,10 @@ async function testConnection() {
 }
 
 async function signIn() {
+  if (!axEmail.value.trim() || !axPassword.value) {
+    flash("Enter your email and password.", true);
+    return;
+  }
   await withBusy(async () => {
     const updated = await auraxlabLogin(DEFAULT_AURAXLAB_URL, axEmail.value, axPassword.value);
     hydrate(updated);
@@ -228,6 +234,13 @@ async function signIn() {
 }
 
 async function register() {
+  // Validate locally with the same rules the server enforces (immediate
+  // feedback; the server still re-checks and owns duplicate detection).
+  const validationError = validateRegistration(axEmail.value, axUsername.value, axPassword.value);
+  if (validationError) {
+    flash(validationError, true);
+    return;
+  }
   await withBusy(async () => {
     const msg = await auraxlabRegister(DEFAULT_AURAXLAB_URL, axEmail.value, axUsername.value, axPassword.value);
     flash(msg);
@@ -337,7 +350,9 @@ async function signOut() {
               <input v-model="axEmail" class="sync-input" type="email" autocomplete="off" placeholder="you@example.com" />
               <label v-if="axMode === 'register'">Username</label>
               <input v-if="axMode === 'register'" v-model="axUsername" class="sync-input" type="text" autocomplete="off" />
-              <label>Password</label>
+              <label>Password
+                <span v-if="axMode === 'register'" class="sync-muted">(at least {{ SYNC_MIN_PASSWORD_LENGTH }} characters)</span>
+              </label>
               <input v-model="axPassword" class="sync-input" type="password" autocomplete="off" />
               <div class="sync-row">
                 <button v-if="axMode === 'login'" class="sync-btn primary" type="button" :disabled="busy" @click="signIn">
