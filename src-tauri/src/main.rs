@@ -1181,6 +1181,8 @@ fn main() {
             cloud_sync::cloud_sync_pull,
             cloud_sync::cloud_sync_now,
             cloud_sync::cloud_sync_test_connection,
+            cloud_sync::auraxlab_request_email_code,
+            cloud_sync::auraxlab_verify_email_code,
             cloud_sync::auraxlab_register,
             cloud_sync::auraxlab_login,
             cloud_sync::auraxlab_logout,

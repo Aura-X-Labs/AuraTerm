@@ -121,6 +121,18 @@ export function cloudSyncTestConnection(): Promise<string> {
   return invoke<string>("cloud_sync_test_connection");
 }
 
+export function auraxlabRequestEmailCode(baseUrl: string, email: string): Promise<string> {
+  return invoke<string>("auraxlab_request_email_code", { baseUrl, email });
+}
+
+export function auraxlabVerifyEmailCode(
+  baseUrl: string,
+  email: string,
+  code: string,
+): Promise<string> {
+  return invoke<string>("auraxlab_verify_email_code", { baseUrl, email, code });
+}
+
 export function auraxlabRegister(
   baseUrl: string,
   email: string,
