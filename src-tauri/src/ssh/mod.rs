@@ -2006,6 +2006,31 @@ async fn write_interactive_input(
     }
 }
 
+/// Export the trusted SSH host-key fingerprints (`"host:port" -> "SHA256:..."`)
+/// as a flat map, for inclusion in an encrypted cloud-sync bundle.
+pub async fn export_known_hosts(app: &AppHandle) -> Result<HashMap<String, String>, String> {
+    Ok(known_hosts::load_known_hosts(app).await?.hosts)
+}
+
+/// Merge synced host-key fingerprints into the local trust store. Local entries
+/// always win on conflict — sync must never silently override a fingerprint that
+/// was trusted on this device. Returns the number of newly added entries.
+pub async fn import_known_hosts(
+    app: &AppHandle,
+    incoming: HashMap<String, String>,
+) -> Result<usize, String> {
+    let mut store = known_hosts::load_known_hosts(app).await?;
+    let mut added = 0usize;
+    for (scope, fingerprint) in incoming {
+        if !store.hosts.contains_key(&scope) {
+            store.hosts.insert(scope, fingerprint);
+            added += 1;
+        }
+    }
+    known_hosts::save_known_hosts(app, &store).await?;
+    Ok(added)
+}
+
 #[cfg(test)]
 mod tests {
     use super::known_hosts::{known_host_scope, parse_known_host_scope, summarize_fingerprint};

@@ -690,6 +690,65 @@ pub fn import_credentials_backup(
     Ok(())
 }
 
+// ============================================================================
+// Cloud-sync blobs
+//
+// A portable, self-describing encrypted container used by the cloud-sync engine
+// (`cloud_sync.rs`). Unlike the credential store, a sync blob is encrypted under
+// a user-supplied *sync passphrase* (independent of the master password) so that
+// it can be uploaded to an untrusted provider (GitHub Gist / Gitee / WebDAV / a
+// self-hosted sync server) with end-to-end encryption — the provider only ever
+// sees ciphertext.
+//
+// Format: SYNC_MAGIC(8) || version(1) || salt(32) || nonce(12)+ciphertext+tag.
+// Key = Argon2id(passphrase, salt), reusing the v2 KDF (16 MiB / t=3 / p=1).
+// ============================================================================
+
+const SYNC_MAGIC: &[u8; 8] = b"AURASYNC";
+const SYNC_BLOB_VERSION: u8 = 1;
+const SYNC_BLOB_PREFIX: usize = 8 + 1 + SALT_SIZE; // magic + version + salt
+
+/// Encrypt `plaintext` under `passphrase`, returning a portable sync blob.
+pub fn encrypt_sync_blob(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
+    if passphrase.is_empty() {
+        return Err("Sync passphrase must not be empty".to_string());
+    }
+    let mut rng = rand::thread_rng();
+    let salt: Vec<u8> = (0..SALT_SIZE).map(|_| rng.gen()).collect();
+    let key = derive_key_v2(passphrase, &salt)?;
+    let encrypted = encrypt_data(plaintext, &key)?;
+
+    let mut out = Vec::with_capacity(SYNC_BLOB_PREFIX + encrypted.len());
+    out.extend_from_slice(SYNC_MAGIC);
+    out.push(SYNC_BLOB_VERSION);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&encrypted);
+    Ok(out)
+}
+
+/// Decrypt a sync blob produced by [`encrypt_sync_blob`] using `passphrase`.
+/// A wrong passphrase (or any tampering) surfaces as a single opaque error.
+pub fn decrypt_sync_blob(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
+    if blob.len() < SYNC_BLOB_PREFIX {
+        return Err("Sync blob is too short or corrupt".to_string());
+    }
+    if &blob[0..8] != SYNC_MAGIC {
+        return Err("Not an AuraTerm sync blob (bad magic header)".to_string());
+    }
+    let version = blob[8];
+    if version != SYNC_BLOB_VERSION {
+        return Err(format!(
+            "Unsupported sync blob version: {} (upgrade AuraTerm)",
+            version
+        ));
+    }
+    let salt = &blob[9..9 + SALT_SIZE];
+    let ciphertext = &blob[SYNC_BLOB_PREFIX..];
+    let key = derive_key_v2(passphrase, salt)?;
+    decrypt_data(ciphertext, &key)
+        .map_err(|_| "Incorrect sync passphrase, or the synced data is corrupt".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1196,6 +1255,47 @@ mod tests {
 
         let key_wrong = derive_key_v2("wrong-pw", &salt).unwrap();
         assert!(decrypt_data(&encrypted, &key_wrong).is_err());
+    }
+
+    // ========== 云同步 blob ==========
+
+    #[test]
+    fn test_sync_blob_roundtrip() {
+        let plaintext = br#"{"bookmarks":[{"id":"a"}]}"#;
+        let blob = encrypt_sync_blob(plaintext, "correct horse battery staple").unwrap();
+        // Self-describing header: magic + version.
+        assert_eq!(&blob[0..8], SYNC_MAGIC);
+        assert_eq!(blob[8], SYNC_BLOB_VERSION);
+        let decrypted = decrypt_sync_blob(&blob, "correct horse battery staple").unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_sync_blob_wrong_passphrase_fails() {
+        let blob = encrypt_sync_blob(b"secret payload", "right-pass").unwrap();
+        assert!(decrypt_sync_blob(&blob, "wrong-pass").is_err());
+    }
+
+    #[test]
+    fn test_sync_blob_is_randomized() {
+        // Random salt + nonce: encrypting the same payload twice yields different blobs.
+        let a = encrypt_sync_blob(b"same", "pw").unwrap();
+        let b = encrypt_sync_blob(b"same", "pw").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(decrypt_sync_blob(&a, "pw").unwrap(), b"same");
+        assert_eq!(decrypt_sync_blob(&b, "pw").unwrap(), b"same");
+    }
+
+    #[test]
+    fn test_sync_blob_rejects_empty_passphrase() {
+        assert!(encrypt_sync_blob(b"x", "").is_err());
+    }
+
+    #[test]
+    fn test_sync_blob_rejects_foreign_magic() {
+        let mut blob = encrypt_sync_blob(b"x", "pw").unwrap();
+        blob[0] = b'X';
+        assert!(decrypt_sync_blob(&blob, "pw").is_err());
     }
 
     // ========== 本地密钥模式 (v3) ==========

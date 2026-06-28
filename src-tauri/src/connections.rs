@@ -290,7 +290,7 @@ fn connections_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(config_dir.join("connections.json"))
 }
 
-fn load_connections(app: &AppHandle) -> Result<Vec<SavedConnection>, String> {
+pub(crate) fn load_connections(app: &AppHandle) -> Result<Vec<SavedConnection>, String> {
     let path = connections_path(app)?;
     if !path.exists() {
         return Ok(vec![]);
@@ -301,7 +301,7 @@ fn load_connections(app: &AppHandle) -> Result<Vec<SavedConnection>, String> {
     Ok(connections)
 }
 
-fn write_connections(app: &AppHandle, connections: &Vec<SavedConnection>) -> Result<(), String> {
+pub(crate) fn write_connections(app: &AppHandle, connections: &Vec<SavedConnection>) -> Result<(), String> {
     let path = connections_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
