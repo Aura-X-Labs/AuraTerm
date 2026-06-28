@@ -1130,8 +1130,70 @@ pub async fn cloud_sync_test_connection(app: AppHandle) -> Result<String, String
     }
 }
 
-/// Register a new AuraXLab account from the desktop app (web confirmation email
-/// is still required before the account can sync).
+/// Step 1 of sign-up: ask the server to email a verification code to `email`.
+#[tauri::command]
+pub async fn auraxlab_request_email_code(
+    base_url: String,
+    email: String,
+) -> Result<String, String> {
+    let client = http_client()?;
+    let url = format!(
+        "{}/api/v1/auraterm/sync/email/request-code",
+        resolve_auraxlab_base(&base_url)
+    );
+    let resp = client
+        .post(url)
+        .json(&json!({ "email": email }))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let body = parse_json(&bytes);
+    if !status.is_success() {
+        return Err(json_message(&body, status));
+    }
+    Ok(body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("We emailed you a verification code.")
+        .to_string())
+}
+
+/// Step 2 of sign-up: verify the emailed code for `email`.
+#[tauri::command]
+pub async fn auraxlab_verify_email_code(
+    base_url: String,
+    email: String,
+    code: String,
+) -> Result<String, String> {
+    let client = http_client()?;
+    let url = format!(
+        "{}/api/v1/auraterm/sync/email/verify-code",
+        resolve_auraxlab_base(&base_url)
+    );
+    let resp = client
+        .post(url)
+        .json(&json!({ "email": email, "code": code }))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let body = parse_json(&bytes);
+    if !status.is_success() {
+        return Err(json_message(&body, status));
+    }
+    Ok(body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Email verified.")
+        .to_string())
+}
+
+/// Step 3 of sign-up: create the account. The email must already be verified
+/// (steps 1-2); the server creates an already-confirmed account that can sign
+/// in immediately.
 #[tauri::command]
 pub async fn auraxlab_register(
     base_url: String,
@@ -1613,6 +1675,42 @@ mod tests {
         // correct push (baseVersion 1) -> v2
         let v2 = auraxlab_push(&cfg, &blob2, Some("1"), "dev", "label").await.unwrap();
         assert_eq!(v2.as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn integ_auraxlab_email_verification_flow() {
+        let base = spawn_mock(|method, url, body| {
+            if method == "POST" && url.ends_with("/email/request-code") {
+                let resp = json!({"status": "sent", "message": "We emailed you a verification code."});
+                (200, serde_json::to_vec(&resp).unwrap(), vec![])
+            } else if method == "POST" && url.ends_with("/email/verify-code") {
+                let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+                if v.get("code").and_then(|c| c.as_str()) == Some("123456") {
+                    let resp = json!({"status": "verified", "message": "Email verified."});
+                    (200, serde_json::to_vec(&resp).unwrap(), vec![])
+                } else {
+                    let resp = json!({"error": "bad request", "message": "Incorrect verification code"});
+                    (400, serde_json::to_vec(&resp).unwrap(), vec![])
+                }
+            } else {
+                (404, b"{}".to_vec(), vec![])
+            }
+        });
+
+        let sent = auraxlab_request_email_code(base.clone(), "a@b.com".into())
+            .await
+            .unwrap();
+        assert!(sent.to_lowercase().contains("emailed"), "got: {sent}");
+
+        let verified = auraxlab_verify_email_code(base.clone(), "a@b.com".into(), "123456".into())
+            .await
+            .unwrap();
+        assert!(verified.to_lowercase().contains("verified"), "got: {verified}");
+
+        let err = auraxlab_verify_email_code(base, "a@b.com".into(), "000000".into())
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("incorrect"), "got: {err}");
     }
 
     // ---- opt-in real-endpoint integration (run with `--ignored`) ----
