@@ -2,6 +2,15 @@
 ## Doing
 
 ### 新增
+- **端到端加密云同步（书签 / 设置 / known-hosts）** —— 对标 Electerm 的自托管思路，免自建后端
+  - 四种存储后端可选：GitHub Gist、Gitee Gist、WebDAV、AuraXLab 账户（官方私有同步服务）
+  - 上传前用独立的「同步口令」经 Argon2id + AES-256-GCM 端到端加密（复用现有加密原语，新增 `AURASYNC` blob 格式），存储方/服务端只见密文（零知识）
+  - 同步内容可选：书签（默认）、设置子集（主题/字体/快捷按钮/输出规则等，剔除设备相关项）、SSH known-hosts、以及（可选）已保存凭据（需主密码解锁）
+  - 合并策略：书签按 id 合并、known-hosts 并集且本地信任优先；提供「合并 / 覆盖本地 / 覆盖云端」与「立即双向同步」
+  - 新增设置入口 `Cloud Sync`（File ▸ Preferences 与命令面板），后端 `cloud_sync.rs` + `reqwest`(rustls)
+- **AuraXLab 私有书签同步** —— 应用内注册/登录 AuraXLab 账户，按版本化并发控制上传加密 vault（服务端零知识，可自托管）
+- **用户手册入口** —— Help 菜单与命令面板新增「User Manual」，跳转至 AuraXLab 站点的在线用户手册（`@tauri-apps/plugin-shell` 在系统浏览器打开）
+- **云同步联调测试** —— 新增四后端（GitHub/Gitee Gist、WebDAV、AuraXLab）provider 集成测试：默认对内置 mock 服务跑 encrypt→push→pull→decrypt 全链路；`--ignored` 的真实端点测试可凭环境变量对真实服务联调（dev-dependency：`tiny_http`）
 - **Phase 5: 协议打磨、嵌套书签与 Shell 集成**
   - Telnet IAC 支持 BINARY/ECHO/SGA、终端类型协商和 NAWS 窗口尺寸更新，未知选项保持安全拒绝
   - Local/SSH/Telnet/Serial 原始流自动识别 `rz`/`sz`，内置 Zmodem 上传、下载、进度、取消及安全文件名处理

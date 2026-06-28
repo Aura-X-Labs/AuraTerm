@@ -21,6 +21,7 @@ use tauri::{
 
 #[macro_use]
 mod logging;
+mod cloud_sync;
 mod connections;
 mod encryption;
 mod keychain;
@@ -1109,6 +1110,7 @@ fn main() {
         .manage(serial::SerialState::default())
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
+        .manage(cloud_sync::SyncState::default())
         .invoke_handler(tauri::generate_handler![
             get_version_info,
             get_startup_dir,
@@ -1170,6 +1172,18 @@ fn main() {
             connections::delete_connection,
             connections::touch_connection,
             connections::import_bookmarks,
+            cloud_sync::get_sync_config,
+            cloud_sync::set_sync_config,
+            cloud_sync::set_sync_passphrase,
+            cloud_sync::lock_sync_passphrase,
+            cloud_sync::is_sync_unlocked,
+            cloud_sync::cloud_sync_push,
+            cloud_sync::cloud_sync_pull,
+            cloud_sync::cloud_sync_now,
+            cloud_sync::cloud_sync_test_connection,
+            cloud_sync::auraxlab_register,
+            cloud_sync::auraxlab_login,
+            cloud_sync::auraxlab_logout,
             save_terminal_log,
             append_to_log,
         ])

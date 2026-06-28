@@ -12,6 +12,8 @@ import RemoteFileManager from "./RemoteFileManager.vue";
 import MasterPasswordDialog from "./MasterPasswordDialog.vue";
 import TunnelManager from "./TunnelManager.vue";
 import CommandPalette from "./CommandPalette.vue";
+import CloudSyncDialog from "./CloudSyncDialog.vue";
+import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useSshTunnels } from "./composables/useSshTunnels";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
 import { useAppEventListeners } from "./composables/useAppEventListeners";
@@ -78,6 +80,7 @@ const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
 // so shallowRef avoids building a deep Proxy over the large AppSettings tree.
 const settings = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const showSettings = ref(false);
+const showCloudSync = ref(false);
 const showAbout = ref(false);
 const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
@@ -1083,6 +1086,14 @@ function handleOpenAbout() {
   showAbout.value = true;
 }
 
+/** Open the online AuraTerm user manual (hosted on the AuraXLab site) in the
+ *  system browser. */
+const USER_MANUAL_URL = "https://auraxlab.com/products/auraterm/manual";
+function handleOpenUserManual() {
+  closeOpenMenus();
+  void openExternalUrl(USER_MANUAL_URL);
+}
+
 function handleOpenSettings() {
   closeOpenMenus();
   showSettings.value = true;
@@ -1376,6 +1387,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "font-reset", title: "Reset Terminal Font Size", group: "View", keywords: "zoom", run: () => handleResetTerminalFontSize() },
     { id: "fullscreen", title: "Toggle Full Screen", group: "View", run: () => { void handleToggleFullScreen(); } },
     { id: "settings", title: "Open Settings", group: "App", keywords: "preferences config", run: () => handleOpenSettings() },
+    { id: "cloud-sync", title: "Cloud Sync", group: "App", keywords: "sync backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
+    { id: "user-manual", title: "User Manual", group: "App", keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: "About AuraTerm", group: "App", run: () => handleOpenAbout() },
   ];
 
@@ -1481,6 +1494,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenSettings">
                     <span>Settings</span>
                   </button>
+                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="openMenuId = null; showCloudSync = true">
+                    <span>Cloud Sync…</span>
+                  </button>
                 </div>
               </div>
               <div class="titlebar-menu-separator" />
@@ -1576,6 +1592,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               Help
             </button>
             <div v-if="openMenuId === 'help'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
+              <button class="titlebar-menu-item" type="button" @click="handleOpenUserManual">
+                <span>User Manual</span>
+              </button>
               <button class="titlebar-menu-item" type="button" @click="handleOpenAbout">
                 <span>About AuraTerm</span>
               </button>
@@ -2103,6 +2122,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     />
 
     <SettingsDialog v-if="showSettings" :initial="settings" @save="handleSaveSettings" @cancel="showSettings = false" />
+    <CloudSyncDialog v-if="showCloudSync" @close="showCloudSync = false" />
     <AboutDialog v-if="showAbout" @close="showAbout = false" />
 
     <div v-if="showNewTabMenu" class="newtab-overlay" @click="showNewTabMenu = false">
