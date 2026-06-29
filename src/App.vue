@@ -251,6 +251,7 @@ const { registerAppEventListeners } = useAppEventListeners({
   syncFullscreenState,
   handleOpenAbout,
   handleOpenSettings,
+  handleOpenCloudSync,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -1099,6 +1100,11 @@ function handleOpenSettings() {
   showSettings.value = true;
 }
 
+function handleOpenCloudSync() {
+  closeOpenMenus();
+  showCloudSync.value = true;
+}
+
 function toggleRemoteFileManager() {
   if (!activeSshConfig.value) {
     return;
@@ -1494,7 +1500,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenSettings">
                     <span>Settings</span>
                   </button>
-                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="openMenuId = null; showCloudSync = true">
+                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenCloudSync">
                     <span>Cloud Sync…</span>
                   </button>
                 </div>

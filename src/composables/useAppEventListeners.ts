@@ -8,6 +8,7 @@ interface UseAppEventListenersOptions {
   syncFullscreenState: () => Promise<void>;
   handleOpenAbout: () => void;
   handleOpenSettings: () => void;
+  handleOpenCloudSync: () => void;
   handleNewLocalSessionFromMenu: () => void;
   handleOpenConnectionFromMenu: (protocol: ConnectionProtocol) => void;
   handleCloseActiveTab: () => void;
@@ -28,6 +29,7 @@ export function useAppEventListeners({
   syncFullscreenState,
   handleOpenAbout,
   handleOpenSettings,
+  handleOpenCloudSync,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -74,6 +76,9 @@ export function useAppEventListeners({
       const menuListeners: UnlistenFn[] = await Promise.all([
         listen("menu-open-settings", () => {
           handleOpenSettings();
+        }),
+        listen("menu-open-cloud-sync", () => {
+          handleOpenCloudSync();
         }),
         listen("menu-new-local", () => {
           handleNewLocalSessionFromMenu();
