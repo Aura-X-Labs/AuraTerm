@@ -910,6 +910,7 @@ fn main() {
                 let new_serial_item = MenuItem::with_id(_app, "menu-new-serial", "Serial", true, None::<&str>)?;
                 let close_tab_item = MenuItem::with_id(_app, "menu-close-tab", "Close Tab", true, None::<&str>)?;
                 let settings_item = MenuItem::with_id(_app, "menu-open-settings", "Settings", true, None::<&str>)?;
+                let cloud_sync_item = MenuItem::with_id(_app, "menu-open-cloud-sync", "Cloud Sync…", true, None::<&str>)?;
                 let toggle_bookmarks_item = MenuItem::with_id(_app, "menu-toggle-bookmarks", "Toggle Bookmarks", true, None::<&str>)?;
                 let command_palette_item = MenuItem::with_id(_app, "menu-open-command-palette", "Command Palette", true, Some("Cmd+Shift+P"))?;
                 let toggle_remote_files_item = MenuItem::with_id(_app, "menu-toggle-remote-files", "Toggle Remote Files", true, None::<&str>)?;
@@ -958,6 +959,7 @@ fn main() {
                     .item(&close_tab_item)
                     .separator()
                     .item(&settings_item)
+                    .item(&cloud_sync_item)
                     .separator()
                     .item(&exit_item)
                     .build()?;
@@ -1060,6 +1062,9 @@ fn main() {
                 }
                 "menu-open-settings" => {
                     let _ = app.emit("menu-open-settings", ());
+                }
+                "menu-open-cloud-sync" => {
+                    let _ = app.emit("menu-open-cloud-sync", ());
                 }
                 "menu-new-local" => {
                     let _ = app.emit("menu-new-local", ());
