@@ -2,21 +2,21 @@
   <div v-if="isOpen" class="dialog-overlay" @click.self="handleCancel">
     <div class="dialog-container">
       <div class="dialog-header">
-        <h2>{{ mode === 'setup' ? '设置主密码' : '输入主密码' }}</h2>
+        <h2>{{ mode === 'setup' ? $t('masterPassword.setupTitle') : $t('masterPassword.unlockTitle') }}</h2>
         <button class="close-btn" @click="handleCancel">×</button>
       </div>
 
       <div class="dialog-body">
         <template v-if="mode === 'setup'">
-          <p class="description">请设置一个强密码来保护您的凭据。此密码将在应用每次启动时需要输入。</p>
+          <p class="description">{{ $t('masterPassword.setupDesc') }}</p>
 
           <div class="form-group">
-            <label for="password">主密码</label>
+            <label for="password">{{ $t('masterPassword.masterPassword') }}</label>
             <input
               id="password"
               v-model="password"
               type="password"
-              placeholder="输入主密码"
+              :placeholder="$t('masterPassword.enterPassword')"
               @keyup.enter="handleSetup"
             />
             <div v-if="password" class="password-strength">
@@ -28,39 +28,39 @@
           </div>
 
           <div class="form-group">
-            <label for="passwordConfirm">确认密码</label>
+            <label for="passwordConfirm">{{ $t('masterPassword.confirmPassword') }}</label>
             <input
               id="passwordConfirm"
               v-model="passwordConfirm"
               type="password"
-              placeholder="确认密码"
+              :placeholder="$t('masterPassword.confirmPasswordPlaceholder')"
               @keyup.enter="handleSetup"
             />
             <div v-if="passwordConfirm && password !== passwordConfirm" class="error-msg">
-              密码不匹配
+              {{ $t('masterPassword.passwordMismatch') }}
             </div>
           </div>
 
           <div class="info-box">
-            <strong>提示：</strong>
+            <strong>{{ $t('masterPassword.tipTitle') }}</strong>
             <ul>
-              <li>密码长度至少 8 字符</li>
-              <li>建议混合使用大小写字母、数字和符号</li>
-              <li>请牢记此密码，无法恢复</li>
+              <li>{{ $t('masterPassword.tip1') }}</li>
+              <li>{{ $t('masterPassword.tip2') }}</li>
+              <li>{{ $t('masterPassword.tip3') }}</li>
             </ul>
           </div>
         </template>
 
         <template v-if="mode === 'unlock'">
-          <p class="description">请输入主密码以访问保存的连接信息。</p>
+          <p class="description">{{ $t('masterPassword.unlockDesc') }}</p>
 
           <div class="form-group">
-            <label for="unlockPassword">主密码</label>
+            <label for="unlockPassword">{{ $t('masterPassword.masterPassword') }}</label>
             <input
               id="unlockPassword"
               v-model="password"
               type="password"
-              placeholder="输入主密码"
+              :placeholder="$t('masterPassword.enterPassword')"
               @keyup.enter="handleUnlock"
             />
             <div v-if="errorMessage" class="error-msg">
@@ -70,30 +70,30 @@
 
           <label v-if="rememberAvailable" class="remember-row">
             <input v-model="remember" type="checkbox" />
-            <span>在此设备记住（下次启动自动解锁）</span>
+            <span>{{ $t('masterPassword.rememberDevice') }}</span>
           </label>
         </template>
       </div>
 
       <div class="dialog-footer">
         <button v-if="mode === 'setup'" class="btn btn-secondary" @click="handleCancel">
-          取消
+          {{ $t('common.cancel') }}
         </button>
         <button v-if="mode === 'unlock'" class="btn btn-secondary" @click="handleCancel">
-          退出应用
+          {{ $t('masterPassword.exitApp') }}
         </button>
         <button
           :class="['btn', 'btn-primary', { disabled: !isFormValid }]"
           :disabled="!isFormValid"
           @click="mode === 'setup' ? handleSetup() : handleUnlock()"
         >
-          {{ mode === 'setup' ? '保存' : '解锁' }}
+          {{ mode === 'setup' ? $t('common.save') : $t('masterPassword.unlock') }}
         </button>
       </div>
 
       <div v-if="isLoading" class="loading-overlay">
         <div class="spinner"></div>
-        <p>处理中...</p>
+        <p>{{ $t('masterPassword.processing') }}</p>
       </div>
     </div>
   </div>
@@ -102,6 +102,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { t } from './i18n'
 
 type Mode = 'setup' | 'unlock'
 
@@ -144,8 +145,12 @@ const passwordStrength = computed(() => {
 })
 
 const passwordStrengthText = computed(() => {
-  const map = { weak: '弱', medium: '中', strong: '强' }
-  return `密码强度：${map[passwordStrength.value]}`
+  const map = {
+    weak: t('masterPassword.strengthWeak'),
+    medium: t('masterPassword.strengthMedium'),
+    strong: t('masterPassword.strengthStrong'),
+  }
+  return t('masterPassword.strengthLabel', { level: map[passwordStrength.value] })
 })
 
 const isFormValid = computed(() => {
@@ -160,12 +165,12 @@ const isFormValid = computed(() => {
 
 const handleSetup = async () => {
   if (password.value !== passwordConfirm.value) {
-    errorMessage.value = '密码不匹配'
+    errorMessage.value = t('masterPassword.passwordMismatch')
     return
   }
 
   if (password.value.length < 8) {
-    errorMessage.value = '密码长度至少 8 字符'
+    errorMessage.value = t('masterPassword.minLength')
     return
   }
 
@@ -177,7 +182,7 @@ const handleSetup = async () => {
     emit('success')
     resetForm()
   } catch (error) {
-    errorMessage.value = `设置失败: ${error}`
+    errorMessage.value = t('masterPassword.setupFailed', { error: String(error) })
   } finally {
     isLoading.value = false
   }
@@ -185,7 +190,7 @@ const handleSetup = async () => {
 
 const handleUnlock = async () => {
   if (!password.value) {
-    errorMessage.value = '请输入主密码'
+    errorMessage.value = t('masterPassword.enterMasterPassword')
     return
   }
 
@@ -202,10 +207,10 @@ const handleUnlock = async () => {
       emit('unlocked')
       resetForm()
     } else {
-      errorMessage.value = '密码错误，请重试'
+      errorMessage.value = t('masterPassword.wrongPassword')
     }
   } catch (error) {
-    errorMessage.value = `验证失败: ${error}`
+    errorMessage.value = t('masterPassword.verifyFailed', { error: String(error) })
   } finally {
     isLoading.value = false
   }

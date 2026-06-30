@@ -128,18 +128,18 @@ onMounted(() => {
 
 <template>
   <div class="palette-overlay" @click.self="emit('close')" @keydown="handleKeydown">
-    <div class="palette" role="dialog" aria-label="Command palette">
+    <div class="palette" role="dialog" :aria-label="$t('palette.ariaLabel')">
       <input
         ref="inputRef"
         v-model="query"
         class="palette-input"
         type="text"
-        placeholder="Type a command or search…"
+        :placeholder="$t('palette.placeholder')"
         spellcheck="false"
         autocomplete="off"
       />
       <div ref="listRef" class="palette-list">
-        <div v-if="filtered.length === 0" class="palette-empty">No matching commands</div>
+        <div v-if="filtered.length === 0" class="palette-empty">{{ $t('palette.empty') }}</div>
         <button
           v-for="(command, index) in filtered"
           :key="command.id"

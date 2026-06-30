@@ -24,6 +24,7 @@ import {
   type SyncProvider,
   type SyncResult,
 } from "./cloudSync";
+import { t } from "./i18n";
 
 const emit = defineEmits<{ close: [] }>();
 
@@ -85,7 +86,7 @@ const auraxlabSignedIn = computed(() => view.value?.auraxlab.tokenSet ?? false);
 
 const lastSyncText = computed(() => {
   const ts = view.value?.lastSyncAt;
-  if (!ts) return "Never";
+  if (!ts) return t("cloudSync.never");
   return new Date(ts).toLocaleString();
 });
 
@@ -142,13 +143,13 @@ async function withBusy<T>(fn: () => Promise<T>): Promise<T | undefined> {
 
 async function unlockPassphrase() {
   if (passphrase.value.trim().length === 0) {
-    flash("Enter a sync passphrase first.", true);
+    flash(t("cloudSync.enterPassphrase"), true);
     return;
   }
   await withBusy(async () => {
     await setSyncPassphrase(passphrase.value);
     hydrate(await getSyncConfig());
-    flash("Sync passphrase set for this session.");
+    flash(t("cloudSync.passphraseSet"));
   });
 }
 
@@ -157,7 +158,7 @@ async function lockPassphrase() {
     await lockSyncPassphrase();
     passphrase.value = "";
     hydrate(await getSyncConfig());
-    flash("Sync locked.");
+    flash(t("cloudSync.syncLockedMsg"));
   });
 }
 
@@ -182,7 +183,7 @@ async function saveConfig(): Promise<boolean> {
       webdavPassword: secret(webdavPassword.value),
     });
     hydrate(updated);
-    flash("Sync settings saved.");
+    flash(t("cloudSync.settingsSaved"));
     return updated;
   });
   return next !== undefined;
@@ -220,7 +221,7 @@ async function doPush() {
 }
 
 async function doPull(replace: boolean) {
-  if (replace && !window.confirm("Replace ALL local bookmarks with the cloud copy? This cannot be undone.")) {
+  if (replace && !window.confirm(t("cloudSync.confirmReplace"))) {
     return;
   }
   if (!(await saveConfig())) return;
@@ -240,21 +241,21 @@ async function testConnection() {
 
 async function signIn() {
   if (!axEmail.value.trim() || !axPassword.value) {
-    flash("Enter your email and password.", true);
+    flash(t("cloudSync.enterEmailPassword"), true);
     return;
   }
   await withBusy(async () => {
     const updated = await auraxlabLogin(DEFAULT_AURAXLAB_URL, axEmail.value, axPassword.value);
     hydrate(updated);
     axPassword.value = "";
-    flash("Signed in to AuraXLab.");
+    flash(t("cloudSync.signedIn"));
   });
 }
 
 // Sign-up step 1: email -> request a verification code.
 async function sendCode() {
   if (!SYNC_EMAIL_RE.test(axEmail.value.trim())) {
-    flash("A valid email address is required", true);
+    flash(t("cloudSync.validEmailRequired"), true);
     return;
   }
   await withBusy(async () => {
@@ -268,7 +269,7 @@ async function sendCode() {
 // Sign-up step 2: verify the emailed code.
 async function verifyCode() {
   if (!axCode.value.trim()) {
-    flash("Enter the verification code from your email.", true);
+    flash(t("cloudSync.enterCode"), true);
     return;
   }
   await withBusy(async () => {
@@ -302,52 +303,51 @@ async function register() {
 async function signOut() {
   await withBusy(async () => {
     hydrate(await auraxlabLogout());
-    flash("Signed out.");
+    flash(t("cloudSync.signedOut"));
   });
 }
 </script>
 
 <template>
   <div class="sync-overlay" @click.self="emit('close')">
-    <div class="sync-dialog" role="dialog" aria-label="Cloud Sync">
+    <div class="sync-dialog" role="dialog" :aria-label="$t('cloudSync.title')">
       <div class="sync-header">
         <div>
-          <div class="sync-title">Cloud Sync</div>
-          <div class="sync-subtitle">End-to-end encrypted · self-hosted providers</div>
+          <div class="sync-title">{{ $t('cloudSync.title') }}</div>
+          <div class="sync-subtitle">{{ $t('cloudSync.subtitle') }}</div>
         </div>
-        <button class="sync-close" type="button" aria-label="Close" @click="emit('close')">×</button>
+        <button class="sync-close" type="button" :aria-label="$t('common.close')" @click="emit('close')">×</button>
       </div>
 
       <div class="sync-body">
         <!-- Passphrase -->
         <section class="sync-section">
-          <h3>1 · Sync passphrase</h3>
+          <h3>{{ $t('cloudSync.step1') }}</h3>
           <p class="sync-hint">
-            Your data is encrypted with this passphrase <b>before</b> upload. It is never sent to the
-            provider — keep it safe; if you lose it, the synced data cannot be recovered.
+            {{ $t('cloudSync.passphraseHint') }}
           </p>
           <div class="sync-row">
             <span class="sync-badge" :data-on="passphraseUnlocked">
-              {{ passphraseUnlocked ? "Unlocked" : "Locked" }}
+              {{ passphraseUnlocked ? $t('cloudSync.unlocked') : $t('cloudSync.locked') }}
             </span>
             <input
               v-model="passphrase"
               class="sync-input"
               type="password"
               autocomplete="off"
-              placeholder="Sync passphrase"
+              :placeholder="$t('cloudSync.passphrasePlaceholder')"
               @keyup.enter="unlockPassphrase"
             />
-            <button class="sync-btn" type="button" :disabled="busy" @click="unlockPassphrase">Set</button>
+            <button class="sync-btn" type="button" :disabled="busy" @click="unlockPassphrase">{{ $t('cloudSync.set') }}</button>
             <button v-if="passphraseUnlocked" class="sync-btn" type="button" :disabled="busy" @click="lockPassphrase">
-              Lock
+              {{ $t('cloudSync.lock') }}
             </button>
           </div>
         </section>
 
         <!-- Provider -->
         <section class="sync-section">
-          <h3>2 · Storage provider</h3>
+          <h3>{{ $t('cloudSync.step2') }}</h3>
           <div class="sync-provider-tabs">
             <button
               v-for="p in providers"
@@ -362,86 +362,86 @@ async function signOut() {
           </div>
 
           <div v-if="provider === 'github'" class="sync-fields">
-            <label>Personal access token <span class="sync-muted">(scope: gist)</span></label>
+            <label>{{ $t('cloudSync.patLabel') }} <span class="sync-muted">{{ $t('cloudSync.scopeGist') }}</span></label>
             <input v-model="githubToken" class="sync-input" type="password" autocomplete="off"
-              :placeholder="view?.github.tokenSet ? '•••••• (stored — leave blank to keep)' : 'ghp_…'" />
-            <label>Gist ID <span class="sync-muted">(auto-filled after first push)</span></label>
-            <input v-model="githubGistId" class="sync-input" type="text" placeholder="(optional)" />
+              :placeholder="view?.github.tokenSet ? $t('cloudSync.storedKeep') : 'ghp_…'" />
+            <label>{{ $t('cloudSync.gistIdLabel') }} <span class="sync-muted">{{ $t('cloudSync.autoFilled') }}</span></label>
+            <input v-model="githubGistId" class="sync-input" type="text" :placeholder="$t('cloudSync.optional')" />
           </div>
 
           <div v-else-if="provider === 'gitee'" class="sync-fields">
-            <label>Private token <span class="sync-muted">(scope: gists)</span></label>
+            <label>{{ $t('cloudSync.privateTokenLabel') }} <span class="sync-muted">{{ $t('cloudSync.scopeGists') }}</span></label>
             <input v-model="giteeToken" class="sync-input" type="password" autocomplete="off"
-              :placeholder="view?.gitee.tokenSet ? '•••••• (stored — leave blank to keep)' : 'token'" />
-            <label>Gist ID <span class="sync-muted">(auto-filled after first push)</span></label>
-            <input v-model="giteeGistId" class="sync-input" type="text" placeholder="(optional)" />
+              :placeholder="view?.gitee.tokenSet ? $t('cloudSync.storedKeep') : 'token'" />
+            <label>{{ $t('cloudSync.gistIdLabel') }} <span class="sync-muted">{{ $t('cloudSync.autoFilled') }}</span></label>
+            <input v-model="giteeGistId" class="sync-input" type="text" :placeholder="$t('cloudSync.optional')" />
           </div>
 
           <div v-else-if="provider === 'webdav'" class="sync-fields">
-            <label>File URL</label>
+            <label>{{ $t('cloudSync.fileUrl') }}</label>
             <input v-model="webdavUrl" class="sync-input" type="text"
               placeholder="https://dav.example.com/auraterm/auraterm-sync.enc" />
-            <label>Username</label>
+            <label>{{ $t('cloudSync.username') }}</label>
             <input v-model="webdavUsername" class="sync-input" type="text" autocomplete="off" />
-            <label>Password</label>
+            <label>{{ $t('cloudSync.password') }}</label>
             <input v-model="webdavPassword" class="sync-input" type="password" autocomplete="off"
-              :placeholder="view?.webdav.passwordSet ? '•••••• (stored — leave blank to keep)' : ''" />
+              :placeholder="view?.webdav.passwordSet ? $t('cloudSync.storedKeep') : ''" />
           </div>
 
           <div v-else-if="provider === 'auraxlab'" class="sync-fields">
             <template v-if="auraxlabSignedIn">
               <p class="sync-hint">
-                Signed in as <b>{{ view?.auraxlab.username }}</b> on the official AuraXLab sync service.
+                {{ $t('cloudSync.signedInAs', { username: view?.auraxlab.username ?? '' }) }}
               </p>
-              <button class="sync-btn" type="button" :disabled="busy" @click="signOut">Sign out</button>
+              <button class="sync-btn" type="button" :disabled="busy" @click="signOut">{{ $t('cloudSync.signOut') }}</button>
             </template>
             <!-- Sign in -->
             <template v-else-if="axMode === 'login'">
-              <p class="sync-hint">Sign in to your account on the official AuraXLab sync service.</p>
-              <label>Email</label>
+              <p class="sync-hint">{{ $t('cloudSync.loginHint') }}</p>
+              <label>{{ $t('cloudSync.email') }}</label>
               <input v-model="axEmail" class="sync-input" type="email" autocomplete="off" placeholder="you@example.com" />
-              <label>Password</label>
+              <label>{{ $t('cloudSync.password') }}</label>
               <input v-model="axPassword" class="sync-input" type="password" autocomplete="off" @keyup.enter="signIn" />
               <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="signIn">Sign in</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="startRegister">Need an account?</button>
+                <button class="sync-btn primary" type="button" :disabled="busy" @click="signIn">{{ $t('cloudSync.signIn') }}</button>
+                <button class="sync-btn" type="button" :disabled="busy" @click="startRegister">{{ $t('cloudSync.needAccount') }}</button>
               </div>
             </template>
 
             <!-- Sign up — step 1: email -->
             <template v-else-if="axRegStep === 'email'">
-              <p class="sync-hint">Create an account on the official AuraXLab sync service. We'll email you a verification code first.</p>
-              <label>Email</label>
+              <p class="sync-hint">{{ $t('cloudSync.registerHint') }}</p>
+              <label>{{ $t('cloudSync.email') }}</label>
               <input v-model="axEmail" class="sync-input" type="email" autocomplete="off" placeholder="you@example.com" @keyup.enter="sendCode" />
               <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="sendCode">Send code</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="startLogin">Have an account?</button>
+                <button class="sync-btn primary" type="button" :disabled="busy" @click="sendCode">{{ $t('cloudSync.sendCode') }}</button>
+                <button class="sync-btn" type="button" :disabled="busy" @click="startLogin">{{ $t('cloudSync.haveAccount') }}</button>
               </div>
             </template>
 
             <!-- Sign up — step 2: verify code -->
             <template v-else-if="axRegStep === 'code'">
-              <p class="sync-hint">We emailed a 6-digit code to <b>{{ axEmail }}</b>. Enter it to verify your email.</p>
-              <label>Verification code</label>
+              <p class="sync-hint">{{ $t('cloudSync.codeHint', { email: axEmail }) }}</p>
+              <label>{{ $t('cloudSync.verificationCode') }}</label>
               <input v-model="axCode" class="sync-input" type="text" inputmode="numeric" maxlength="6"
                 autocomplete="one-time-code" placeholder="••••••" @keyup.enter="verifyCode" />
               <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="verifyCode">Verify</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="sendCode">Resend</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="axRegStep = 'email'">Change email</button>
+                <button class="sync-btn primary" type="button" :disabled="busy" @click="verifyCode">{{ $t('cloudSync.verify') }}</button>
+                <button class="sync-btn" type="button" :disabled="busy" @click="sendCode">{{ $t('cloudSync.resend') }}</button>
+                <button class="sync-btn" type="button" :disabled="busy" @click="axRegStep = 'email'">{{ $t('cloudSync.changeEmail') }}</button>
               </div>
             </template>
 
             <!-- Sign up — step 3: account details -->
             <template v-else>
-              <p class="sync-hint"><b>{{ axEmail }}</b> verified ✓ — choose a username and password.</p>
-              <label>Username</label>
+              <p class="sync-hint">{{ $t('cloudSync.verifiedHint', { email: axEmail }) }}</p>
+              <label>{{ $t('cloudSync.username') }}</label>
               <input v-model="axUsername" class="sync-input" type="text" autocomplete="off" />
-              <label>Password <span class="sync-muted">(at least {{ SYNC_MIN_PASSWORD_LENGTH }} characters)</span></label>
+              <label>{{ $t('cloudSync.password') }} <span class="sync-muted">{{ $t('cloudSync.passwordMinChars', { n: SYNC_MIN_PASSWORD_LENGTH }) }}</span></label>
               <input v-model="axPassword" class="sync-input" type="password" autocomplete="new-password" @keyup.enter="register" />
               <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="register">Create account</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="axRegStep = 'code'">Back</button>
+                <button class="sync-btn primary" type="button" :disabled="busy" @click="register">{{ $t('cloudSync.createAccount') }}</button>
+                <button class="sync-btn" type="button" :disabled="busy" @click="axRegStep = 'code'">{{ $t('cloudSync.back') }}</button>
               </div>
             </template>
           </div>
@@ -449,32 +449,32 @@ async function signOut() {
 
         <!-- What to sync -->
         <section class="sync-section">
-          <h3>3 · What to sync</h3>
-          <label class="sync-check"><input type="checkbox" checked disabled /> Bookmarks (always)</label>
-          <label class="sync-check"><input v-model="includeSettings" type="checkbox" /> Settings (theme, fonts, quick buttons, rules)</label>
-          <label class="sync-check"><input v-model="includeKnownHosts" type="checkbox" /> SSH known-hosts</label>
+          <h3>{{ $t('cloudSync.step3') }}</h3>
+          <label class="sync-check"><input type="checkbox" checked disabled /> {{ $t('cloudSync.bookmarksAlways') }}</label>
+          <label class="sync-check"><input v-model="includeSettings" type="checkbox" /> {{ $t('cloudSync.settingsItem') }}</label>
+          <label class="sync-check"><input v-model="includeKnownHosts" type="checkbox" /> {{ $t('cloudSync.knownHosts') }}</label>
           <label class="sync-check sync-danger">
             <input v-model="includeCredentials" type="checkbox" />
-            Saved credentials (passwords / keys) — needs the master password unlocked
+            {{ $t('cloudSync.savedCredentials') }}
           </label>
           <div class="sync-fields">
-            <label>This device's label</label>
-            <input v-model="deviceLabel" class="sync-input" type="text" placeholder="e.g. work-laptop" />
+            <label>{{ $t('cloudSync.deviceLabel') }}</label>
+            <input v-model="deviceLabel" class="sync-input" type="text" :placeholder="$t('cloudSync.deviceLabelPlaceholder')" />
           </div>
         </section>
 
         <div v-if="message" class="sync-message" :class="{ error: isError }">{{ message }}</div>
-        <div class="sync-meta">Last sync: {{ lastSyncText }}</div>
+        <div class="sync-meta">{{ $t('cloudSync.lastSyncLabel') }} {{ lastSyncText }}</div>
       </div>
 
       <div class="sync-footer">
-        <button class="sync-btn" type="button" :disabled="busy" @click="saveConfig">Save</button>
-        <button class="sync-btn" type="button" :disabled="busy" @click="testConnection">Test</button>
+        <button class="sync-btn" type="button" :disabled="busy" @click="saveConfig">{{ $t('common.save') }}</button>
+        <button class="sync-btn" type="button" :disabled="busy" @click="testConnection">{{ $t('cloudSync.test') }}</button>
         <span class="sync-spacer" />
-        <button class="sync-btn" type="button" :disabled="busy" @click="doPull(false)">Pull (merge)</button>
-        <button class="sync-btn" type="button" :disabled="busy" @click="doPull(true)">Pull (replace)</button>
-        <button class="sync-btn" type="button" :disabled="busy" @click="doPush">Push</button>
-        <button class="sync-btn primary" type="button" :disabled="busy" @click="doSyncNow">Sync now</button>
+        <button class="sync-btn" type="button" :disabled="busy" @click="doPull(false)">{{ $t('cloudSync.pullMerge') }}</button>
+        <button class="sync-btn" type="button" :disabled="busy" @click="doPull(true)">{{ $t('cloudSync.pullReplace') }}</button>
+        <button class="sync-btn" type="button" :disabled="busy" @click="doPush">{{ $t('cloudSync.push') }}</button>
+        <button class="sync-btn primary" type="button" :disabled="busy" @click="doSyncNow">{{ $t('cloudSync.syncNow') }}</button>
       </div>
     </div>
   </div>

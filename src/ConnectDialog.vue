@@ -361,7 +361,7 @@ function handleSubmit(event: Event) {
 <template>
   <div class="dialog-overlay">
     <div class="dialog-content dialog-content--wide">
-      <h2 class="dialog-title">New Session</h2>
+      <h2 class="dialog-title">{{ $t('connect.title') }}</h2>
 
       <div class="protocol-selector">
         <label :class="{ active: isSsh }">
@@ -374,17 +374,17 @@ function handleSubmit(event: Event) {
         </label>
         <label :class="{ active: isSerial }">
           <input v-model="protocol" type="radio" name="protocol" value="serial">
-          Serial
+          {{ $t('menu.serial') }}
         </label>
       </div>
 
       <form @submit="handleSubmit">
         <div v-if="isSsh || isTelnet" class="form-group">
-          <label>Host:</label>
+          <label>{{ $t('connect.host') }}</label>
           <input
             v-model="host"
             type="text"
-            placeholder="e.g. 192.168.1.100"
+            :placeholder="$t('connect.hostPlaceholder')"
             autofocus
             autocapitalize="none"
             autocorrect="off"
@@ -396,11 +396,11 @@ function handleSubmit(event: Event) {
         <template v-if="isSsh">
           <div class="two-column-grid">
             <div class="form-group">
-              <label>Port:</label>
+              <label>{{ $t('connect.port') }}</label>
               <input v-model="port" type="number" required>
             </div>
             <div class="form-group">
-              <label>User:</label>
+              <label>{{ $t('connect.user') }}</label>
               <input
                 v-model="user"
                 type="text"
@@ -414,17 +414,17 @@ function handleSubmit(event: Event) {
         </template>
 
         <div v-else-if="isTelnet" class="form-group">
-          <label>Port:</label>
+          <label>{{ $t('connect.port') }}</label>
           <input v-model="telnetPort" type="number" required>
         </div>
 
         <template v-else>
           <div class="serial-settings-grid serial-settings-grid--compact">
             <div class="form-group serial-settings-grid-span-2">
-              <label>Preset:</label>
+              <label>{{ $t('connect.preset') }}</label>
               <select :value="selectedSerialPresetId" @change="handleSerialPresetChange">
-                <option value="custom">Custom</option>
-                <optgroup v-if="recentPresetOptions.length > 0" label="Recent">
+                <option value="custom">{{ $t('connect.custom') }}</option>
+                <optgroup v-if="recentPresetOptions.length > 0" :label="$t('connect.recent')">
                   <option v-for="preset in recentPresetOptions" :key="preset.id" :value="preset.id">{{ preset.name }}</option>
                 </optgroup>
                 <optgroup label="Common">
@@ -434,10 +434,10 @@ function handleSubmit(event: Event) {
             </div>
 
             <div class="form-group serial-settings-grid-span-2">
-              <label>Serial Port:</label>
+              <label>{{ $t('connect.serialPort') }}</label>
               <div class="serial-port-row">
                 <select v-model="serialPortName" class="serial-port-select" required>
-                  <option value="" disabled>Select a serial port...</option>
+                  <option value="" disabled>{{ $t('connect.selectSerialPort') }}</option>
                   <option v-for="portInfo in serialPorts" :key="portInfo.portName" :value="portInfo.portName">
                     {{ portInfo.portName }}{{ portInfo.manufacturer ? ` - ${portInfo.manufacturer}` : '' }} ({{ portInfo.portType }})
                   </option>
@@ -446,19 +446,19 @@ function handleSubmit(event: Event) {
                   {{ loadingSerialPorts ? '...' : '↻' }}
                 </button>
               </div>
-              <div v-if="serialError" class="form-hint error">Serial port enumeration failed: {{ serialError }}</div>
+              <div v-if="serialError" class="form-hint error">{{ $t('connect.serialEnumFailed') }} {{ serialError }}</div>
               <div v-else-if="serialPorts.length > 0" class="form-hint">
-                Found {{ serialPorts.length }} device(s)
+                {{ $t('connect.foundDevices', { count: serialPorts.length }) }}
               </div>
-              <div v-else class="form-hint">No serial ports found. Click refresh to scan again.</div>
+              <div v-else class="form-hint">{{ $t('connect.noSerialPorts') }}</div>
             </div>
 
             <div class="form-group">
-              <label>Baud Rate:</label>
+              <label>{{ $t('connect.baudRate') }}</label>
               <input v-model="serialBaudRate" type="number" min="1" required>
             </div>
             <div class="form-group">
-              <label>Data Bits:</label>
+              <label>{{ $t('connect.dataBits') }}</label>
               <select v-model="serialDataBits">
                 <option value="5">5</option>
                 <option value="6">6</option>
@@ -467,26 +467,26 @@ function handleSubmit(event: Event) {
               </select>
             </div>
             <div class="form-group">
-              <label>Stop Bits:</label>
+              <label>{{ $t('connect.stopBits') }}</label>
               <select v-model="serialStopBits">
                 <option value="1">1</option>
                 <option value="2">2</option>
               </select>
             </div>
             <div class="form-group">
-              <label>Parity:</label>
+              <label>{{ $t('connect.parity') }}</label>
               <select v-model="serialParity">
-                <option value="none">None</option>
-                <option value="odd">Odd</option>
-                <option value="even">Even</option>
+                <option value="none">{{ $t('connect.none') }}</option>
+                <option value="odd">{{ $t('connect.odd') }}</option>
+                <option value="even">{{ $t('connect.even') }}</option>
               </select>
             </div>
             <div class="form-group serial-settings-grid-span-2">
-              <label>Flow Control:</label>
+              <label>{{ $t('connect.flowControl') }}</label>
               <select v-model="serialFlowControl">
-                <option value="none">None</option>
-                <option value="hardware">Hardware</option>
-                <option value="software">Software</option>
+                <option value="none">{{ $t('connect.none') }}</option>
+                <option value="hardware">{{ $t('connect.hardware') }}</option>
+                <option value="software">{{ $t('connect.software') }}</option>
               </select>
             </div>
           </div>
@@ -494,22 +494,22 @@ function handleSubmit(event: Event) {
 
         <template v-if="isSsh">
           <div class="form-group auth-type-group">
-            <label>Auth Type:</label>
+            <label>{{ $t('connect.authType') }}</label>
             <select v-model="authType">
-              <option value="password">Password</option>
-              <option value="key">Private Key</option>
-              <option value="agent">SSH Agent / Pageant</option>
-              <option value="none">Keyboard Interactive</option>
+              <option value="password">{{ $t('connect.authPassword') }}</option>
+              <option value="key">{{ $t('connect.authKey') }}</option>
+              <option value="agent">{{ $t('connect.authAgent') }}</option>
+              <option value="none">{{ $t('connect.authKeyboard') }}</option>
             </select>
           </div>
 
           <div v-if="authType === 'password'" class="form-group">
-            <label>Password:</label>
+            <label>{{ $t('connect.password') }}</label>
             <input v-model="password" type="password">
           </div>
 
           <div v-else-if="authType === 'key'" class="form-group">
-            <label>Private Key:</label>
+            <label>{{ $t('connect.privateKey') }}</label>
             <input
               ref="privateKeyFileInput"
               type="file"
@@ -518,79 +518,79 @@ function handleSubmit(event: Event) {
             >
             <div class="private-key-picker-row">
               <input
-                :value="privateKeyFileName || 'No private key selected'"
+                :value="privateKeyFileName || $t('connect.noKeySelected')"
                 type="text"
                 class="private-key-display"
                 readonly
               >
-              <button type="button" class="private-key-picker-btn" @click="triggerPrivateKeyPicker">Browse...</button>
-              <button type="button" class="private-key-picker-btn" @click="generatePrivateKey">Generate</button>
+              <button type="button" class="private-key-picker-btn" @click="triggerPrivateKeyPicker">{{ $t('connect.browse') }}</button>
+              <button type="button" class="private-key-picker-btn" @click="generatePrivateKey">{{ $t('connect.generate') }}</button>
               <button
                 v-if="privateKeyFileName"
                 type="button"
                 class="private-key-clear-btn"
                 @click="clearPrivateKeySelection"
               >
-                Clear
+                {{ $t('connect.clear') }}
               </button>
             </div>
             <div v-if="privateKeyError" class="form-hint error">{{ privateKeyError }}</div>
-            <input v-model="passphrase" type="password" placeholder="Key Passphrase (optional)" style="margin-top: 8px">
+            <input v-model="passphrase" type="password" :placeholder="$t('connect.keyPassphrase')" style="margin-top: 8px">
             <div v-if="generatedPublicKey" class="generated-public-key">
               <textarea :value="generatedPublicKey" rows="2" readonly />
-              <button type="button" class="private-key-picker-btn" @click="copyGeneratedPublicKey">Copy public key</button>
+              <button type="button" class="private-key-picker-btn" @click="copyGeneratedPublicKey">{{ $t('connect.copyPublicKey') }}</button>
             </div>
           </div>
 
           <details class="ssh-advanced">
-            <summary>ProxyJump and login automation</summary>
+            <summary>{{ $t('connect.advancedSummary') }}</summary>
 
             <label class="ssh-checkbox">
               <input v-model="agentForwarding" type="checkbox">
-              Forward local SSH agent to the target
+              {{ $t('connect.forwardAgent') }}
             </label>
 
             <div class="ssh-advanced-heading">
-              <strong>Jump hosts</strong>
-              <button type="button" @click="addJumpHost">Add jump host</button>
+              <strong>{{ $t('connect.jumpHosts') }}</strong>
+              <button type="button" @click="addJumpHost">{{ $t('connect.addJumpHost') }}</button>
             </div>
             <div v-for="(jump, index) in jumpHosts" :key="jump.id" class="ssh-advanced-card">
               <div class="ssh-card-grid">
-                <input v-model="jump.host" type="text" placeholder="Jump host">
-                <input v-model.number="jump.port" type="number" min="1" max="65535" placeholder="Port">
-                <input v-model="jump.user" type="text" placeholder="User">
+                <input v-model="jump.host" type="text" :placeholder="$t('connect.jumpHostPlaceholder')">
+                <input v-model.number="jump.port" type="number" min="1" max="65535" :placeholder="$t('connect.portPlaceholder')">
+                <input v-model="jump.user" type="text" :placeholder="$t('connect.userPlaceholder')">
                 <select v-model="jump.authType">
-                  <option value="password">Password</option>
-                  <option value="key">Private Key</option>
-                  <option value="agent">SSH Agent / Pageant</option>
-                  <option value="none">Keyboard Interactive</option>
+                  <option value="password">{{ $t('connect.authPassword') }}</option>
+                  <option value="key">{{ $t('connect.authKey') }}</option>
+                  <option value="agent">{{ $t('connect.authAgent') }}</option>
+                  <option value="none">{{ $t('connect.authKeyboard') }}</option>
                 </select>
               </div>
-              <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" placeholder="Jump host password">
+              <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" :placeholder="$t('connect.jumpPassword')">
               <template v-else-if="jump.authType === 'key'">
-                <textarea v-model="jump.privateKey" rows="3" placeholder="Private key (PEM/OpenSSH)" />
-                <input v-model="jump.passphrase" type="password" placeholder="Key passphrase (optional)">
+                <textarea v-model="jump.privateKey" rows="3" :placeholder="$t('connect.privateKeyPlaceholder')" />
+                <input v-model="jump.passphrase" type="password" :placeholder="$t('connect.keyPassphrase')">
               </template>
-              <button type="button" class="ssh-remove-btn" @click="removeJumpHost(index)">Remove</button>
+              <button type="button" class="ssh-remove-btn" @click="removeJumpHost(index)">{{ $t('connect.remove') }}</button>
             </div>
 
             <div class="ssh-advanced-heading">
-              <strong>Expect rules</strong>
-              <button type="button" @click="addAutoLoginRule">Add rule</button>
+              <strong>{{ $t('connect.expectRules') }}</strong>
+              <button type="button" @click="addAutoLoginRule">{{ $t('connect.addRule') }}</button>
             </div>
             <div v-for="(rule, index) in autoLoginRules" :key="index" class="ssh-advanced-card">
               <div class="ssh-card-grid ssh-card-grid--automation">
-                <input v-model="rule.expect" type="text" placeholder="Wait for text, e.g. Password:">
-                <input v-model="rule.response" type="password" placeholder="Send response">
-                <input v-model.number="rule.timeoutSecs" type="number" min="1" max="300" title="Timeout seconds">
+                <input v-model="rule.expect" type="text" :placeholder="$t('connect.waitForText')">
+                <input v-model="rule.response" type="password" :placeholder="$t('connect.sendResponse')">
+                <input v-model.number="rule.timeoutSecs" type="number" min="1" max="300" :title="$t('connect.timeoutSeconds')">
               </div>
-              <label class="ssh-checkbox"><input v-model="rule.caseSensitive" type="checkbox"> Case sensitive</label>
-              <button type="button" class="ssh-remove-btn" @click="removeAutoLoginRule(index)">Remove</button>
+              <label class="ssh-checkbox"><input v-model="rule.caseSensitive" type="checkbox"> {{ $t('connect.caseSensitive') }}</label>
+              <button type="button" class="ssh-remove-btn" @click="removeAutoLoginRule(index)">{{ $t('connect.remove') }}</button>
             </div>
 
             <div class="form-group">
-              <label>Commands after login (one per line)</label>
-              <textarea v-model="postConnectCommands" rows="3" placeholder="source /etc/profile" />
+              <label>{{ $t('connect.commandsAfterLogin') }}</label>
+              <textarea v-model="postConnectCommands" rows="3" :placeholder="$t('connect.postConnectPlaceholder')" />
             </div>
           </details>
         </template>
@@ -598,14 +598,14 @@ function handleSubmit(event: Event) {
         <div class="form-group save-connection-group">
           <label class="save-connection-label">
             <input v-model="saveConnection" type="checkbox">
-            <span>Save this connection</span>
+            <span>{{ $t('connect.saveConnection') }}</span>
           </label>
           <div v-if="saveConnection" class="two-column-grid">
             <input
               v-model="connectionName"
               type="text"
               class="save-connection-name"
-              :placeholder="defaultName || 'Connection name (optional)'"
+              :placeholder="defaultName || $t('connect.connectionNamePlaceholder')"
               autocapitalize="none"
               autocorrect="off"
               spellcheck="false"
@@ -614,7 +614,7 @@ function handleSubmit(event: Event) {
               v-model="connectionGroup"
               type="text"
               class="save-connection-name"
-              placeholder="Group (optional)"
+              :placeholder="$t('connect.groupPlaceholder')"
               autocapitalize="none"
               autocorrect="off"
               spellcheck="false"
@@ -625,7 +625,7 @@ function handleSubmit(event: Event) {
         <div class="form-group save-connection-group">
           <label class="save-connection-label">
             <input v-model="enableLog" type="checkbox">
-            <span>Save session log</span>
+            <span>{{ $t('connect.saveLog') }}</span>
           </label>
           <input
             v-if="enableLog"
@@ -642,35 +642,34 @@ function handleSubmit(event: Event) {
         <template v-if="isSsh">
           <div class="form-group save-connection-group">
             <div class="form-group" style="margin-bottom: 4px">
-              <label>Reconnect Mode:</label>
+              <label>{{ $t('connect.reconnectMode') }}</label>
               <select v-model="reconnectType">
-                <option value="manual">Manual (press r to reconnect after disconnect)</option>
-                <option value="simple">Simple (auto reconnect, no session persistence)</option>
-                <option value="tmux">tmux (auto reconnect with session persistence)</option>
-                <option value="screen">screen (auto reconnect with session persistence)</option>
+                <option value="manual">{{ $t('connect.reconnectManual') }}</option>
+                <option value="simple">{{ $t('connect.reconnectSimple') }}</option>
+                <option value="tmux">{{ $t('connect.reconnectTmux') }}</option>
+                <option value="screen">{{ $t('connect.reconnectScreen') }}</option>
               </select>
             </div>
             <div class="form-hint" style="margin-top: 2px;">
               <template v-if="reconnectType === 'manual'">
-                Does not reconnect automatically. After a disconnect, press <strong>r</strong> or <strong>R</strong> in the terminal to reconnect.
+                {{ $t('connect.reconnectManualHint') }}
               </template>
               <template v-else-if="reconnectType === 'simple'">
-                Reconnects automatically after a disconnect. No server-side tools required. Running tasks will be interrupted on disconnect.
+                {{ $t('connect.reconnectSimpleHint') }}
               </template>
               <template v-else-if="reconnectType === 'tmux'">
-                Uses <strong>tmux</strong> to keep your session alive. Mouse scroll is enabled automatically. Requires <code>tmux</code> installed on the remote host.
+                {{ $t('connect.reconnectTmuxHint') }}
               </template>
               <template v-else>
-                Uses <strong>screen</strong> to keep your session alive. Requires <code>screen</code> installed on the remote host.
-                AuraTerm only manages sessions whose names start with <strong>at-</strong>.
+                {{ $t('connect.reconnectScreenHint') }}
               </template>
             </div>
           </div>
         </template>
 
         <div class="dialog-actions">
-          <button type="button" class="btn-cancel" @click="emit('cancel')">Cancel</button>
-          <button type="submit" class="btn-connect" :disabled="!canConnect">Connect</button>
+          <button type="button" class="btn-cancel" @click="emit('cancel')">{{ $t('common.cancel') }}</button>
+          <button type="submit" class="btn-connect" :disabled="!canConnect">{{ $t('connect.connect') }}</button>
         </div>
       </form>
     </div>

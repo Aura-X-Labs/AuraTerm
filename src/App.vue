@@ -22,6 +22,7 @@ import { useAppMenus } from "./composables/useAppMenus";
 import { useTitlebarControls } from "./composables/useTitlebarControls";
 import { useTerminalFontSize } from "./composables/useTerminalFontSize";
 import { useTabManager } from "./composables/useTabManager";
+import { setLanguage, t, type AppLanguage } from "./i18n";
 import {
   DEFAULT_SETTINGS,
   deriveUiTheme,
@@ -74,6 +75,14 @@ const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
 const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
+
+// Apply the UI language and keep the native macOS menubar in sync with it.
+function syncLanguage(language: AppLanguage) {
+  const locale = setLanguage(language);
+  if (osType.value === "macos") {
+    void invoke("set_menu_language", { locale }).catch(() => {});
+  }
+}
 const showConnectDialog = ref(false);
 const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
 // settings/settingsRef are replaced wholesale (normalizeAppSettings returns new objects),
@@ -287,6 +296,11 @@ watch(settings, (value) => {
   settingsRef.value = value;
 }, { immediate: true });
 
+// Re-apply the UI language whenever the preference changes (e.g. via Settings).
+watch(() => settings.value.language, (language) => {
+  syncLanguage(language);
+});
+
 // uiTheme is a computed that returns a fresh object on change; deep traversal is unnecessary.
 watch(uiTheme, (value) => {
   const root = document.documentElement;
@@ -395,6 +409,7 @@ onMounted(async () => {
     const normalizedSettings = normalizeAppSettings(loaded);
     settings.value = normalizedSettings;
     settingsRef.value = normalizedSettings;
+    syncLanguage(normalizedSettings.language);
 
     const restoredWorkspaceState = normalizedSettings.restoreTabsOnStartup
       ? restoreWorkspaceState(normalizedSettings.workspaceState)
@@ -428,6 +443,7 @@ onMounted(async () => {
     const fallbackSettings = normalizeAppSettings();
     settings.value = fallbackSettings;
     settingsRef.value = fallbackSettings;
+    syncLanguage(fallbackSettings.language);
     const defaultTabs = [createDefaultLocalShellTab()];
     applyPaneLayoutFromTabs(defaultTabs, fallbackSettings.paneLayout);
     syncTabIdCounter(defaultTabs);
@@ -1372,30 +1388,30 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
   const hasTab = Boolean(activeTab.value);
   const hasSsh = Boolean(activeSshConfig.value);
   const commands: PaletteCommand[] = [
-    { id: "new-local", title: "New Local Shell", group: "Session", keywords: "terminal shell", run: () => handleNewLocalSession() },
-    { id: "new-ssh", title: "New SSH Connection", group: "Session", keywords: "remote", run: () => openConnect("ssh") },
-    { id: "new-telnet", title: "New Telnet Connection", group: "Session", run: () => openConnect("telnet") },
-    { id: "new-serial", title: "New Serial Connection", group: "Session", keywords: "port com", run: () => openConnect("serial") },
-    { id: "close-tab", title: "Close Tab", group: "Session", enabled: hasTab, run: () => handleCloseActiveTab() },
-    { id: "toggle-bookmarks", title: sidebarOpen.value ? "Hide Bookmarks" : "Show Bookmarks", group: "View", keywords: "sidebar connections", run: () => handleToggleBookmarks() },
-    { id: "tunnels", title: "Port Forwarding / Tunnels", group: "Tools", keywords: "tunnel forward socks proxy -L -R -D", enabled: hasSsh, run: () => { void handleToggleTunnelManager(); } },
-    { id: "remote-files", title: showRemoteFileManager.value ? "Hide Remote Files" : "Show Remote Files", group: "Tools", keywords: "sftp scp files", enabled: hasSsh, run: () => handleToggleRemoteFileManager() },
-    { id: "find", title: "Find in Terminal", group: "View", keywords: "search", enabled: hasTab, run: () => handleOpenTerminalSearch() },
-    { id: "command-previous", title: "Go to Previous Command", subtitle: "Ctrl/Cmd+Shift+Up", group: "Terminal", keywords: "shell navigation osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.previousCommand(); } },
-    { id: "command-next", title: "Go to Next Command", subtitle: "Ctrl/Cmd+Shift+Down", group: "Terminal", keywords: "shell navigation osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.nextCommand(); } },
-    { id: "command-rerun", title: "Rerun Last Command", group: "Terminal", keywords: "shell repeat osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.rerunLastCommand(); } },
-    { id: "command-copy", title: "Copy Last Command", group: "Terminal", keywords: "shell clipboard osc 133", enabled: hasTab, run: () => { void termRefs.get(activeTabId.value)?.copyLastCommand(); } },
-    { id: "split-right", title: "Split Right", group: "Layout", keywords: "pane vertical", run: () => handleSplitPane("vertical") },
-    { id: "split-down", title: "Split Down", group: "Layout", keywords: "pane horizontal", run: () => handleSplitPane("horizontal") },
-    { id: "close-pane", title: "Close Pane", group: "Layout", enabled: paneLeaves.value.length > 1, run: () => handleClosePane() },
-    { id: "font-increase", title: "Increase Terminal Font Size", group: "View", keywords: "zoom", run: () => handleIncreaseTerminalFontSize() },
-    { id: "font-decrease", title: "Decrease Terminal Font Size", group: "View", keywords: "zoom", run: () => handleDecreaseTerminalFontSize() },
-    { id: "font-reset", title: "Reset Terminal Font Size", group: "View", keywords: "zoom", run: () => handleResetTerminalFontSize() },
-    { id: "fullscreen", title: "Toggle Full Screen", group: "View", run: () => { void handleToggleFullScreen(); } },
-    { id: "settings", title: "Open Settings", group: "App", keywords: "preferences config", run: () => handleOpenSettings() },
-    { id: "cloud-sync", title: "Cloud Sync", group: "App", keywords: "sync backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
-    { id: "user-manual", title: "User Manual", group: "App", keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
-    { id: "about", title: "About AuraTerm", group: "App", run: () => handleOpenAbout() },
+    { id: "new-local", title: t("palette.cmd.newLocal"), group: t("palette.groups.session"), keywords: "terminal shell", run: () => handleNewLocalSession() },
+    { id: "new-ssh", title: t("palette.cmd.newSsh"), group: t("palette.groups.session"), keywords: "remote", run: () => openConnect("ssh") },
+    { id: "new-telnet", title: t("palette.cmd.newTelnet"), group: t("palette.groups.session"), run: () => openConnect("telnet") },
+    { id: "new-serial", title: t("palette.cmd.newSerial"), group: t("palette.groups.session"), keywords: "port com", run: () => openConnect("serial") },
+    { id: "close-tab", title: t("menu.closeTab"), group: t("palette.groups.session"), enabled: hasTab, run: () => handleCloseActiveTab() },
+    { id: "toggle-bookmarks", title: sidebarOpen.value ? t("menu.hideBookmarks") : t("menu.showBookmarks"), group: t("palette.groups.view"), keywords: "sidebar connections", run: () => handleToggleBookmarks() },
+    { id: "tunnels", title: t("palette.cmd.tunnels"), group: t("palette.groups.tools"), keywords: "tunnel forward socks proxy -L -R -D", enabled: hasSsh, run: () => { void handleToggleTunnelManager(); } },
+    { id: "remote-files", title: showRemoteFileManager.value ? t("menu.hideRemoteFiles") : t("menu.showRemoteFiles"), group: t("palette.groups.tools"), keywords: "sftp scp files", enabled: hasSsh, run: () => handleToggleRemoteFileManager() },
+    { id: "find", title: t("palette.cmd.find"), group: t("palette.groups.view"), keywords: "search", enabled: hasTab, run: () => handleOpenTerminalSearch() },
+    { id: "command-previous", title: t("palette.cmd.prevCommand"), subtitle: "Ctrl/Cmd+Shift+Up", group: t("palette.groups.terminal"), keywords: "shell navigation osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.previousCommand(); } },
+    { id: "command-next", title: t("palette.cmd.nextCommand"), subtitle: "Ctrl/Cmd+Shift+Down", group: t("palette.groups.terminal"), keywords: "shell navigation osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.nextCommand(); } },
+    { id: "command-rerun", title: t("palette.cmd.rerunCommand"), group: t("palette.groups.terminal"), keywords: "shell repeat osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.rerunLastCommand(); } },
+    { id: "command-copy", title: t("palette.cmd.copyCommand"), group: t("palette.groups.terminal"), keywords: "shell clipboard osc 133", enabled: hasTab, run: () => { void termRefs.get(activeTabId.value)?.copyLastCommand(); } },
+    { id: "split-right", title: t("menu.splitRight"), group: t("palette.groups.layout"), keywords: "pane vertical", run: () => handleSplitPane("vertical") },
+    { id: "split-down", title: t("menu.splitDown"), group: t("palette.groups.layout"), keywords: "pane horizontal", run: () => handleSplitPane("horizontal") },
+    { id: "close-pane", title: t("menu.closePane"), group: t("palette.groups.layout"), enabled: paneLeaves.value.length > 1, run: () => handleClosePane() },
+    { id: "font-increase", title: t("menu.increaseFontSize"), group: t("palette.groups.view"), keywords: "zoom", run: () => handleIncreaseTerminalFontSize() },
+    { id: "font-decrease", title: t("menu.decreaseFontSize"), group: t("palette.groups.view"), keywords: "zoom", run: () => handleDecreaseTerminalFontSize() },
+    { id: "font-reset", title: t("menu.resetFontSize"), group: t("palette.groups.view"), keywords: "zoom", run: () => handleResetTerminalFontSize() },
+    { id: "fullscreen", title: t("palette.cmd.fullscreen"), group: t("palette.groups.view"), run: () => { void handleToggleFullScreen(); } },
+    { id: "settings", title: t("palette.cmd.settings"), group: t("palette.groups.app"), keywords: "preferences config", run: () => handleOpenSettings() },
+    { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
+    { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
+    { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
   ];
 
   for (const bookmark of paletteBookmarks.value) {
@@ -1405,9 +1421,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       : `${protocol === "ssh" && bookmark.user ? `${bookmark.user}@` : ""}${bookmark.host}${bookmark.port ? `:${bookmark.port}` : ""}`;
     commands.push({
       id: `bookmark-${bookmark.id}`,
-      title: `Connect: ${bookmark.name}`,
+      title: t("palette.cmd.connectBookmark", { name: bookmark.name }),
       subtitle: detail,
-      group: "Bookmark",
+      group: t("palette.groups.bookmark"),
       keywords: `${bookmark.group ?? ""} ${bookmark.host} ${protocol}`,
       run: () => handleBookmarkConnect(bookmark),
     });
@@ -1420,25 +1436,25 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
 <template>
   <div :class="appClassName">
     <div v-if="isMainWindow" class="titlebar" @mousedown="handleTitlebarMouseDown" @dblclick="handleToggleMaximize">
-      <div v-if="isMainWindow && osType !== 'windows'" class="titlebar-controls" aria-label="Window controls" data-no-drag="true">
+      <div v-if="isMainWindow && osType !== 'windows'" class="titlebar-controls" :aria-label="$t('titlebar.windowControls')" data-no-drag="true">
         <button
           class="titlebar-control-btn titlebar-control-close"
           type="button"
-          aria-label="Close"
+          :aria-label="$t('titlebar.close')"
           @mousedown="stopDragPropagation"
           @click="handleClose"
         />
         <button
           class="titlebar-control-btn titlebar-control-minimize"
           type="button"
-          aria-label="Minimize"
+          :aria-label="$t('titlebar.minimize')"
           @mousedown="stopDragPropagation"
           @click="handleMinimize"
         />
         <button
           class="titlebar-control-btn titlebar-control-maximize"
           type="button"
-          aria-label="Maximize"
+          :aria-label="$t('titlebar.maximize')"
           @mousedown="stopDragPropagation"
           @click="handleToggleMaximize"
         />
@@ -1457,7 +1473,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               @mousedown="stopDragPropagation"
               @click="toggleMenu('file')"
             >
-              File
+              {{ $t('menu.file') }}
             </button>
             <div v-if="openMenuId === 'file'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
               <div
@@ -1465,26 +1481,26 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                 @mouseenter="openFileSubmenuId = 'new-session'"
               >
                 <button class="titlebar-menu-item titlebar-menu-item--submenu" type="button" @click="toggleFileSubmenu('new-session')">
-                  <span>New Session</span>
+                  <span>{{ $t('menu.newSession') }}</span>
                   <span class="titlebar-menu-item-arrow">›</span>
                 </button>
                 <div v-if="openFileSubmenuId === 'new-session'" class="titlebar-menu-submenu" @mousedown="stopDragPropagation">
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleNewLocalSessionFromMenu">
-                    <span>Local Shell</span>
+                    <span>{{ $t('menu.localShell') }}</span>
                   </button>
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenConnectionFromMenu('ssh')">
-                    <span>SSH</span>
+                    <span>{{ $t('menu.ssh') }}</span>
                   </button>
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenConnectionFromMenu('telnet')">
-                    <span>Telnet</span>
+                    <span>{{ $t('menu.telnet') }}</span>
                   </button>
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenConnectionFromMenu('serial')">
-                    <span>Serial</span>
+                    <span>{{ $t('menu.serial') }}</span>
                   </button>
                 </div>
               </div>
               <button class="titlebar-menu-item" type="button" :disabled="!activeTab" @click="handleCloseActiveTab">
-                <span>Close Tab</span>
+                <span>{{ $t('menu.closeTab') }}</span>
                 <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+W</span>
               </button>
               <div class="titlebar-menu-separator" />
@@ -1493,21 +1509,21 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                 @mouseenter="openFileSubmenuId = 'preferences'"
               >
                 <button class="titlebar-menu-item titlebar-menu-item--submenu" type="button" @click="toggleFileSubmenu('preferences')">
-                  <span>Preferences</span>
+                  <span>{{ $t('menu.preferences') }}</span>
                   <span class="titlebar-menu-item-arrow">›</span>
                 </button>
                 <div v-if="openFileSubmenuId === 'preferences'" class="titlebar-menu-submenu" @mousedown="stopDragPropagation">
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenSettings">
-                    <span>Settings</span>
+                    <span>{{ $t('menu.settings') }}</span>
                   </button>
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenCloudSync">
-                    <span>Cloud Sync…</span>
+                    <span>{{ $t('menu.cloudSync') }}</span>
                   </button>
                 </div>
               </div>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleExitApp">
-                <span>Exit</span>
+                <span>{{ $t('menu.exit') }}</span>
                 <span class="titlebar-menu-item-hint">Alt+F4</span>
               </button>
             </div>
@@ -1521,47 +1537,47 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               @mousedown="stopDragPropagation"
               @click="toggleMenu('view')"
             >
-              View
+              {{ $t('menu.view') }}
             </button>
             <div v-if="openMenuId === 'view'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
               <button class="titlebar-menu-item" type="button" :disabled="!activeTab" @click="handleOpenTerminalSearch">
-                <span>Find In Terminal</span>
+                <span>{{ $t('menu.findInTerminal') }}</span>
                 <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+F</span>
               </button>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleToggleBookmarks">
-                <span>{{ sidebarOpen ? 'Hide Bookmarks' : 'Show Bookmarks' }}</span>
+                <span>{{ sidebarOpen ? $t('menu.hideBookmarks') : $t('menu.showBookmarks') }}</span>
               </button>
               <button class="titlebar-menu-item" type="button" @click="handleToggleCommandPalette">
-                <span>Command Palette</span>
+                <span>{{ $t('menu.commandPalette') }}</span>
                 <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+Shift+P</span>
               </button>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleSplitPaneFromView('vertical')">
-                <span>Split Right</span>
+                <span>{{ $t('menu.splitRight') }}</span>
               </button>
               <button class="titlebar-menu-item" type="button" @click="handleSplitPaneFromView('horizontal')">
-                <span>Split Down</span>
+                <span>{{ $t('menu.splitDown') }}</span>
               </button>
               <button class="titlebar-menu-item" type="button" :disabled="paneLeaves.length <= 1" @click="handleClosePaneFromView">
-                <span>Close Pane</span>
+                <span>{{ $t('menu.closePane') }}</span>
               </button>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleIncreaseTerminalFontSize">
-                <span>Increase Terminal Font Size</span>
+                <span>{{ $t('menu.increaseFontSize') }}</span>
                 <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}++</span>
               </button>
               <button class="titlebar-menu-item" type="button" @click="handleDecreaseTerminalFontSize">
-                <span>Decrease Terminal Font Size</span>
+                <span>{{ $t('menu.decreaseFontSize') }}</span>
                 <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+-</span>
               </button>
               <button class="titlebar-menu-item" type="button" @click="handleResetTerminalFontSize">
-                <span>Reset Terminal Font Size</span>
+                <span>{{ $t('menu.resetFontSize') }}</span>
                 <span class="titlebar-menu-item-hint">{{ primaryShortcutLabel }}+0</span>
               </button>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleToggleFullScreen">
-                <span>{{ isFullscreen ? 'Exit Full Screen' : 'Full Screen' }}</span>
+                <span>{{ isFullscreen ? $t('menu.exitFullScreen') : $t('menu.fullScreen') }}</span>
                 <span class="titlebar-menu-item-hint">F11</span>
               </button>
             </div>
@@ -1575,14 +1591,14 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               @mousedown="stopDragPropagation"
               @click="toggleMenu('tools')"
             >
-              Tools
+              {{ $t('menu.tools') }}
             </button>
             <div v-if="openMenuId === 'tools'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
               <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleRemoteFileManager">
-                <span>{{ showRemoteFileManager ? 'Hide Remote Files' : 'Show Remote Files' }}</span>
+                <span>{{ showRemoteFileManager ? $t('menu.hideRemoteFiles') : $t('menu.showRemoteFiles') }}</span>
               </button>
               <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleTunnelManager">
-                <span>Port Forwarding…</span>
+                <span>{{ $t('menu.portForwarding') }}</span>
               </button>
             </div>
           </div>
@@ -1595,14 +1611,14 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               @mousedown="stopDragPropagation"
               @click="toggleMenu('help')"
             >
-              Help
+              {{ $t('menu.help') }}
             </button>
             <div v-if="openMenuId === 'help'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
               <button class="titlebar-menu-item" type="button" @click="handleOpenUserManual">
-                <span>User Manual</span>
+                <span>{{ $t('menu.userManual') }}</span>
               </button>
               <button class="titlebar-menu-item" type="button" @click="handleOpenAbout">
-                <span>About AuraTerm</span>
+                <span>{{ $t('menu.about') }}</span>
               </button>
             </div>
           </div>
@@ -1612,11 +1628,11 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
 
       <div v-else class="titlebar-title">AuraTerm</div>
 
-      <div v-if="isMainWindow && osType === 'windows'" class="titlebar-controls-win" aria-label="Window controls" data-no-drag="true">
+      <div v-if="isMainWindow && osType === 'windows'" class="titlebar-controls-win" :aria-label="$t('titlebar.windowControls')" data-no-drag="true">
         <button
           class="titlebar-control-win-btn"
           type="button"
-          aria-label="Minimize"
+          :aria-label="$t('titlebar.minimize')"
           @mousedown="stopDragPropagation"
           @click="handleMinimize"
         >
@@ -1625,7 +1641,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
         <button
           class="titlebar-control-win-btn"
           type="button"
-          aria-label="Maximize"
+          :aria-label="$t('titlebar.maximize')"
           @mousedown="stopDragPropagation"
           @click="handleToggleMaximize"
         >
@@ -1634,7 +1650,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
         <button
           class="titlebar-control-win-btn close"
           type="button"
-          aria-label="Close"
+          :aria-label="$t('titlebar.close')"
           @mousedown="stopDragPropagation"
           @click="handleClose"
         >
@@ -1804,12 +1820,12 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       class="tab-context-menu"
       :style="{ top: `${tabContextMenu.y}px`, left: `${tabContextMenu.x}px` }"
     >
-      <button class="tab-context-item" type="button" @click="handleSplitTabFromContextMenu('vertical')">Split Right</button>
-      <button class="tab-context-item" type="button" @click="handleSplitTabFromContextMenu('horizontal')">Split Down</button>
-      <button class="tab-context-item" type="button" @click="handleMoveTabToFocusedPaneFromContextMenu">Move To Focused Pane</button>
-      <button class="tab-context-item" type="button" :disabled="paneLeaves.length <= 1" @click="handleClosePaneFromContextMenu">Close Pane</button>
+      <button class="tab-context-item" type="button" @click="handleSplitTabFromContextMenu('vertical')">{{ $t('menu.splitRight') }}</button>
+      <button class="tab-context-item" type="button" @click="handleSplitTabFromContextMenu('horizontal')">{{ $t('menu.splitDown') }}</button>
+      <button class="tab-context-item" type="button" @click="handleMoveTabToFocusedPaneFromContextMenu">{{ $t('menu.moveToFocusedPane') }}</button>
+      <button class="tab-context-item" type="button" :disabled="paneLeaves.length <= 1" @click="handleClosePaneFromContextMenu">{{ $t('menu.closePane') }}</button>
       <div class="titlebar-menu-separator" />
-      <button class="tab-context-item" type="button" @click="handleRenameTabFromContextMenu">Rename Tab</button>
+      <button class="tab-context-item" type="button" @click="handleRenameTabFromContextMenu">{{ $t('menu.renameTab') }}</button>
     </div>
 
     <!-- Layout 下拉菜单：position:fixed 渲染在根级，避免被终端层遮挡 -->
@@ -1825,14 +1841,14 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           <rect x="1" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
           <rect x="9" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
         </svg>
-        <span>Split Right</span>
+        <span>{{ $t('menu.splitRight') }}</span>
       </button>
       <button class="layout-dropdown-item" type="button" @click="showLayoutMenu = false; handleSplitPane('horizontal')">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
           <rect x="1" y="1" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
           <rect x="1" y="9" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
         </svg>
-        <span>Split Down</span>
+        <span>{{ $t('menu.splitDown') }}</span>
       </button>
       <div class="layout-dropdown-separator" />
       <button class="layout-dropdown-item" type="button" :disabled="paneLeaves.length <= 1" @click="showLayoutMenu = false; handleClosePane()">
@@ -1841,7 +1857,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           <line x1="5" y1="5" x2="11" y2="11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
           <line x1="11" y1="5" x2="5" y2="11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
         </svg>
-        <span>Close Pane</span>
+        <span>{{ $t('menu.closePane') }}</span>
       </button>
     </div>
 

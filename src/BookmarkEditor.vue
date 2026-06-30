@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { buildConnectionLogContext, buildDefaultLogPath, normalizeOptionalLogPath } from "./logging";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
+import { t } from "./i18n";
 import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection, type SshAuthType } from "./types";
 
 const props = withDefaults(defineProps<{
@@ -159,21 +160,21 @@ function handleSave() {
   const reconnectType = protocol === "ssh" ? normalizeReconnectType(editDraft.value) : undefined;
 
   if (!editDraft.value.name.trim()) {
-    editError.value = "Name cannot be empty.";
+    editError.value = t("bookmarkEditor.errNameEmpty");
     return;
   }
   if (protocol === "serial") {
     if (!editDraft.value.portName?.trim()) {
-      editError.value = "Serial port cannot be empty.";
+      editError.value = t("bookmarkEditor.errSerialEmpty");
       return;
     }
   } else {
     if (!editDraft.value.host.trim()) {
-      editError.value = "Host cannot be empty.";
+      editError.value = t("bookmarkEditor.errHostEmpty");
       return;
     }
     if (protocol === "ssh" && !editDraft.value.user.trim()) {
-      editError.value = "SSH username cannot be empty.";
+      editError.value = t("bookmarkEditor.errUserEmpty");
       return;
     }
   }
@@ -217,9 +218,9 @@ function handleSave() {
     <div class="bookmark-editor-dialog" @click.stop>
       <div class="bookmark-editor-header">
         <div>
-          <div class="bookmark-editor-title">Edit Bookmark</div>
+          <div class="bookmark-editor-title">{{ $t('bookmarkEditor.title') }}</div>
           <div class="bookmark-editor-subtitle">
-            {{ editDraft.protocol === 'serial' ? 'Serial Settings' : editDraft.protocol === 'telnet' ? 'Telnet Settings' : 'SSH Settings' }}
+            {{ editDraft.protocol === 'serial' ? $t('bookmarkEditor.serialSettings') : editDraft.protocol === 'telnet' ? $t('bookmarkEditor.telnetSettings') : $t('bookmarkEditor.sshSettings') }}
           </div>
         </div>
         <button type="button" class="bookmark-editor-close" @click="emit('cancel')">×</button>
@@ -228,15 +229,15 @@ function handleSave() {
       <div class="bookmark-editor-body">
         <div class="bookmark-editor-grid">
           <div class="form-group">
-            <label>Name</label>
+            <label>{{ $t('bookmarkEditor.name') }}</label>
             <input type="text" :value="editDraft.name" @input="updateDraft('name', inputValue($event))">
           </div>
           <div class="form-group">
-            <label>Group</label>
+            <label>{{ $t('bookmarkEditor.group') }}</label>
             <input
               type="text"
               :value="editDraft.group ?? ''"
-              placeholder="Ungrouped"
+              :placeholder="$t('bookmarkEditor.ungrouped')"
               @input="updateDraft('group', inputValue($event))"
               autocapitalize="none"
               autocorrect="off"
@@ -248,7 +249,7 @@ function handleSave() {
         <template v-if="editDraft.protocol === 'serial'">
           <div class="bookmark-editor-grid">
             <div class="form-group bookmark-editor-span-2">
-              <label>Serial Port</label>
+              <label>{{ $t('bookmarkEditor.serialPort') }}</label>
               <input
                 type="text"
                 :value="editDraft.portName ?? ''"
@@ -260,7 +261,7 @@ function handleSave() {
               >
             </div>
             <div class="form-group">
-              <label>Baud Rate</label>
+              <label>{{ $t('bookmarkEditor.baudRate') }}</label>
               <input
                 type="number"
                 :value="editDraft.baudRate ?? 9600"
@@ -268,7 +269,7 @@ function handleSave() {
               >
             </div>
             <div class="form-group">
-              <label>Data Bits</label>
+              <label>{{ $t('bookmarkEditor.dataBits') }}</label>
               <select :value="String(editDraft.dataBits ?? 8)" @change="updateDraft('dataBits', toDataBits(inputValue($event)))">
                 <option value="5">5</option>
                 <option value="6">6</option>
@@ -277,26 +278,26 @@ function handleSave() {
               </select>
             </div>
             <div class="form-group">
-              <label>Stop Bits</label>
+              <label>{{ $t('bookmarkEditor.stopBits') }}</label>
               <select :value="String(editDraft.stopBits ?? 1)" @change="updateDraft('stopBits', toStopBits(inputValue($event)))">
                 <option value="1">1</option>
                 <option value="2">2</option>
               </select>
             </div>
             <div class="form-group">
-              <label>Parity</label>
+              <label>{{ $t('bookmarkEditor.parity') }}</label>
               <select :value="editDraft.parity ?? 'none'" @change="updateDraft('parity', toParity(inputValue($event)))">
-                <option value="none">None</option>
-                <option value="odd">Odd</option>
-                <option value="even">Even</option>
+                <option value="none">{{ $t('connect.none') }}</option>
+                <option value="odd">{{ $t('connect.odd') }}</option>
+                <option value="even">{{ $t('connect.even') }}</option>
               </select>
             </div>
             <div class="form-group bookmark-editor-span-2">
-              <label>Flow Control</label>
+              <label>{{ $t('bookmarkEditor.flowControl') }}</label>
               <select :value="editDraft.flowControl ?? 'none'" @change="updateDraft('flowControl', toFlowControl(inputValue($event)))">
-                <option value="none">None</option>
-                <option value="hardware">Hardware</option>
-                <option value="software">Software</option>
+                <option value="none">{{ $t('connect.none') }}</option>
+                <option value="hardware">{{ $t('connect.hardware') }}</option>
+                <option value="software">{{ $t('connect.software') }}</option>
               </select>
             </div>
           </div>
@@ -305,7 +306,7 @@ function handleSave() {
         <template v-else>
           <div class="bookmark-editor-grid">
             <div class="form-group bookmark-editor-span-2">
-              <label>Host</label>
+              <label>{{ $t('bookmarkEditor.host') }}</label>
               <input
                 type="text"
                 :value="editDraft.host"
@@ -316,11 +317,11 @@ function handleSave() {
               >
             </div>
             <div class="form-group">
-              <label>Port</label>
+              <label>{{ $t('bookmarkEditor.port') }}</label>
               <input type="number" :value="editDraft.port" @input="updateDraft('port', toNumber(inputValue($event), 0))">
             </div>
             <div v-if="(editDraft.protocol ?? 'ssh') === 'ssh'" class="form-group">
-              <label>User</label>
+              <label>{{ $t('bookmarkEditor.user') }}</label>
               <input
                 type="text"
                 :value="editDraft.user"
@@ -331,7 +332,7 @@ function handleSave() {
               >
             </div>
             <div v-else class="form-group">
-              <label>Protocol</label>
+              <label>{{ $t('bookmarkEditor.protocol') }}</label>
               <input type="text" value="Telnet" disabled>
             </div>
           </div>
@@ -339,18 +340,18 @@ function handleSave() {
           <template v-if="(editDraft.protocol ?? 'ssh') === 'ssh'">
             <div class="bookmark-editor-grid">
               <div class="form-group">
-                <label>Auth Method</label>
+                <label>{{ $t('bookmarkEditor.authMethod') }}</label>
                 <select :value="editDraft.authType" @change="updateDraft('authType', toAuthType(inputValue($event)))">
-                  <option value="password">Password</option>
-                  <option value="key">Private Key</option>
-                  <option value="agent">SSH Agent / Pageant</option>
-                  <option value="none">Keyboard Interactive</option>
+                  <option value="password">{{ $t('connect.authPassword') }}</option>
+                  <option value="key">{{ $t('connect.authKey') }}</option>
+                  <option value="agent">{{ $t('connect.authAgent') }}</option>
+                  <option value="none">{{ $t('connect.authKeyboard') }}</option>
                 </select>
               </div>
             </div>
 
             <div v-if="editDraft.authType === 'password'" class="form-group">
-              <label>Password</label>
+              <label>{{ $t('bookmarkEditor.password') }}</label>
               <input
                 type="password"
                 :value="editDraft.password ?? ''"
@@ -362,7 +363,7 @@ function handleSave() {
             </div>
 
             <div v-else-if="editDraft.authType === 'key'" class="form-group">
-              <label>Private Key (PEM)</label>
+              <label>{{ $t('bookmarkEditor.privateKeyPem') }}</label>
               <textarea
                 rows="5"
                 :value="editDraft.privateKey ?? ''"
@@ -371,8 +372,8 @@ function handleSave() {
                 autocorrect="off"
                 spellcheck="false"
               />
-              <button type="button" class="bookmark-editor-btn secondary" @click="generatePrivateKey">Generate Ed25519 key</button>
-              <label>Passphrase</label>
+              <button type="button" class="bookmark-editor-btn secondary" @click="generatePrivateKey">{{ $t('bookmarkEditor.generateKey') }}</button>
+              <label>{{ $t('bookmarkEditor.passphrase') }}</label>
               <input
                 type="password"
                 :value="editDraft.passphrase ?? ''"
@@ -380,61 +381,61 @@ function handleSave() {
               >
               <div v-if="generatedPublicKey" class="generated-key-row">
                 <textarea :value="generatedPublicKey" rows="2" readonly />
-                <button type="button" class="bookmark-editor-btn secondary" @click="copyGeneratedPublicKey">Copy public key</button>
+                <button type="button" class="bookmark-editor-btn secondary" @click="copyGeneratedPublicKey">{{ $t('connect.copyPublicKey') }}</button>
               </div>
             </div>
 
             <details class="bookmark-advanced">
-              <summary>ProxyJump and login automation</summary>
+              <summary>{{ $t('connect.advancedSummary') }}</summary>
               <label class="bookmark-inline-check">
                 <input
                   type="checkbox"
                   :checked="editDraft.agentForwarding ?? false"
                   @change="handleAgentForwardingChange"
                 >
-                Forward local SSH agent to target
+                {{ $t('connect.forwardAgent') }}
               </label>
 
               <div class="bookmark-advanced-heading">
-                <strong>Jump hosts</strong>
-                <button type="button" @click="addJumpHost">Add</button>
+                <strong>{{ $t('bookmarkEditor.jumpHosts') }}</strong>
+                <button type="button" @click="addJumpHost">{{ $t('bookmarkEditor.add') }}</button>
               </div>
               <div v-for="(jump, index) in editDraft.jumpHosts ?? []" :key="jump.id" class="bookmark-advanced-card">
                 <div class="bookmark-advanced-grid">
-                  <input v-model="jump.host" type="text" placeholder="Host">
-                  <input v-model.number="jump.port" type="number" min="1" max="65535" placeholder="Port">
-                  <input v-model="jump.user" type="text" placeholder="User">
+                  <input v-model="jump.host" type="text" :placeholder="$t('bookmarkEditor.host')">
+                  <input v-model.number="jump.port" type="number" min="1" max="65535" :placeholder="$t('bookmarkEditor.port')">
+                  <input v-model="jump.user" type="text" :placeholder="$t('bookmarkEditor.user')">
                   <select v-model="jump.authType">
-                    <option value="password">Password</option>
-                    <option value="key">Private Key</option>
-                    <option value="agent">Agent</option>
-                    <option value="none">Keyboard Interactive</option>
+                    <option value="password">{{ $t('connect.authPassword') }}</option>
+                    <option value="key">{{ $t('connect.authKey') }}</option>
+                    <option value="agent">{{ $t('bookmarkEditor.agent') }}</option>
+                    <option value="none">{{ $t('connect.authKeyboard') }}</option>
                   </select>
                 </div>
-                <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" placeholder="Password">
+                <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" :placeholder="$t('bookmarkEditor.password')">
                 <template v-else-if="jump.authType === 'key'">
-                  <textarea v-model="jump.privateKey" rows="3" placeholder="Private key" />
-                  <input v-model="jump.passphrase" type="password" placeholder="Passphrase">
+                  <textarea v-model="jump.privateKey" rows="3" :placeholder="$t('bookmarkEditor.privateKeyJumpPlaceholder')" />
+                  <input v-model="jump.passphrase" type="password" :placeholder="$t('bookmarkEditor.passphrase')">
                 </template>
-                <button type="button" class="bookmark-remove" @click="removeJumpHost(index)">Remove</button>
+                <button type="button" class="bookmark-remove" @click="removeJumpHost(index)">{{ $t('connect.remove') }}</button>
               </div>
 
               <div class="bookmark-advanced-heading">
-                <strong>Expect rules</strong>
-                <button type="button" @click="addAutoLoginRule">Add</button>
+                <strong>{{ $t('bookmarkEditor.expectRules') }}</strong>
+                <button type="button" @click="addAutoLoginRule">{{ $t('bookmarkEditor.add') }}</button>
               </div>
               <div v-for="(rule, index) in editDraft.autoLoginRules ?? []" :key="index" class="bookmark-advanced-card">
                 <div class="bookmark-automation-grid">
-                  <input v-model="rule.expect" type="text" placeholder="Wait for text">
-                  <input v-model="rule.response" type="password" placeholder="Send response">
-                  <input v-model.number="rule.timeoutSecs" type="number" min="1" max="300" title="Timeout seconds">
+                  <input v-model="rule.expect" type="text" :placeholder="$t('bookmarkEditor.waitForText')">
+                  <input v-model="rule.response" type="password" :placeholder="$t('connect.sendResponse')">
+                  <input v-model.number="rule.timeoutSecs" type="number" min="1" max="300" :title="$t('connect.timeoutSeconds')">
                 </div>
-                <label class="bookmark-inline-check"><input v-model="rule.caseSensitive" type="checkbox"> Case sensitive</label>
-                <button type="button" class="bookmark-remove" @click="removeAutoLoginRule(index)">Remove</button>
+                <label class="bookmark-inline-check"><input v-model="rule.caseSensitive" type="checkbox"> {{ $t('connect.caseSensitive') }}</label>
+                <button type="button" class="bookmark-remove" @click="removeAutoLoginRule(index)">{{ $t('connect.remove') }}</button>
               </div>
 
               <div class="form-group">
-                <label>Commands after login (one per line)</label>
+                <label>{{ $t('bookmarkEditor.commandsAfterLogin') }}</label>
                 <textarea
                   rows="3"
                   :value="(editDraft.postConnectCommands ?? []).join('\n')"
@@ -445,13 +446,13 @@ function handleSave() {
 
             <div class="bookmark-editor-grid">
               <div class="form-group bookmark-editor-span-2">
-                <label>Reconnect Mode</label>
+                <label>{{ $t('bookmarkEditor.reconnectMode') }}</label>
                 <select
                   :value="normalizeReconnectType(editDraft)"
                   @change="updateDraft('reconnectType', toReconnectType(inputValue($event)))"
                 >
-                  <option value="manual">Manual</option>
-                  <option value="simple">Simple</option>
+                  <option value="manual">{{ $t('bookmarkEditor.reconnectManual') }}</option>
+                  <option value="simple">{{ $t('bookmarkEditor.reconnectSimple') }}</option>
                   <option value="tmux">tmux</option>
                   <option value="screen">screen</option>
                 </select>
@@ -467,7 +468,7 @@ function handleSave() {
               :checked="editDraft.logPath !== undefined"
               @change="handleLogEnabledChange"
             >
-            Save Session Log
+            {{ $t('bookmarkEditor.saveLog') }}
           </label>
           <input
             v-if="editDraft.logPath !== undefined"
@@ -480,7 +481,7 @@ function handleSave() {
             spellcheck="false"
           >
           <div v-if="editDraft.logPath !== undefined" class="form-hint">
-            Leave blank to use the default log path template.
+            {{ $t('bookmarkEditor.logHint') }}
           </div>
         </div>
 
@@ -488,8 +489,8 @@ function handleSave() {
       </div>
 
       <div class="bookmark-editor-footer">
-        <button type="button" class="bookmark-editor-btn secondary" @click="emit('cancel')">Cancel</button>
-        <button type="button" class="bookmark-editor-btn primary" @click="handleSave">Save</button>
+        <button type="button" class="bookmark-editor-btn secondary" @click="emit('cancel')">{{ $t('common.cancel') }}</button>
+        <button type="button" class="bookmark-editor-btn primary" @click="handleSave">{{ $t('common.save') }}</button>
       </div>
     </div>
   </div>

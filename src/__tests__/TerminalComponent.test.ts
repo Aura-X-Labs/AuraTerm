@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TerminalComponent from "../TerminalComponent.vue";
 import { DEFAULT_SETTINGS } from "../settings";
+import { i18n } from "../i18n";
 import type { SessionConfig } from "../types";
 
 const mockState = vi.hoisted(() => {
@@ -226,6 +227,7 @@ describe("TerminalComponent", () => {
     };
 
     const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
       props: {
         sessionId: "ssh-session-1",
         isVisible: true,
@@ -288,6 +290,7 @@ describe("TerminalComponent", () => {
     };
 
     const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
       props: {
         sessionId: "ssh-session-rule",
         isVisible: true,

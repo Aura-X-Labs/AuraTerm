@@ -30,7 +30,7 @@ function openExternal(url: string) {
   <div class="about-overlay" @click="emit('close')">
     <div class="about-dialog" @click.stop>
       <div class="about-header">
-        <h2>About AuraTerm</h2>
+        <h2>{{ $t('about.title') }}</h2>
         <button class="about-close-btn" type="button" @click="emit('close')">×</button>
       </div>
 
@@ -41,31 +41,31 @@ function openExternal(url: string) {
 
         <div class="about-content">
           <h3>AuraTerm</h3>
-          <p class="about-version">Version {{ version }}</p>
-          <p v-if="buildTime" class="about-build-time">Built: {{ buildTime }}</p>
+          <p class="about-version">{{ $t('about.version', { version }) }}</p>
+          <p v-if="buildTime" class="about-build-time">{{ $t('about.built', { time: buildTime }) }}</p>
 
 <p class="about-description">
-  A powerful terminal emulator supporting SSH, Telnet, Serial and local shell sessions.
+  {{ $t('about.description') }}
 </p>
 
 <div class="about-info">
-            <p><strong>Built with:</strong> Tauri + Vue + TypeScript</p>
-            <p><strong>License:</strong> MIT</p>
+            <p><strong>{{ $t('about.builtWith') }}</strong> Tauri + Vue + TypeScript</p>
+            <p><strong>{{ $t('about.license') }}</strong> MIT</p>
           </div>
 
           <div class="about-links">
             <button class="about-link-btn" type="button" @click="openExternal('https://github.com/Aura-X-Labs/AuraTerm')">
-              GitHub Repository
+              {{ $t('about.github') }}
             </button>
             <button class="about-link-btn" type="button" @click="openExternal('https://github.com/Aura-X-Labs/AuraTerm/issues')">
-              Report Issues
+              {{ $t('about.reportIssues') }}
             </button>
           </div>
         </div>
       </div>
 
       <div class="about-footer">
-        <button class="about-ok-btn" type="button" @click="emit('close')">OK</button>
+        <button class="about-ok-btn" type="button" @click="emit('close')">{{ $t('common.ok') }}</button>
       </div>
     </div>
   </div>

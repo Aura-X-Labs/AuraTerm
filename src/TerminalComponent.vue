@@ -1195,7 +1195,7 @@ async function handleCancelZmodem() {
       <div class="zmodem-transfer-main">
         <strong>Zmodem {{ zmodemTransfer.direction }}</strong>
         <span>
-          {{ zmodemTransfer.fileName || (zmodemTransfer.direction === 'upload' ? 'Remote rz is waiting for a file' : 'Receiving file metadata...') }}
+          {{ zmodemTransfer.fileName || (zmodemTransfer.direction === 'upload' ? $t('terminal.zmodemWaitingFile') : $t('terminal.zmodemReceivingMeta')) }}
         </span>
         <span v-if="zmodemTransfer.status !== 'detected'">
           {{ formatTransferBytes(zmodemTransfer.transferredBytes) }}
@@ -1209,25 +1209,24 @@ async function handleCancelZmodem() {
         v-if="zmodemTransfer.direction === 'upload' && zmodemTransfer.status === 'detected'"
         type="button"
         @click="zmodemFileInput?.click()"
-      >Select File</button>
-      <button v-if="zmodemBusy || zmodemTransfer.status === 'detected'" type="button" @click="handleCancelZmodem">Cancel</button>
+      >{{ $t('terminal.selectFile') }}</button>
+      <button v-if="zmodemBusy || zmodemTransfer.status === 'detected'" type="button" @click="handleCancelZmodem">{{ $t('common.cancel') }}</button>
       <span v-if="zmodemTransfer.status === 'failed'" class="zmodem-error">{{ zmodemTransfer.message }}</span>
     </div>
 
     <div v-if="showRetryOverlay && activeSshConfig" class="password-retry-overlay">
       <div class="password-retry-dialog">
         <div class="password-retry-icon">🔐</div>
-        <h3 class="password-retry-title">Authentication Failed</h3>
+        <h3 class="password-retry-title">{{ $t('terminal.authFailedTitle') }}</h3>
         <p class="password-retry-desc">
-          Could not connect to <strong>{{ activeSshConfig.user }}@{{ activeSshConfig.host }}</strong>.
-          Incorrect password, please try again.
+          {{ $t('terminal.authFailedDescPre') }}<strong>{{ activeSshConfig.user }}@{{ activeSshConfig.host }}</strong>{{ $t('terminal.authFailedDescPost') }}
         </p>
         <form class="password-retry-form" @submit="handlePasswordRetry">
           <input
             v-model="retryPassword"
             type="password"
             class="password-retry-input"
-            placeholder="Enter password"
+            :placeholder="$t('terminal.enterPassword')"
             autofocus
             autocapitalize="none"
             autocorrect="off"
@@ -1235,8 +1234,8 @@ async function handleCancelZmodem() {
             @keydown.stop
           >
           <div class="password-retry-actions">
-            <button type="button" class="password-retry-btn cancel" @click="showRetryOverlay = false">Cancel</button>
-            <button type="submit" class="password-retry-btn retry">Retry</button>
+            <button type="button" class="password-retry-btn cancel" @click="showRetryOverlay = false">{{ $t('common.cancel') }}</button>
+            <button type="submit" class="password-retry-btn retry">{{ $t('terminal.retry') }}</button>
           </div>
         </form>
       </div>
@@ -1245,7 +1244,7 @@ async function handleCancelZmodem() {
     <div v-if="showMfaOverlay && mfaEvent" class="password-retry-overlay">
       <div class="password-retry-dialog">
         <div class="password-retry-icon">🛡️</div>
-        <h3 class="password-retry-title">{{ mfaEvent.name || 'MFA Required' }}</h3>
+        <h3 class="password-retry-title">{{ mfaEvent.name || $t('terminal.mfaRequired') }}</h3>
         <p class="password-retry-desc">{{ mfaEvent.instruction }}</p>
         <form class="password-retry-form" @submit="handleMfaSubmit">
           <div v-for="(prompt, index) in mfaEvent.prompts" :key="`${index}-${prompt.text}`" style="margin-bottom: 10px">
@@ -1264,8 +1263,8 @@ async function handleCancelZmodem() {
             >
           </div>
           <div class="password-retry-actions">
-            <button type="button" class="password-retry-btn cancel" @click="handleCancelMfa">Cancel</button>
-            <button type="submit" class="password-retry-btn retry">Verify</button>
+            <button type="button" class="password-retry-btn cancel" @click="handleCancelMfa">{{ $t('common.cancel') }}</button>
+            <button type="submit" class="password-retry-btn retry">{{ $t('terminal.verify') }}</button>
           </div>
         </form>
       </div>
@@ -1274,14 +1273,13 @@ async function handleCancelZmodem() {
     <div v-if="reconnectPrompt" class="password-retry-overlay">
       <div class="password-retry-dialog">
         <div class="password-retry-icon">🔁</div>
-        <h3 class="password-retry-title">Attach Existing {{ reconnectPrompt.tool }}</h3>
+        <h3 class="password-retry-title">{{ $t('terminal.attachExisting', { tool: reconnectPrompt.tool }) }}</h3>
         <p class="password-retry-desc">
-          AuraTerm found detached remote sessions created by AuraTerm.
-          Only sessions with the <strong>at-</strong> prefix are listed below.
+          {{ $t('terminal.reconnectDesc') }}
         </p>
         <form class="password-retry-form" @submit.prevent="handleAttachSelectedReconnectSession">
           <label style="display: block; margin-bottom: 6px; font-size: 12px; opacity: 0.85">
-            Select a session to attach:
+            {{ $t('terminal.selectSessionToAttach') }}
           </label>
           <select
             v-model="selectedReconnectSession"
@@ -1294,8 +1292,8 @@ async function handleCancelZmodem() {
             </option>
           </select>
           <div class="password-retry-actions">
-            <button type="button" class="password-retry-btn cancel" @click="handleSkipReconnectSession">Create New</button>
-            <button type="submit" class="password-retry-btn retry" :disabled="!selectedReconnectSession">Attach</button>
+            <button type="button" class="password-retry-btn cancel" @click="handleSkipReconnectSession">{{ $t('terminal.createNew') }}</button>
+            <button type="submit" class="password-retry-btn retry" :disabled="!selectedReconnectSession">{{ $t('terminal.attach') }}</button>
           </div>
         </form>
       </div>
@@ -1304,20 +1302,19 @@ async function handleCancelZmodem() {
     <div v-if="showHostKeyOverlay && hostKeyPrompt" class="password-retry-overlay">
       <div class="password-retry-dialog">
         <div class="password-retry-icon">⚠️</div>
-        <h3 class="password-retry-title">Host Key Changed</h3>
+        <h3 class="password-retry-title">{{ $t('terminal.hostKeyChangedTitle') }}</h3>
         <p class="password-retry-desc">
-          The SSH host key for <strong>{{ hostKeyPrompt.host }}:{{ hostKeyPrompt.port }}</strong> changed.
-          This may indicate a reinstalled host or a man-in-the-middle attack.
+          {{ $t('terminal.hostKeyChangedDescPre') }}<strong>{{ hostKeyPrompt.host }}:{{ hostKeyPrompt.port }}</strong>{{ $t('terminal.hostKeyChangedDescPost') }}
         </p>
         <div class="host-key-fingerprint-block">
-          <div class="host-key-fingerprint-label">Known fingerprint</div>
+          <div class="host-key-fingerprint-label">{{ $t('terminal.knownFingerprint') }}</div>
           <div class="host-key-fingerprint-value">{{ hostKeyPrompt.expectedFingerprint }}</div>
-          <div class="host-key-fingerprint-label" style="margin-top: 8px;">Presented fingerprint</div>
+          <div class="host-key-fingerprint-label" style="margin-top: 8px;">{{ $t('terminal.presentedFingerprint') }}</div>
           <div class="host-key-fingerprint-value">{{ hostKeyPrompt.observedFingerprint }}</div>
         </div>
         <div class="password-retry-actions">
-          <button type="button" class="password-retry-btn cancel" @click="handleRejectHostKey">Cancel</button>
-          <button type="button" class="password-retry-btn retry" @click="handleTrustHostKey">Trust And Continue</button>
+          <button type="button" class="password-retry-btn cancel" @click="handleRejectHostKey">{{ $t('common.cancel') }}</button>
+          <button type="button" class="password-retry-btn retry" @click="handleTrustHostKey">{{ $t('terminal.trustAndContinue') }}</button>
         </div>
       </div>
     </div>
@@ -1326,9 +1323,9 @@ async function handleCancelZmodem() {
     <div v-if="manualReconnectPending" class="reconnect-status-bar">
       <div class="reconnect-status-content">
         <span class="reconnect-status-icon">🔌</span>
-        <span class="reconnect-status-text">连接已断开。按 <kbd>R</kbd> 重新连接。</span>
+        <span class="reconnect-status-text">{{ $t('terminal.disconnectedPre') }}<kbd>R</kbd>{{ $t('terminal.disconnectedPost') }}</span>
       </div>
-      <button class="reconnect-status-btn" @click="reconnectSshSession">立即重连</button>
+      <button class="reconnect-status-btn" @click="reconnectSshSession">{{ $t('terminal.reconnectNow') }}</button>
     </div>
   </div>
 </template>

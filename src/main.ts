@@ -1,6 +1,11 @@
 import { createApp } from "vue";
 import App from "./App.vue";
 import { invoke } from "@tauri-apps/api/core";
+import { i18n, setLanguage } from "./i18n";
+
+// Best-guess locale from the system before settings load; App.vue re-applies
+// the persisted preference once `get_settings` resolves.
+setLanguage("system");
 
 // Apply global styles
 const style = document.createElement("style");
@@ -34,4 +39,4 @@ declare global {
 }
 window.getStartupDir = () => startupDir;
 
-createApp(App).mount("#root");
+createApp(App).use(i18n).mount("#root");

@@ -1,3 +1,5 @@
+import type { AppLanguage } from "./i18n";
+
 export interface TerminalTheme {
   background: string;
   foreground: string;
@@ -127,6 +129,8 @@ export interface WindowBounds {
 }
 
 export interface AppSettings {
+  /** Interface language; "system" follows the OS/browser language. */
+  language: AppLanguage;
   fontSize: number;
   fontFamily: string;
   scrollback: number;
@@ -475,6 +479,7 @@ export const MIN_TERMINAL_FONT_SIZE = 8;
 export const MAX_TERMINAL_FONT_SIZE = 72;
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  language: "system",
   fontSize: 15,
   fontFamily: 'Consolas, "Courier New", monospace',
   scrollback: 10000,
@@ -512,6 +517,12 @@ function normalizeColor(value?: string | null) {
   return value?.trim().toLowerCase();
 }
 
+function normalizeLanguage(value?: string | null): AppLanguage {
+  return value === "en" || value === "zh-CN" || value === "system"
+    ? value
+    : DEFAULT_SETTINGS.language;
+}
+
 function normalizeUiThemeMode(value?: string | null): UiThemeMode {
   return value === "light" || value === "dark" || value === "follow-terminal"
     ? value
@@ -543,6 +554,7 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
   return {
     ...DEFAULT_SETTINGS,
     ...value,
+    language: normalizeLanguage(value?.language),
     fontSize: Math.min(
       MAX_TERMINAL_FONT_SIZE,
       Math.max(MIN_TERMINAL_FONT_SIZE, value?.fontSize ?? DEFAULT_SETTINGS.fontSize),

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
+import { t } from "./i18n";
 import type { SshConfig, TunnelConfig, TunnelType } from "./types";
 import type { SshTunnelsApi } from "./composables/useSshTunnels";
 
@@ -39,21 +40,21 @@ onMounted(() => {
 function typeLabel(type: TunnelType): string {
   switch (type) {
     case "local":
-      return "Local (-L)";
+      return t("tunnels.typeLocal");
     case "remote":
-      return "Remote (-R)";
+      return t("tunnels.typeRemote");
     case "dynamic":
-      return "Dynamic (-D)";
+      return t("tunnels.typeDynamic");
   }
 }
 
 function describeTunnel(tunnel: TunnelConfig): string {
   const bind = `${tunnel.bindAddress?.trim() || "127.0.0.1"}:${tunnel.bindPort}`;
   if (tunnel.type === "dynamic") {
-    return `${bind}  ·  SOCKS5 proxy`;
+    return `${bind}  ·  ${t("tunnels.socks5Proxy")}`;
   }
   const dest = `${tunnel.destHost ?? "?"}:${tunnel.destPort ?? "?"}`;
-  return tunnel.type === "local" ? `${bind} → ${dest}` : `${dest} ← ${bind} (server)`;
+  return tunnel.type === "local" ? `${bind} → ${dest}` : `${dest} ← ${bind} (${t("tunnels.server")})`;
 }
 
 function statusOf(tunnel: TunnelConfig) {
@@ -61,7 +62,10 @@ function statusOf(tunnel: TunnelConfig) {
 }
 
 function statusLabel(tunnel: TunnelConfig): string {
-  return statusOf(tunnel) ?? "idle";
+  const status = statusOf(tunnel) ?? "idle";
+  // Localize known statuses; fall back to the raw backend value otherwise.
+  const known = ["idle", "starting", "running", "stopped", "error", "reconnecting"];
+  return known.includes(status) ? t(`tunnels.status.${status}`) : status;
 }
 
 function newDraft(): DraftTunnel {
@@ -117,7 +121,7 @@ function saveDraft() {
 
   const bindPort = parsePort(current.bindPort);
   if (bindPort === null) {
-    formError.value = "Listen port must be between 1 and 65535.";
+    formError.value = t("tunnels.errListenPort");
     return;
   }
 
@@ -126,12 +130,12 @@ function saveDraft() {
   if (current.type !== "dynamic") {
     destHost = current.destHost.trim();
     if (!destHost) {
-      formError.value = "Destination host is required for local/remote forwards.";
+      formError.value = t("tunnels.errDestHost");
       return;
     }
     const parsedDestPort = parsePort(current.destPort);
     if (parsedDestPort === null) {
-      formError.value = "Destination port must be between 1 and 65535.";
+      formError.value = t("tunnels.errDestPort");
       return;
     }
     destPort = parsedDestPort;
@@ -185,18 +189,18 @@ async function toggleTunnel(tunnel: TunnelConfig) {
 
 <template>
   <div class="tunnel-overlay" @click.self="emit('close')">
-    <div class="tunnel-dialog" role="dialog" aria-label="Port forwarding">
+    <div class="tunnel-dialog" role="dialog" :aria-label="$t('tunnels.ariaLabel')">
       <div class="tunnel-header">
         <div>
-          <div class="tunnel-title">Port Forwarding / Tunnels</div>
+          <div class="tunnel-title">{{ $t('tunnels.title') }}</div>
           <div class="tunnel-subtitle">{{ sshConfig.user }}@{{ sshConfig.host }}:{{ sshConfig.port }}</div>
         </div>
-        <button class="tunnel-close" type="button" aria-label="Close" @click="emit('close')">×</button>
+        <button class="tunnel-close" type="button" :aria-label="$t('common.close')" @click="emit('close')">×</button>
       </div>
 
       <div class="tunnel-body">
         <div v-if="list.length === 0 && !draft" class="tunnel-empty">
-          No tunnels configured yet. Add a local, remote, or dynamic (SOCKS5) forward.
+          {{ $t('tunnels.empty') }}
         </div>
 
         <ul v-if="list.length > 0" class="tunnel-list">
@@ -220,77 +224,77 @@ async function toggleTunnel(tunnel: TunnelConfig) {
                 :disabled="busyTunnelId === tunnel.id"
                 @click="toggleTunnel(tunnel)"
               >
-                {{ api.isRunning(sessionId, tunnel.id) ? "Stop" : "Start" }}
+                {{ api.isRunning(sessionId, tunnel.id) ? $t('tunnels.stop') : $t('tunnels.start') }}
               </button>
-              <button class="tunnel-btn" type="button" :disabled="!!draft" @click="startEdit(tunnel)">Edit</button>
-              <button class="tunnel-btn ghost" type="button" @click="removeTunnel(tunnel)">Delete</button>
+              <button class="tunnel-btn" type="button" :disabled="!!draft" @click="startEdit(tunnel)">{{ $t('common.edit') }}</button>
+              <button class="tunnel-btn ghost" type="button" @click="removeTunnel(tunnel)">{{ $t('common.delete') }}</button>
             </div>
           </li>
         </ul>
 
         <form v-if="draft" class="tunnel-form" @submit.prevent="saveDraft">
-          <div class="tunnel-form-title">{{ list.some((t) => t.id === draft!.id) ? "Edit tunnel" : "Add tunnel" }}</div>
+          <div class="tunnel-form-title">{{ list.some((t) => t.id === draft!.id) ? $t('tunnels.editTunnel') : $t('tunnels.addTunnel') }}</div>
 
           <div class="tunnel-field tunnel-types">
             <label :class="{ selected: draft.type === 'local' }">
-              <input v-model="draft.type" type="radio" value="local" /> Local (-L)
+              <input v-model="draft.type" type="radio" value="local" /> {{ $t('tunnels.typeLocal') }}
             </label>
             <label :class="{ selected: draft.type === 'remote' }">
-              <input v-model="draft.type" type="radio" value="remote" /> Remote (-R)
+              <input v-model="draft.type" type="radio" value="remote" /> {{ $t('tunnels.typeRemote') }}
             </label>
             <label :class="{ selected: draft.type === 'dynamic' }">
-              <input v-model="draft.type" type="radio" value="dynamic" /> Dynamic (-D)
+              <input v-model="draft.type" type="radio" value="dynamic" /> {{ $t('tunnels.typeDynamic') }}
             </label>
           </div>
 
           <label class="tunnel-field">
-            <span>Name (optional)</span>
-            <input v-model="draft.name" type="text" placeholder="e.g. db-tunnel" />
+            <span>{{ $t('tunnels.nameOptional') }}</span>
+            <input v-model="draft.name" type="text" :placeholder="$t('tunnels.namePlaceholder')" />
           </label>
 
           <div class="tunnel-field-row">
             <label class="tunnel-field">
-              <span>{{ draft.type === "remote" ? "Server bind address" : "Listen address" }}</span>
+              <span>{{ draft.type === "remote" ? $t('tunnels.serverBindAddress') : $t('tunnels.listenAddress') }}</span>
               <input v-model="draft.bindAddress" type="text" placeholder="127.0.0.1" />
             </label>
             <label class="tunnel-field tunnel-field-port">
-              <span>{{ draft.type === "remote" ? "Server port" : "Listen port" }}</span>
+              <span>{{ draft.type === "remote" ? $t('tunnels.serverPort') : $t('tunnels.listenPort') }}</span>
               <input v-model="draft.bindPort" type="text" inputmode="numeric" placeholder="8080" />
             </label>
           </div>
 
           <div v-if="draft.type !== 'dynamic'" class="tunnel-field-row">
             <label class="tunnel-field">
-              <span>Destination host</span>
+              <span>{{ $t('tunnels.destHost') }}</span>
               <input v-model="draft.destHost" type="text" placeholder="dbhost.internal" />
             </label>
             <label class="tunnel-field tunnel-field-port">
-              <span>Destination port</span>
+              <span>{{ $t('tunnels.destPort') }}</span>
               <input v-model="draft.destPort" type="text" inputmode="numeric" placeholder="5432" />
             </label>
           </div>
           <p v-else class="tunnel-hint">
-            Dynamic forwarding opens a SOCKS5 proxy on the listen address; the destination is chosen per connection.
+            {{ $t('tunnels.dynamicHint') }}
           </p>
 
           <label class="tunnel-checkbox">
             <input v-model="draft.autoStart" type="checkbox" />
-            <span>Start automatically when this session connects</span>
+            <span>{{ $t('tunnels.autoStart') }}</span>
           </label>
 
           <p v-if="formError" class="tunnel-form-error">{{ formError }}</p>
 
           <div class="tunnel-form-actions">
-            <button class="tunnel-btn ghost" type="button" @click="cancelDraft">Cancel</button>
-            <button class="tunnel-btn primary" type="submit">Save</button>
+            <button class="tunnel-btn ghost" type="button" @click="cancelDraft">{{ $t('common.cancel') }}</button>
+            <button class="tunnel-btn primary" type="submit">{{ $t('common.save') }}</button>
           </div>
         </form>
       </div>
 
       <div class="tunnel-footer">
-        <button v-if="!draft" class="tunnel-btn primary" type="button" @click="startAdd">+ Add tunnel</button>
+        <button v-if="!draft" class="tunnel-btn primary" type="button" @click="startAdd">{{ $t('tunnels.addTunnelBtn') }}</button>
         <span class="tunnel-footer-spacer" />
-        <button class="tunnel-btn ghost" type="button" @click="emit('close')">Close</button>
+        <button class="tunnel-btn ghost" type="button" @click="emit('close')">{{ $t('common.close') }}</button>
       </div>
     </div>
   </div>

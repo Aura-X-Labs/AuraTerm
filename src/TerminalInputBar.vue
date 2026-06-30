@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import type { QuickButton } from "./settings";
 import { buildSnippetPayload, snippetApplies, snippetVariables } from "./snippets";
+import { t } from "./i18n";
 
 const props = defineProps<{
   quickButtons: QuickButton[];
@@ -179,7 +180,7 @@ function handleKeyDown(event: KeyboardEvent) {
 function handleQuickButton(button: QuickButton) {
   const values: Record<string, string> = {};
   for (const variable of snippetVariables(button.command)) {
-    const value = window.prompt(`Value for {{${variable}}}`);
+    const value = window.prompt(t("inputBar.valuePrompt", { variable: `{{${variable}}}` }));
     if (value === null) return;
     values[variable] = value;
   }
@@ -270,7 +271,7 @@ function closeEditor() {
     <div
       class="terminal-input-resize-handle"
       :class="{ collapsed: textareaH === 0 }"
-      title="Drag to resize, double-click to collapse/expand"
+      :title="$t('inputBar.resizeHandle')"
       @mousedown="handleResizeMouseDown"
       @dblclick="handleResizeDblClick"
     >
@@ -282,12 +283,12 @@ function closeEditor() {
         v-if="availableToolbars.length > 1"
         v-model="selectedToolbar"
         class="quick-toolbar-select"
-        title="Snippet toolbar"
+        :title="$t('inputBar.snippetToolbar')"
       >
         <option v-for="toolbar in availableToolbars" :key="toolbar" :value="toolbar">{{ toolbar }}</option>
       </select>
       <span v-if="visibleButtons.length === 0" class="quick-buttons-hint">
-        No snippets for this session. Click Edit to add one.
+        {{ $t('inputBar.noSnippets') }}
       </span>
       <template v-for="(button, index) in visibleButtons" :key="button.id">
         <span
@@ -304,8 +305,8 @@ function closeEditor() {
         </button>
       </template>
 
-      <button class="quick-btn quick-btn--edit" type="button" title="Edit quick buttons" @click="openEditor">
-        ✎ Edit
+      <button class="quick-btn quick-btn--edit" type="button" :title="$t('inputBar.editQuickButtons')" @click="openEditor">
+        {{ $t('inputBar.edit') }}
       </button>
     </div>
 
@@ -315,20 +316,20 @@ function closeEditor() {
         class="terminal-input-textarea"
         :style="{ height: `${textareaH}px` }"
         :value="text"
-        placeholder="Type here…  Ctrl+Enter to send  ·  PgUp/↑ for history"
+        :placeholder="$t('inputBar.placeholder')"
         spellcheck="false"
         autocorrect="off"
         autocapitalize="off"
         @input="text = inputValue($event)"
         @keydown="handleKeyDown"
       />
-      <button class="terminal-input-send-btn" type="button" title="Send  (Ctrl+Enter)" @click="doSend(text); text = ''">▶</button>
+      <button class="terminal-input-send-btn" type="button" :title="$t('inputBar.send')" @click="doSend(text); text = ''">▶</button>
     </div>
 
     <div v-if="showEditor" class="quick-btn-editor-overlay" @click="closeEditor">
       <div class="quick-btn-editor" @click.stop>
         <div class="quick-btn-editor-header">
-          <span>Snippet Library</span>
+          <span>{{ $t('inputBar.snippetLibrary') }}</span>
           <button type="button" class="quick-btn-editor-close" @click="closeEditor">×</button>
         </div>
 
@@ -342,23 +343,23 @@ function closeEditor() {
               @click="selectedButtonId = button.id"
             >
               <span class="quick-btn-editor-sidebar-label">
-                {{ button.label.trim() || '(No Label)' }}
+                {{ button.label.trim() || $t('inputBar.noLabel') }}
               </span>
               <div class="quick-btn-editor-sidebar-actions">
-                <button type="button" :disabled="index === 0" title="Move up" @click.stop="moveButton(button.id, -1)">▲</button>
+                <button type="button" :disabled="index === 0" :title="$t('inputBar.moveUp')" @click.stop="moveButton(button.id, -1)">▲</button>
                 <button
                   type="button"
                   :disabled="index === editButtons.length - 1"
-                  title="Move down"
+                  :title="$t('inputBar.moveDown')"
                   @click.stop="moveButton(button.id, 1)"
                 >
                   ▼
                 </button>
-                <button type="button" class="quick-btn-editor-sidebar-delete" title="Delete" @click.stop="deleteButton(button.id)">×</button>
+                <button type="button" class="quick-btn-editor-sidebar-delete" :title="$t('common.delete')" @click.stop="deleteButton(button.id)">×</button>
               </div>
             </div>
             <p v-if="editButtons.length === 0" class="quick-btn-editor-empty">
-              No buttons yet.
+              {{ $t('inputBar.noButtons') }}
             </p>
           </div>
 
@@ -370,20 +371,20 @@ function closeEditor() {
                 class="quick-btn-editor-detail"
               >
                 <div class="quick-btn-editor-field">
-                  <label>Label</label>
+                  <label>{{ $t('inputBar.label') }}</label>
                   <input
                     type="text"
                     class="quick-btn-editor-input quick-btn-editor-input--label"
-                    placeholder="Display name"
+                    :placeholder="$t('inputBar.displayName')"
                     :value="button.label"
                     @input="updateButton(button.id, 'label', inputValue($event))"
                   >
                 </div>
                 <div class="quick-btn-editor-field quick-btn-editor-field--command">
-                  <label>Command · use &#123;&#123;variable&#125;&#125;, ^C, \e, \x1b</label>
+                  <label>{{ $t('inputBar.commandHint') }}</label>
                   <textarea
                     class="quick-btn-editor-input quick-btn-editor-input--command"
-                    placeholder="Command to send (e.g. ls -la)"
+                    :placeholder="$t('inputBar.commandPlaceholder')"
                     :value="button.command"
                     autocapitalize="none"
                     autocorrect="off"
@@ -393,42 +394,42 @@ function closeEditor() {
                 </div>
                 <div class="quick-btn-editor-fields-grid">
                   <div class="quick-btn-editor-field">
-                    <label>Toolbar</label>
+                    <label>{{ $t('inputBar.toolbar') }}</label>
                     <input class="quick-btn-editor-input" type="text" :value="button.toolbar || 'Default'" @input="updateButton(button.id, 'toolbar', inputValue($event))">
                   </div>
                   <div class="quick-btn-editor-field">
-                    <label>Group</label>
+                    <label>{{ $t('inputBar.group') }}</label>
                     <input class="quick-btn-editor-input" type="text" :value="button.group || 'General'" @input="updateButton(button.id, 'group', inputValue($event))">
                   </div>
                   <div class="quick-btn-editor-field">
-                    <label>SSH hosts (comma separated)</label>
-                    <input class="quick-btn-editor-input" type="text" :value="(button.hosts || []).join(', ')" placeholder="All hosts" @input="updateButton(button.id, 'hosts', parseScopes(inputValue($event)))">
+                    <label>{{ $t('inputBar.sshHosts') }}</label>
+                    <input class="quick-btn-editor-input" type="text" :value="(button.hosts || []).join(', ')" :placeholder="$t('inputBar.allHosts')" @input="updateButton(button.id, 'hosts', parseScopes(inputValue($event)))">
                   </div>
                   <div class="quick-btn-editor-field">
-                    <label>Connection groups</label>
-                    <input class="quick-btn-editor-input" type="text" :value="(button.sessionGroups || []).join(', ')" placeholder="All groups" @input="updateButton(button.id, 'sessionGroups', parseScopes(inputValue($event)))">
+                    <label>{{ $t('inputBar.connectionGroups') }}</label>
+                    <input class="quick-btn-editor-input" type="text" :value="(button.sessionGroups || []).join(', ')" :placeholder="$t('inputBar.allGroups')" @input="updateButton(button.id, 'sessionGroups', parseScopes(inputValue($event)))">
                   </div>
                   <div class="quick-btn-editor-field">
-                    <label>Send mode</label>
+                    <label>{{ $t('inputBar.sendMode') }}</label>
                     <select class="quick-btn-editor-input" :value="button.sendMode || 'line'" @change="updateButton(button.id, 'sendMode', inputValue($event) === 'raw' ? 'raw' : 'line')">
-                      <option value="line">Command + Enter</option>
-                      <option value="raw">Raw / control characters</option>
+                      <option value="line">{{ $t('inputBar.sendModeLine') }}</option>
+                      <option value="raw">{{ $t('inputBar.sendModeRaw') }}</option>
                     </select>
                   </div>
                 </div>
               </div>
             </template>
             <div v-else class="quick-btn-editor-content-empty">
-              Select a button to edit or click <strong>+ Add</strong> to create one.
+              {{ $t('inputBar.selectButtonPre') }}<strong>{{ $t('inputBar.addLabel') }}</strong>{{ $t('inputBar.selectButtonPost') }}
             </div>
           </div>
         </div>
 
         <div class="quick-btn-editor-footer">
-          <button type="button" class="quick-btn-editor-add" @click="addButton">+ Add</button>
+          <button type="button" class="quick-btn-editor-add" @click="addButton">{{ $t('inputBar.addLabel') }}</button>
           <span style="flex: 1" />
-          <button type="button" class="quick-btn-editor-cancel" @click="closeEditor">Cancel</button>
-          <button type="button" class="quick-btn-editor-save" @click="saveEditor">Save</button>
+          <button type="button" class="quick-btn-editor-cancel" @click="closeEditor">{{ $t('common.cancel') }}</button>
+          <button type="button" class="quick-btn-editor-save" @click="saveEditor">{{ $t('common.save') }}</button>
         </div>
       </div>
     </div>

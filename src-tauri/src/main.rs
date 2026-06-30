@@ -878,6 +878,126 @@ fn get_startup_dir(state: State<'_, AppState>) -> Option<String> {
     state.startup_dir.lock().ok().and_then(|guard| guard.clone())
 }
 
+/// Build the native macOS menubar with labels localized to `locale`
+/// (`"en"` or `"zh-CN"`; anything else falls back to English). Keep the item
+/// IDs and accelerators stable across languages — only the visible text changes.
+#[cfg(target_os = "macos")]
+fn build_app_menu(
+    app: &AppHandle,
+    locale: &str,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
+
+    let zh = locale == "zh-CN";
+    // Pick the Chinese label when the locale is zh-CN, otherwise English.
+    let l = |en: &'static str, cn: &'static str| -> &'static str { if zh { cn } else { en } };
+
+    let new_window_item = MenuItem::with_id(app, "menu-new-window", l("New Window", "新建窗口"), true, Some("Cmd+N"))?;
+    let close_window_item = MenuItem::with_id(app, "menu-close-window", l("Close Window", "关闭窗口"), true, Some("Cmd+W"))?;
+    let minimize_item = MenuItem::with_id(app, "minimize", l("Minimize", "最小化"), true, Some("Cmd+M"))?;
+    let zoom_item = MenuItem::with_id(app, "maximize", l("Zoom", "缩放"), true, None::<&str>)?;
+
+    let new_local_item = MenuItem::with_id(app, "menu-new-local", l("Local Shell", "本地终端"), true, None::<&str>)?;
+    let new_ssh_item = MenuItem::with_id(app, "menu-new-ssh", l("SSH", "SSH"), true, None::<&str>)?;
+    let new_telnet_item = MenuItem::with_id(app, "menu-new-telnet", l("Telnet", "Telnet"), true, None::<&str>)?;
+    let new_serial_item = MenuItem::with_id(app, "menu-new-serial", l("Serial", "串口"), true, None::<&str>)?;
+    let close_tab_item = MenuItem::with_id(app, "menu-close-tab", l("Close Tab", "关闭标签页"), true, None::<&str>)?;
+    let settings_item = MenuItem::with_id(app, "menu-open-settings", l("Settings", "设置"), true, None::<&str>)?;
+    let cloud_sync_item = MenuItem::with_id(app, "menu-open-cloud-sync", l("Cloud Sync…", "云同步…"), true, None::<&str>)?;
+    let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
+    let command_palette_item = MenuItem::with_id(app, "menu-open-command-palette", l("Command Palette", "命令面板"), true, Some("Cmd+Shift+P"))?;
+    let toggle_remote_files_item = MenuItem::with_id(app, "menu-toggle-remote-files", l("Toggle Remote Files", "切换远程文件"), true, None::<&str>)?;
+    let toggle_tunnels_item = MenuItem::with_id(app, "menu-toggle-tunnels", l("Port Forwarding…", "端口转发…"), true, None::<&str>)?;
+    let increase_font_size_item = MenuItem::with_id(app, "menu-increase-font-size", l("Increase Terminal Font Size", "增大终端字号"), true, Some("Cmd+="))?;
+    let decrease_font_size_item = MenuItem::with_id(app, "menu-decrease-font-size", l("Decrease Terminal Font Size", "减小终端字号"), true, Some("Cmd+-"))?;
+    let reset_font_size_item = MenuItem::with_id(app, "menu-reset-font-size", l("Reset Terminal Font Size", "重置终端字号"), true, Some("Cmd+0"))?;
+    let exit_item = MenuItem::with_id(app, "exit", l("Exit", "退出"), true, None::<&str>)?;
+    let about_item = MenuItem::with_id(app, "about", l("About AuraTerm", "关于 AuraTerm"), true, None::<&str>)?;
+    let fullscreen_item = PredefinedMenuItem::fullscreen(app, None)?;
+
+    let undo_item = PredefinedMenuItem::undo(app, None)?;
+    let redo_item = PredefinedMenuItem::redo(app, None)?;
+    let cut_item = PredefinedMenuItem::cut(app, None)?;
+    let copy_item = PredefinedMenuItem::copy(app, None)?;
+    let paste_item = PredefinedMenuItem::paste(app, None)?;
+    let select_all_item = PredefinedMenuItem::select_all(app, None)?;
+
+    let new_session_menu = SubmenuBuilder::new(app, l("New Session", "新建会话"))
+        .item(&new_local_item)
+        .item(&new_ssh_item)
+        .item(&new_telnet_item)
+        .item(&new_serial_item)
+        .build()?;
+
+    let file_menu = SubmenuBuilder::new(app, l("File", "文件"))
+        .item(&new_session_menu)
+        .item(&close_tab_item)
+        .separator()
+        .item(&settings_item)
+        .item(&cloud_sync_item)
+        .separator()
+        .item(&exit_item)
+        .build()?;
+    let edit_menu = SubmenuBuilder::new(app, l("Edit", "编辑"))
+        .item(&undo_item)
+        .item(&redo_item)
+        .separator()
+        .item(&cut_item)
+        .item(&copy_item)
+        .item(&paste_item)
+        .item(&select_all_item)
+        .build()?;
+    let view_menu = SubmenuBuilder::new(app, l("View", "视图"))
+        .item(&toggle_bookmarks_item)
+        .item(&command_palette_item)
+        .separator()
+        .item(&increase_font_size_item)
+        .item(&decrease_font_size_item)
+        .item(&reset_font_size_item)
+        .separator()
+        .item(&fullscreen_item)
+        .build()?;
+    let tools_menu = SubmenuBuilder::new(app, l("Tools", "工具"))
+        .item(&toggle_remote_files_item)
+        .item(&toggle_tunnels_item)
+        .build()?;
+    let window_menu = SubmenuBuilder::new(app, l("Window", "窗口"))
+        .item(&new_window_item)
+        .item(&close_window_item)
+        .separator()
+        .item(&minimize_item)
+        .item(&zoom_item)
+        .build()?;
+    let help_menu = SubmenuBuilder::new(app, l("Help", "帮助"))
+        .item(&about_item)
+        .build()?;
+    MenuBuilder::new(app)
+        .item(&file_menu)
+        .item(&edit_menu)
+        .item(&view_menu)
+        .item(&tools_menu)
+        .item(&window_menu)
+        .item(&help_menu)
+        .build()
+}
+
+/// Rebuild the native menubar in the given locale. Invoked by the frontend
+/// whenever the UI language changes (and on startup to resolve `System`).
+/// No-op on platforms without a native app menu.
+#[command]
+fn set_menu_language(app: AppHandle, locale: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let menu = build_app_menu(&app, &locale).map_err(|e| e.to_string())?;
+        app.set_menu(menu).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (&app, &locale);
+    }
+    Ok(())
+}
+
 fn main() {
     // Parse command line arguments for startup directory
     let startup_dir = std::env::args()
@@ -897,114 +1017,13 @@ fn main() {
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
-
-                let new_window_item = MenuItem::with_id(_app, "menu-new-window", "New Window", true, Some("Cmd+N"))?;
-                let close_window_item = MenuItem::with_id(_app, "menu-close-window", "Close Window", true, Some("Cmd+W"))?;
-                let minimize_item = MenuItem::with_id(_app, "minimize", "Minimize", true, Some("Cmd+M"))?;
-                let zoom_item = MenuItem::with_id(_app, "maximize", "Zoom", true, None::<&str>)?;
-
-                let new_local_item = MenuItem::with_id(_app, "menu-new-local", "Local Shell", true, None::<&str>)?;
-                let new_ssh_item = MenuItem::with_id(_app, "menu-new-ssh", "SSH", true, None::<&str>)?;
-                let new_telnet_item = MenuItem::with_id(_app, "menu-new-telnet", "Telnet", true, None::<&str>)?;
-                let new_serial_item = MenuItem::with_id(_app, "menu-new-serial", "Serial", true, None::<&str>)?;
-                let close_tab_item = MenuItem::with_id(_app, "menu-close-tab", "Close Tab", true, None::<&str>)?;
-                let settings_item = MenuItem::with_id(_app, "menu-open-settings", "Settings", true, None::<&str>)?;
-                let cloud_sync_item = MenuItem::with_id(_app, "menu-open-cloud-sync", "Cloud Sync…", true, None::<&str>)?;
-                let toggle_bookmarks_item = MenuItem::with_id(_app, "menu-toggle-bookmarks", "Toggle Bookmarks", true, None::<&str>)?;
-                let command_palette_item = MenuItem::with_id(_app, "menu-open-command-palette", "Command Palette", true, Some("Cmd+Shift+P"))?;
-                let toggle_remote_files_item = MenuItem::with_id(_app, "menu-toggle-remote-files", "Toggle Remote Files", true, None::<&str>)?;
-                let toggle_tunnels_item = MenuItem::with_id(_app, "menu-toggle-tunnels", "Port Forwarding…", true, None::<&str>)?;
-                let increase_font_size_item = MenuItem::with_id(
-                    _app,
-                    "menu-increase-font-size",
-                    "Increase Terminal Font Size",
-                    true,
-                    Some("Cmd+="),
-                )?;
-                let decrease_font_size_item = MenuItem::with_id(
-                    _app,
-                    "menu-decrease-font-size",
-                    "Decrease Terminal Font Size",
-                    true,
-                    Some("Cmd+-"),
-                )?;
-                let reset_font_size_item = MenuItem::with_id(
-                    _app,
-                    "menu-reset-font-size",
-                    "Reset Terminal Font Size",
-                    true,
-                    Some("Cmd+0"),
-                )?;
-                let exit_item = MenuItem::with_id(_app, "exit", "Exit", true, None::<&str>)?;
-                let about_item = MenuItem::with_id(_app, "about", "About AuraTerm", true, None::<&str>)?;
-                let fullscreen_item = PredefinedMenuItem::fullscreen(_app, None)?;
-
-                let undo_item = PredefinedMenuItem::undo(_app, None)?;
-                let redo_item = PredefinedMenuItem::redo(_app, None)?;
-                let cut_item = PredefinedMenuItem::cut(_app, None)?;
-                let copy_item = PredefinedMenuItem::copy(_app, None)?;
-                let paste_item = PredefinedMenuItem::paste(_app, None)?;
-                let select_all_item = PredefinedMenuItem::select_all(_app, None)?;
-
-                let new_session_menu = SubmenuBuilder::new(_app, "New Session")
-                    .item(&new_local_item)
-                    .item(&new_ssh_item)
-                    .item(&new_telnet_item)
-                    .item(&new_serial_item)
-                    .build()?;
-
-                let file_menu = SubmenuBuilder::new(_app, "File")
-                    .item(&new_session_menu)
-                    .item(&close_tab_item)
-                    .separator()
-                    .item(&settings_item)
-                    .item(&cloud_sync_item)
-                    .separator()
-                    .item(&exit_item)
-                    .build()?;
-                let edit_menu = SubmenuBuilder::new(_app, "Edit")
-                    .item(&undo_item)
-                    .item(&redo_item)
-                    .separator()
-                    .item(&cut_item)
-                    .item(&copy_item)
-                    .item(&paste_item)
-                    .item(&select_all_item)
-                    .build()?;
-                let view_menu = SubmenuBuilder::new(_app, "View")
-                    .item(&toggle_bookmarks_item)
-                    .item(&command_palette_item)
-                    .separator()
-                    .item(&increase_font_size_item)
-                    .item(&decrease_font_size_item)
-                    .item(&reset_font_size_item)
-                    .separator()
-                    .item(&fullscreen_item)
-                    .build()?;
-                let tools_menu = SubmenuBuilder::new(_app, "Tools")
-                    .item(&toggle_remote_files_item)
-                    .item(&toggle_tunnels_item)
-                    .build()?;
-                let window_menu = SubmenuBuilder::new(_app, "Window")
-                    .item(&new_window_item)
-                    .item(&close_window_item)
-                    .separator()
-                    .item(&minimize_item)
-                    .item(&zoom_item)
-                    .build()?;
-                let help_menu = SubmenuBuilder::new(_app, "Help")
-                    .item(&about_item)
-                    .build()?;
-                let menu = MenuBuilder::new(_app)
-                    .item(&file_menu)
-                    .item(&edit_menu)
-                    .item(&view_menu)
-                    .item(&tools_menu)
-                    .item(&window_menu)
-                    .item(&help_menu)
-                    .build()?;
-
+                // Build the native menubar in the persisted language. `System`
+                // resolves to English here; the frontend re-applies the actual
+                // locale via `set_menu_language` once it loads (see App.vue).
+                let locale = settings::get_settings(_app.handle().clone())
+                    .map(|settings| settings.language.to_locale().to_string())
+                    .unwrap_or_else(|_| "en".to_string());
+                let menu = build_app_menu(_app.handle(), &locale)?;
                 _app.set_menu(menu)?;
             }
 
@@ -1119,6 +1138,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_version_info,
             get_startup_dir,
+            set_menu_language,
             start_pty,
             write_pty_input,
             write_pty_bytes,
