@@ -145,9 +145,37 @@ pub enum RendererMode {
     Dom,
 }
 
+/// Interface language. Mirrors the frontend `AppLanguage` type
+/// (`"system" | "en" | "zh-CN"`). `System` follows the OS/browser language and
+/// is resolved to a concrete locale on the frontend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Language {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en")]
+    En,
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+}
+
+impl Language {
+    /// Best-effort concrete locale for native UI (e.g. the macOS menubar) built
+    /// before the frontend resolves `System`. Defaults to English.
+    pub fn to_locale(self) -> &'static str {
+        match self {
+            Language::ZhCn => "zh-CN",
+            Language::System | Language::En => "en",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Interface language; `System` follows the OS language.
+    #[serde(default)]
+    pub language: Language,
     pub font_size: u8,
     pub font_family: String,
     pub scrollback: u32,
@@ -234,6 +262,7 @@ fn default_zmodem_download_path() -> String { "~/AuraTerm/downloads".to_string()
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: Language::System,
             font_size: 15,
             font_family: r#"Consolas, "Courier New", monospace"#.to_string(),
             scrollback: 10000,

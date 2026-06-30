@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { t } from "./i18n";
 import type { RemoteDirectoryListing, RemoteFileEntry, RemoteTransferMode, RemoteTransferProgress, SshConfig } from "./types";
 import "./RemoteFileManager.css";
 
@@ -92,11 +93,11 @@ const transferSummary = computed(() => {
 
   switch (transfer.value.status) {
     case "completed":
-      return transfer.value.direction === "upload" ? "Upload Completed" : "Download Completed";
+      return transfer.value.direction === "upload" ? t("remoteFiles.transferUploadCompleted") : t("remoteFiles.transferDownloadCompleted");
     case "failed":
-      return transfer.value.direction === "upload" ? "Upload Failed" : "Download Failed";
+      return transfer.value.direction === "upload" ? t("remoteFiles.transferUploadFailed") : t("remoteFiles.transferDownloadFailed");
     default:
-      return transfer.value.direction === "upload" ? "Uploading" : "Downloading";
+      return transfer.value.direction === "upload" ? t("remoteFiles.uploading") : t("remoteFiles.downloading");
   }
 });
 
@@ -104,7 +105,7 @@ const transferSourceLabel = computed(() => {
   if (!transfer.value) {
     return "";
   }
-  return transfer.value.direction === "upload" ? "Local File" : "Remote File";
+  return transfer.value.direction === "upload" ? t("remoteFiles.localFile") : t("remoteFiles.remoteFile");
 });
 
 const transferSourcePath = computed(() => {
@@ -121,7 +122,7 @@ const transferDestinationLabel = computed(() => {
   if (!transfer.value) {
     return "";
   }
-  return transfer.value.direction === "upload" ? "Remote Destination" : "Local Destination";
+  return transfer.value.direction === "upload" ? t("remoteFiles.remoteDestination") : t("remoteFiles.localDestination");
 });
 
 const transferDestinationPath = computed(() => {
@@ -183,7 +184,7 @@ function formatDate(timestamp?: number | null) {
 function describeError(error: unknown) {
   const message = String(error);
   if (message.toLowerCase().includes("not ready")) {
-    return "SSH session is still being established, please refresh later.";
+    return t("remoteFiles.sessionNotReady");
   }
   return message;
 }
@@ -321,7 +322,7 @@ async function uploadFiles(files: File[]) {
         item.id === queueItem.id ? { ...item, status: "completed" } : item
       ));
     }
-    setStatus(`Uploaded ${files.length} file(s) to ${currentPath.value || "."}`);
+    setStatus(t("remoteFiles.uploaded", { count: files.length, path: currentPath.value || "." }));
     await loadDirectory(currentPath.value);
   } catch (error) {
     uploadQueue.value = uploadQueue.value.map((item) => (
@@ -374,7 +375,7 @@ async function saveRemoteEditor() {
       content: editorContent.value,
     });
     editorOriginal.value = editorContent.value;
-    setStatus(`Saved ${editorName.value}`);
+    setStatus(t("remoteFiles.saved", { name: editorName.value }));
     await loadDirectory(currentPath.value);
   } catch (error) {
     setError(error);
@@ -384,7 +385,7 @@ async function saveRemoteEditor() {
 }
 
 function closeRemoteEditor() {
-  if (editorDirty.value && !window.confirm("Discard unsaved remote file changes?")) return;
+  if (editorDirty.value && !window.confirm(t("remoteFiles.confirmDiscardChanges"))) return;
   editorPath.value = null;
   editorName.value = "";
   editorContent.value = "";
@@ -392,7 +393,7 @@ function closeRemoteEditor() {
 }
 
 function closeManager() {
-  if (editorDirty.value && !window.confirm("Close Remote Files and discard unsaved changes?")) return;
+  if (editorDirty.value && !window.confirm(t("remoteFiles.confirmCloseDiscard"))) return;
   emit("close");
 }
 
@@ -433,7 +434,7 @@ async function downloadSelected() {
       mode: transferMode.value,
       resume: transferMode.value === "sftp" && resumeTransfers.value,
     });
-    setStatus(`Downloaded to ${localPath}`);
+    setStatus(t("remoteFiles.downloaded", { path: localPath }));
   } catch (error) {
     markTransferFailed(error);
     setError(error);
@@ -447,8 +448,8 @@ async function deleteSelected() {
     return;
   }
 
-  const label = selectedEntry.value.isDir ? "folder" : "file";
-  if (!window.confirm(`Are you sure you want to delete the ${label} "${selectedEntry.value.name}"?`)) {
+  const label = selectedEntry.value.isDir ? t("remoteFiles.labelFolder") : t("remoteFiles.labelFile");
+  if (!window.confirm(t("remoteFiles.confirmDelete", { label, name: selectedEntry.value.name }))) {
     return;
   }
 
@@ -459,7 +460,7 @@ async function deleteSelected() {
       path: selectedEntry.value.path,
       isDir: selectedEntry.value.isDir,
     });
-    setStatus(`Deleted ${selectedEntry.value.name}`);
+    setStatus(t("remoteFiles.deleted", { name: selectedEntry.value.name }));
     selectedPath.value = null;
     await loadDirectory(currentPath.value);
   } catch (error) {
@@ -470,7 +471,7 @@ async function deleteSelected() {
 }
 
 async function createFolder() {
-  const name = window.prompt("New Folder Name", "new-folder");
+  const name = window.prompt(t("remoteFiles.newFolderPrompt"), t("remoteFiles.newFolderDefault"));
   if (!name) {
     return;
   }
@@ -482,7 +483,7 @@ async function createFolder() {
       parentPath: currentPath.value || ".",
       name,
     });
-    setStatus(`Created folder ${name}`);
+    setStatus(t("remoteFiles.createdFolder", { name }));
     await loadDirectory(currentPath.value);
   } catch (error) {
     setError(error);
@@ -535,7 +536,7 @@ onBeforeUnmount(() => {
   <aside class="remote-file-manager">
     <div class="remote-file-manager-header">
       <div>
-        <div class="remote-file-manager-title">Remote Files</div>
+        <div class="remote-file-manager-title">{{ $t('remoteFiles.title') }}</div>
         <div class="remote-file-manager-subtitle">{{ sshConfig.user }}@{{ sshConfig.host }}:{{ sshConfig.port }}</div>
       </div>
       <button class="remote-file-manager-close" type="button" @click="closeManager">×</button>
@@ -560,40 +561,40 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="remote-file-manager-actions">
-        <button type="button" title="Go Up" :disabled="loading || busy || !parentPath" @click="void loadDirectory(parentPath)">
+        <button type="button" :title="$t('remoteFiles.goUp')" :disabled="loading || busy || !parentPath" @click="void loadDirectory(parentPath)">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
         </button>
-        <button type="button" title="Download" :disabled="loading || busy || !selectedEntry || selectedEntry.isDir" @click="void downloadSelected()">
+        <button type="button" :title="$t('remoteFiles.download')" :disabled="loading || busy || !selectedEntry || selectedEntry.isDir" @click="void downloadSelected()">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
         </button>
-        <button type="button" title="Upload" :disabled="loading || busy" @click="triggerUpload">
+        <button type="button" :title="$t('remoteFiles.upload')" :disabled="loading || busy" @click="triggerUpload">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
         </button>
-        <button type="button" title="Refresh" :disabled="loading || busy" @click="void loadDirectory(currentPath)">
+        <button type="button" :title="$t('remoteFiles.refresh')" :disabled="loading || busy" @click="void loadDirectory(currentPath)">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
         </button>
-        <button type="button" title="New Folder" :disabled="loading || busy" @click="void createFolder()">
+        <button type="button" :title="$t('remoteFiles.newFolder')" :disabled="loading || busy" @click="void createFolder()">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><line x1="12" x2="12" y1="10" y2="16"/><line x1="9" x2="15" y1="13" y2="13"/></svg>
         </button>
-        <button type="button" class="danger" title="Delete" :disabled="loading || busy || !selectedEntry" @click="void deleteSelected()">
+        <button type="button" class="danger" :title="$t('common.delete')" :disabled="loading || busy || !selectedEntry" @click="void deleteSelected()">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
         </button>
       </div>
 
       <label class="remote-file-manager-resume">
         <input v-model="resumeTransfers" type="checkbox" :disabled="transferMode !== 'sftp' || busy">
-        Resume partial SFTP transfers
+        {{ $t('remoteFiles.resumeTransfers') }}
       </label>
 
       <input ref="uploadInputRef" type="file" multiple hidden @change="handleUploadChange">
     </div>
 
     <div v-if="editorPath" class="remote-file-editor-toolbar">
-      <button type="button" :disabled="editorSaving" @click="closeRemoteEditor">Back</button>
+      <button type="button" :disabled="editorSaving" @click="closeRemoteEditor">{{ $t('remoteFiles.back') }}</button>
       <strong :title="editorPath">{{ editorName }}</strong>
-      <span v-if="editorDirty">Modified</span>
+      <span v-if="editorDirty">{{ $t('remoteFiles.modified') }}</span>
       <button type="button" :disabled="editorSaving || !editorDirty" @click="void saveRemoteEditor()">
-        {{ editorSaving ? 'Saving...' : 'Save' }}
+        {{ editorSaving ? $t('remoteFiles.saving') : $t('common.save') }}
       </button>
     </div>
 
@@ -618,15 +619,15 @@ onBeforeUnmount(() => {
       @dragleave.prevent="draggingFiles = false"
       @drop.prevent="handleFileDrop"
     >
-      <div v-if="draggingFiles" class="remote-file-manager-drop-hint">Drop files to upload to {{ currentPath }}</div>
+      <div v-if="draggingFiles" class="remote-file-manager-drop-hint">{{ $t('remoteFiles.dropHint', { path: currentPath }) }}</div>
       <div class="remote-file-manager-list-head">
-        <span>Name</span>
-        <span>Size</span>
-        <span>Modified</span>
+        <span>{{ $t('remoteFiles.colName') }}</span>
+        <span>{{ $t('remoteFiles.colSize') }}</span>
+        <span>{{ $t('remoteFiles.colModified') }}</span>
       </div>
 
-      <div v-if="loading" class="remote-file-manager-empty">Loading remote directory...</div>
-      <div v-else-if="entries.length === 0" class="remote-file-manager-empty">No files in this directory.</div>
+      <div v-if="loading" class="remote-file-manager-empty">{{ $t('remoteFiles.loadingDir') }}</div>
+      <div v-else-if="entries.length === 0" class="remote-file-manager-empty">{{ $t('remoteFiles.emptyDir') }}</div>
 
       <button
         v-for="entry in entries"
@@ -648,12 +649,12 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-else class="remote-file-editor">
-      <div v-if="editorLoading" class="remote-file-manager-empty">Loading remote text...</div>
+      <div v-if="editorLoading" class="remote-file-manager-empty">{{ $t('remoteFiles.loadingText') }}</div>
       <textarea
         v-else
         v-model="editorContent"
         class="remote-file-editor-textarea"
-        :aria-label="`Edit ${editorName}`"
+        :aria-label="$t('remoteFiles.editAria', { name: editorName })"
         autocapitalize="none"
         autocorrect="off"
         spellcheck="false"
@@ -692,14 +693,14 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="uploadQueue.length > 1" class="remote-file-manager-queue">
-        <div class="remote-file-manager-queue-title">Upload queue</div>
+        <div class="remote-file-manager-queue-title">{{ $t('remoteFiles.uploadQueue') }}</div>
         <div v-for="item in uploadQueue" :key="item.id" class="remote-file-manager-queue-item" :class="item.status">
           <span>{{ item.name }}</span><span>{{ item.status }}</span>
         </div>
       </div>
 
       <label class="remote-file-manager-download-dir">
-        <span>Download to</span>
+        <span>{{ $t('remoteFiles.downloadTo') }}</span>
         <input
           v-model="downloadDirectory"
           type="text"

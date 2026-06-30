@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { type SavedConnection } from "./types";
 import { buildBookmarkTree, flattenBookmarkTree } from "./bookmarks";
+import { t } from "./i18n";
 import BookmarkEditor from "./BookmarkEditor.vue";
 
 const props = withDefaults(defineProps<{
@@ -19,7 +20,7 @@ const emit = defineEmits<{
   connect: [connection: SavedConnection];
 }>();
 
-const RECENTLY_USED_LABEL = "Recently Used";
+const RECENTLY_USED_LABEL = computed(() => t("bookmarks.recentlyUsed"));
 
 function buildSubtitle(connection: SavedConnection) {
   if (connection.protocol === "serial") {
@@ -196,7 +197,7 @@ async function handleSaveConnection(normalized: SavedConnection) {
     console.error("Failed to save connection", error);
     // Note: Error handling is now partially inside BookmarkEditor, 
     // but we catch backend errors here.
-    alert(`Failed to save: ${error}`);
+    alert(t("bookmarks.saveFailed", { error: String(error) }));
   }
 }
 
@@ -204,7 +205,7 @@ async function handleImportFile(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
-  importMessage.value = "Importing...";
+  importMessage.value = t("bookmarks.importing");
   try {
     const format = file.name.toLowerCase().endsWith(".reg") ? "putty" : "openssh";
     const result = await invoke<BookmarkImportResult>("import_bookmarks", {
@@ -212,10 +213,11 @@ async function handleImportFile(event: Event) {
       content: await file.text(),
       group: null,
     });
-    importMessage.value = `Imported ${result.imported}; skipped ${result.skipped}${result.warnings.length ? `. ${result.warnings.join(" ")}` : ""}`;
+    importMessage.value = t("bookmarks.importResult", { imported: result.imported, skipped: result.skipped })
+      + (result.warnings.length ? `. ${result.warnings.join(" ")}` : "");
     await loadConnections();
   } catch (error) {
-    importMessage.value = `Import failed: ${String(error)}`;
+    importMessage.value = t("bookmarks.importFailed", { error: String(error) });
   } finally {
     input.value = "";
   }
@@ -225,11 +227,11 @@ async function handleImportFile(event: Event) {
 <template>
   <div class="bookmark-sidebar">
     <div class="bookmark-sidebar-header">
-      <span class="bookmark-sidebar-title">🔖 Quick Connect</span>
+      <span class="bookmark-sidebar-title">{{ $t('bookmarks.quickConnect') }}</span>
       <div class="bookmark-header-actions">
         <input ref="importFileInput" type="file" accept=".reg,.conf,.config,text/plain" hidden @change="handleImportFile">
-        <button class="bookmark-refresh-btn" title="Import OpenSSH config or PuTTY registry" @click="importFileInput?.click()">Import</button>
-        <button class="bookmark-refresh-btn" title="Refresh list" @click="() => loadConnections()">↻</button>
+        <button class="bookmark-refresh-btn" :title="$t('bookmarks.importTitle')" @click="importFileInput?.click()">{{ $t('bookmarks.import') }}</button>
+        <button class="bookmark-refresh-btn" :title="$t('bookmarks.refreshList')" @click="() => loadConnections()">↻</button>
       </div>
     </div>
 
@@ -240,7 +242,7 @@ async function handleImportFile(event: Event) {
         v-model="searchQuery"
         type="text"
         class="bookmark-search-input"
-        placeholder="Search bookmarks..."
+        :placeholder="$t('bookmarks.searchPlaceholder')"
         autocapitalize="none"
         autocorrect="off"
         spellcheck="false"
@@ -249,15 +251,14 @@ async function handleImportFile(event: Event) {
     </div>
 
     <div v-if="connections.length === 0" class="bookmark-empty">
-      No saved connections.
+      {{ $t('bookmarks.emptyTitle') }}
       <br>
-      Check "Save this connection" when
       <br>
-      creating a new session to add one.
+      {{ $t('bookmarks.emptyHint') }}
     </div>
 
     <div v-else-if="filteredConnections.length === 0" class="bookmark-empty">
-      No bookmarks match your search.
+      {{ $t('bookmarks.noMatch') }}
     </div>
 
     <div v-else class="bookmark-list">
@@ -274,7 +275,7 @@ async function handleImportFile(event: Event) {
             v-for="connection in recentlyUsed"
             :key="connection.id"
             class="bookmark-item"
-            :title="`${buildSubtitle(connection)}\nDouble-click to connect`"
+            :title="`${buildSubtitle(connection)}\n${$t('bookmarks.doubleClickToConnect')}`"
             @dblclick="handleDoubleClick(connection)"
             @contextmenu="handleContextMenu($event, connection)"
           >
@@ -305,7 +306,7 @@ async function handleImportFile(event: Event) {
           v-else
           class="bookmark-item"
           :style="{ paddingLeft: `${16 + row.depth * 14}px` }"
-          :title="`${buildSubtitle(row.connection)}\nDouble-click to connect`"
+          :title="`${buildSubtitle(row.connection)}\n${$t('bookmarks.doubleClickToConnect')}`"
           @dblclick="handleDoubleClick(row.connection)"
           @contextmenu="handleContextMenu($event, row.connection)"
         >
@@ -324,8 +325,8 @@ async function handleImportFile(event: Event) {
       class="bookmark-context-menu"
       :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
     >
-      <button class="bookmark-context-item" @click="openEditDialog(contextMenu.connection)">✏️ Edit</button>
-      <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection.id)">🗑 Delete</button>
+      <button class="bookmark-context-item" @click="openEditDialog(contextMenu.connection)">✏️ {{ $t('common.edit') }}</button>
+      <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection.id)">🗑 {{ $t('common.delete') }}</button>
     </div>
 
     <BookmarkEditor

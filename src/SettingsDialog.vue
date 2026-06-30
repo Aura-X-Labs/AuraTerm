@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { invoke } from "@tauri-apps/api/core";
 import { ref, computed, watch } from "vue";
+import { LANGUAGE_OPTIONS, t } from "./i18n";
 import {
   cloneTerminalTheme,
   getMatchingTerminalThemePreset,
@@ -37,52 +38,52 @@ type TrustedSshHostKeyEntry = {
 type ShellPresetValue = "auto" | "git-bash" | "powershell" | "cmd" | "custom";
 type ThemeColorKey = keyof TerminalTheme;
 
-// Shell preset options
-const shellPresets: Array<{ value: ShellPresetValue; label: string }> = [
-  { value: "auto", label: "Auto Detect (Git Bash → CMD)" },
-  { value: "git-bash", label: "Git Bash" },
-  { value: "powershell", label: "PowerShell" },
-  { value: "cmd", label: "Command Prompt (cmd.exe)" },
-  { value: "custom", label: "Custom Path" },
-];
+// Shell preset options (computed so labels follow the active locale).
+const shellPresets = computed<Array<{ value: ShellPresetValue; label: string }>>(() => [
+  { value: "auto", label: t("settings.shellPresets.auto") },
+  { value: "git-bash", label: t("settings.shellPresets.gitBash") },
+  { value: "powershell", label: t("settings.shellPresets.powershell") },
+  { value: "cmd", label: t("settings.shellPresets.cmd") },
+  { value: "custom", label: t("settings.shellPresets.custom") },
+]);
 
 const themePresets = TERMINAL_THEME_PRESETS;
-const uiThemeModeOptions: Array<{ value: UiThemeMode; label: string }> = [
-  { value: "follow-terminal", label: "Follow Terminal Theme" },
-  { value: "light", label: "Light UI" },
-  { value: "dark", label: "Dark UI" },
-];
-const rendererModeOptions: Array<{ value: RendererMode; label: string }> = [
-  { value: "auto", label: "Auto (GPU, fall back to DOM)" },
-  { value: "webgl", label: "WebGL (GPU)" },
-  { value: "dom", label: "DOM (compatibility)" },
-];
-const basicThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
-  { key: "background", label: "Background" },
-  { key: "foreground", label: "Foreground" },
-  { key: "cursor", label: "Cursor" },
-  { key: "selectionBackground", label: "Selection" },
-];
-const ansiThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
-  { key: "black", label: "Black" },
-  { key: "red", label: "Red" },
-  { key: "green", label: "Green" },
-  { key: "yellow", label: "Yellow" },
-  { key: "blue", label: "Blue" },
-  { key: "magenta", label: "Magenta" },
-  { key: "cyan", label: "Cyan" },
-  { key: "white", label: "White" },
-];
-const brightAnsiThemeFields: Array<{ key: ThemeColorKey; label: string }> = [
-  { key: "brightBlack", label: "Bright Black" },
-  { key: "brightRed", label: "Bright Red" },
-  { key: "brightGreen", label: "Bright Green" },
-  { key: "brightYellow", label: "Bright Yellow" },
-  { key: "brightBlue", label: "Bright Blue" },
-  { key: "brightMagenta", label: "Bright Magenta" },
-  { key: "brightCyan", label: "Bright Cyan" },
-  { key: "brightWhite", label: "Bright White" },
-];
+const uiThemeModeOptions = computed<Array<{ value: UiThemeMode; label: string }>>(() => [
+  { value: "follow-terminal", label: t("settings.uiThemeModes.followTerminal") },
+  { value: "light", label: t("settings.uiThemeModes.light") },
+  { value: "dark", label: t("settings.uiThemeModes.dark") },
+]);
+const rendererModeOptions = computed<Array<{ value: RendererMode; label: string }>>(() => [
+  { value: "auto", label: t("settings.renderers.auto") },
+  { value: "webgl", label: t("settings.renderers.webgl") },
+  { value: "dom", label: t("settings.renderers.dom") },
+]);
+const basicThemeFields = computed<Array<{ key: ThemeColorKey; label: string }>>(() => [
+  { key: "background", label: t("settings.colors.background") },
+  { key: "foreground", label: t("settings.colors.foreground") },
+  { key: "cursor", label: t("settings.colors.cursor") },
+  { key: "selectionBackground", label: t("settings.colors.selection") },
+]);
+const ansiThemeFields = computed<Array<{ key: ThemeColorKey; label: string }>>(() => [
+  { key: "black", label: t("settings.colors.black") },
+  { key: "red", label: t("settings.colors.red") },
+  { key: "green", label: t("settings.colors.green") },
+  { key: "yellow", label: t("settings.colors.yellow") },
+  { key: "blue", label: t("settings.colors.blue") },
+  { key: "magenta", label: t("settings.colors.magenta") },
+  { key: "cyan", label: t("settings.colors.cyan") },
+  { key: "white", label: t("settings.colors.white") },
+]);
+const brightAnsiThemeFields = computed<Array<{ key: ThemeColorKey; label: string }>>(() => [
+  { key: "brightBlack", label: t("settings.colors.brightBlack") },
+  { key: "brightRed", label: t("settings.colors.brightRed") },
+  { key: "brightGreen", label: t("settings.colors.brightGreen") },
+  { key: "brightYellow", label: t("settings.colors.brightYellow") },
+  { key: "brightBlue", label: t("settings.colors.brightBlue") },
+  { key: "brightMagenta", label: t("settings.colors.brightMagenta") },
+  { key: "brightCyan", label: t("settings.colors.brightCyan") },
+  { key: "brightWhite", label: t("settings.colors.brightWhite") },
+]);
 
 // Determine which preset is selected based on shellPath
 const selectedShellPreset = computed<ShellPresetValue>({
@@ -125,27 +126,27 @@ const showCustomPath = computed(() => selectedShellPreset.value === "custom");
 const selectedThemePresetId = computed(() => getMatchingTerminalThemePreset(settings.value.theme)?.id ?? "custom");
 const selectedThemePresetDescription = computed(() => {
   const matchedPreset = getMatchingTerminalThemePreset(settings.value.theme);
-  return matchedPreset?.description ?? "Custom palette based on the colors below.";
+  return matchedPreset?.description ?? t("settings.customPaletteDesc");
 });
 const selectedUiThemeModeDescription = computed(() => {
   switch (settings.value.uiThemeMode) {
     case "light":
-      return "Use a dedicated light office UI, independent from the terminal preset.";
+      return t("settings.uiThemeModeDesc.light");
     case "dark":
-      return "Use a dedicated dark UI, independent from the terminal preset.";
+      return t("settings.uiThemeModeDesc.dark");
     default:
-      return "Let the app UI follow the terminal theme appearance and accent direction.";
+      return t("settings.uiThemeModeDesc.follow");
   }
 });
 
 const selectedRendererModeDescription = computed(() => {
   switch (settings.value.rendererMode) {
     case "dom":
-      return "Always use the DOM renderer. Most compatible, but slowest on heavy output.";
+      return t("settings.rendererDesc.dom");
     case "webgl":
-      return "Use the WebGL (GPU) renderer for the visible terminal. Falls back to DOM if the GPU context is lost.";
+      return t("settings.rendererDesc.webgl");
     default:
-      return "Recommended. Use the WebGL (GPU) renderer for the visible terminal, automatically falling back to DOM when WebGL is unavailable.";
+      return t("settings.rendererDesc.auto");
   }
 });
 
@@ -298,7 +299,7 @@ async function removeTrustedHostKey(entry: TrustedSshHostKeyEntry) {
 }
 
 async function resetTrustedHostKeys() {
-  const confirmed = window.confirm("Remove all trusted SSH host fingerprints?");
+  const confirmed = window.confirm(t("settings.security.confirmResetHostKeys"));
   if (!confirmed) {
     return;
   }
@@ -472,11 +473,11 @@ async function lockMasterPasswordNow() {
   lockingMasterPassword.value = true;
   try {
     await invoke("lock_master_password");
-    window.alert("Master password locked. The application will now reload.");
+    window.alert(t("settings.security.masterPasswordLocked"));
     window.location.reload();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    window.alert(`Failed to lock master password: ${message}`);
+    window.alert(t("settings.security.lockFailed", { error: message }));
   } finally {
     lockingMasterPassword.value = false;
   }
@@ -620,7 +621,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
   <div class="settings-overlay" @click="emit('cancel')">
     <div class="settings-dialog" @click.stop>
       <div class="settings-header">
-        <h2>Settings</h2>
+        <h2>{{ $t('settings.title') }}</h2>
         <button class="settings-close-btn" type="button" @click="emit('cancel')">×</button>
       </div>
 
@@ -629,34 +630,44 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           :class="['settings-tab', { 'settings-tab--active': activeTab === 'terminal' }]"
           type="button"
           @click="activeTab = 'terminal'"
-        >Terminal</button>
+        >{{ $t('settings.tabs.terminal') }}</button>
         <button
           :class="['settings-tab', { 'settings-tab--active': activeTab === 'keyboard' }]"
           type="button"
           @click="activeTab = 'keyboard'"
-        >Keyboard & Mouse</button>
+        >{{ $t('settings.tabs.keyboard') }}</button>
         <button
           :class="['settings-tab', { 'settings-tab--active': activeTab === 'theme' }]"
           type="button"
           @click="activeTab = 'theme'"
-        >Theme</button>
+        >{{ $t('settings.tabs.theme') }}</button>
         <button
           :class="['settings-tab', { 'settings-tab--active': activeTab === 'automation' }]"
           type="button"
           @click="activeTab = 'automation'"
-        >Rules</button>
+        >{{ $t('settings.tabs.rules') }}</button>
         <button
           :class="['settings-tab', { 'settings-tab--active': activeTab === 'security' }]"
           type="button"
           @click="activeTab = 'security'"
-        >Security</button>
+        >{{ $t('settings.tabs.security') }}</button>
       </div>
 
       <div class="settings-body">
         <!-- Terminal Tab -->
         <div v-show="activeTab === 'terminal'" class="settings-section">
+          <label class="settings-field settings-field--stacked">
+            <span>{{ $t('language.label') }}</span>
+            <select :value="settings.language" @change="update('language', inputValue($event) as AppSettings['language'])">
+              <option v-for="option in LANGUAGE_OPTIONS" :key="option.value" :value="option.value">
+                {{ option.value === 'system' ? $t('language.system') : option.nativeLabel }}
+              </option>
+            </select>
+          </label>
+          <div class="settings-field-full-hint">{{ $t('language.hint') }}</div>
+
           <label class="settings-field">
-            <span>Font Size</span>
+            <span>{{ $t('settings.fontSize') }}</span>
             <input
               type="number"
               min="8"
@@ -667,7 +678,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
 
           <label class="settings-field">
-            <span>Font Family</span>
+            <span>{{ $t('settings.fontFamily') }}</span>
             <input
               type="text"
               :value="settings.fontFamily"
@@ -679,7 +690,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
 
           <label class="settings-field">
-            <span>Scrollback Lines</span>
+            <span>{{ $t('settings.scrollbackLines') }}</span>
             <input
               type="number"
               min="100"
@@ -691,7 +702,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
 
           <label class="settings-field settings-field--stacked">
-            <span>Terminal Renderer</span>
+            <span>{{ $t('settings.terminalRenderer') }}</span>
             <select :value="settings.rendererMode" @change="handleRendererModeChange">
               <option v-for="option in rendererModeOptions" :key="option.value" :value="option.value">
                 {{ option.label }}
@@ -701,7 +712,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           <div class="settings-field-full-hint">{{ selectedRendererModeDescription }}</div>
 
           <label class="settings-field">
-            <span>Shell</span>
+            <span>{{ $t('settings.shell') }}</span>
             <select :value="selectedShellPreset" @change="handleShellPresetChange">
               <option v-for="preset in shellPresets" :key="preset.value" :value="preset.value">
                 {{ preset.label }}
@@ -710,7 +721,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
 
           <label v-if="showCustomPath" class="settings-field">
-            <span>Custom Shell Path</span>
+            <span>{{ $t('settings.customShellPath') }}</span>
             <input
               type="text"
               placeholder="e.g., C:\Program Files\Git\bin\bash.exe"
@@ -723,7 +734,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
 
           <label class="settings-field">
-            <span>Default Log Save Path</span>
+            <span>{{ $t('settings.defaultLogSavePath') }}</span>
             <input
               type="text"
               placeholder="e.g., ~/AuraTerm/logs"
@@ -736,7 +747,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
 
           <label class="settings-field">
-            <span>Default Log Filename Template</span>
+            <span>{{ $t('settings.defaultLogFilenameTemplate') }}</span>
             <input
               type="text"
               placeholder="e.g., {timestamp}_{session}"
@@ -747,14 +758,14 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               spellcheck="false"
             >
           </label>
-          <div class="settings-field-full-hint">Available placeholders: {timestamp}, {datetime}, {date}, {time}, {yyyy}, {MM}, {dd}, {HH}, {mm}, {ss}, {unix}, {session}, {protocol}, {host}, {user}, {port}, {serialPort}, {baudRate}</div>
+          <div class="settings-field-full-hint">{{ $t('settings.logPlaceholders') }}</div>
 
 
 
           <label class="settings-field settings-field--toggle">
             <span>
-              <strong>Show Input Bar</strong>
-              <small>Show input bar and snippet toolbars below the terminal</small>
+              <strong>{{ $t('settings.showInputBar') }}</strong>
+              <small>{{ $t('settings.showInputBarHint') }}</small>
             </span>
             <input
               type="checkbox"
@@ -765,7 +776,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
 
           <label class="settings-field settings-field--full">
-            <span>Zmodem download directory</span>
+            <span>{{ $t('settings.zmodemDownloadDir') }}</span>
             <input
               type="text"
               :value="settings.zmodemDownloadPath"
@@ -775,13 +786,13 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               autocorrect="off"
               spellcheck="false"
             >
-            <small>Files sent by remote <code>sz</code> sessions are saved here automatically.</small>
+            <small>{{ $t('settings.zmodemDownloadHint') }}</small>
           </label>
 
           <label class="settings-field settings-field--toggle">
             <span>
-              <strong>Open SFTP after SSH connects</strong>
-              <small>Automatically reveal Remote Files for the active SSH session</small>
+              <strong>{{ $t('settings.openSftpAfterSsh') }}</strong>
+              <small>{{ $t('settings.openSftpAfterSshHint') }}</small>
             </span>
             <input
               type="checkbox"
@@ -793,8 +804,8 @@ async function toggleRememberMasterPassword(enabled: boolean) {
 
           <label class="settings-field settings-field--toggle">
             <span>
-              <strong>Restore Session Tabs On Startup</strong>
-              <small>Restore all open tabs and pane layout after restarting AuraTerm</small>
+              <strong>{{ $t('settings.restoreTabs') }}</strong>
+              <small>{{ $t('settings.restoreTabsHint') }}</small>
             </span>
             <input
               type="checkbox"
@@ -809,8 +820,8 @@ async function toggleRememberMasterPassword(enabled: boolean) {
         <div v-show="activeTab === 'keyboard'" class="settings-section">
           <label class="settings-field settings-field--toggle">
             <span>
-              <strong>Copy on select</strong>
-              <small>Auto-copy selected text to clipboard; Ctrl+C consumes key when selection exists (no ^C to PTY)</small>
+              <strong>{{ $t('settings.copyOnSelect') }}</strong>
+              <small>{{ $t('settings.copyOnSelectHint') }}</small>
             </span>
             <input
               type="checkbox"
@@ -822,8 +833,8 @@ async function toggleRememberMasterPassword(enabled: boolean) {
 
           <label class="settings-field settings-field--toggle">
             <span>
-              <strong>Ctrl+V</strong> Paste from clipboard
-              <small>Ctrl+V pastes clipboard content to terminal</small>
+              <strong>{{ $t('settings.ctrlVPaste') }}</strong>
+              <small>{{ $t('settings.ctrlVPasteHint') }}</small>
             </span>
             <input
               type="checkbox"
@@ -835,8 +846,8 @@ async function toggleRememberMasterPassword(enabled: boolean) {
 
           <label class="settings-field settings-field--toggle">
             <span>
-              <strong>Middle-click</strong> Paste
-              <small>Middle-click pastes clipboard content to terminal</small>
+              <strong>{{ $t('settings.middleClickPaste') }}</strong>
+              <small>{{ $t('settings.middleClickPasteHint') }}</small>
             </span>
             <input
               type="checkbox"
@@ -850,7 +861,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
         <!-- Theme Tab -->
         <div v-show="activeTab === 'theme'" class="settings-section">
           <label class="settings-field settings-field--stacked">
-            <span>UI Style</span>
+            <span>{{ $t('settings.uiStyle') }}</span>
             <div class="settings-theme-preset-row">
               <select :value="settings.uiThemeMode" @change="handleUiThemeModeChange">
                 <option v-for="option in uiThemeModeOptions" :key="option.value" :value="option.value">
@@ -863,15 +874,15 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           <div class="settings-field-full-hint">{{ selectedUiThemeModeDescription }}</div>
 
           <label class="settings-field settings-field--stacked">
-            <span>Terminal Preset</span>
+            <span>{{ $t('settings.terminalPreset') }}</span>
             <div class="settings-theme-preset-row">
               <select :value="selectedThemePresetId" @change="handleThemePresetChange">
                 <option v-for="preset in themePresets" :key="preset.id" :value="preset.id">
                   {{ preset.label }}
                 </option>
-                <option value="custom">Custom</option>
+                <option value="custom">{{ $t('settings.custom') }}</option>
               </select>
-              <button class="settings-btn-secondary" type="button" @click="resetThemeToDefault">Reset</button>
+              <button class="settings-btn-secondary" type="button" @click="resetThemeToDefault">{{ $t('common.reset') }}</button>
             </div>
           </label>
 
@@ -886,8 +897,8 @@ async function toggleRememberMasterPassword(enabled: boolean) {
             }"
           >
             <div class="settings-theme-preview-title-row">
-              <strong>Preview</strong>
-              <span>{{ selectedThemePresetId === 'custom' ? 'Custom palette' : 'Preset palette' }}</span>
+              <strong>{{ $t('settings.preview') }}</strong>
+              <span>{{ selectedThemePresetId === 'custom' ? $t('settings.customPalette') : $t('settings.presetPalette') }}</span>
             </div>
             <div class="settings-theme-preview-line">
               <span :style="{ color: settings.theme.green }">user@auraterm</span>
@@ -901,19 +912,19 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               <span :style="{ color: settings.theme.cyan }">src/TerminalComponent.vue</span>
             </div>
             <div class="settings-theme-swatches">
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.red }" title="Red"></span>
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.green }" title="Green"></span>
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.yellow }" title="Yellow"></span>
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.blue }" title="Blue"></span>
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.magenta }" title="Magenta"></span>
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.cyan }" title="Cyan"></span>
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.brightRed }" title="Bright Red"></span>
-              <span class="settings-theme-swatch" :style="{ background: settings.theme.brightBlue }" title="Bright Blue"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.red }" :title="$t('settings.colors.red')"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.green }" :title="$t('settings.colors.green')"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.yellow }" :title="$t('settings.colors.yellow')"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.blue }" :title="$t('settings.colors.blue')"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.magenta }" :title="$t('settings.colors.magenta')"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.cyan }" :title="$t('settings.colors.cyan')"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.brightRed }" :title="$t('settings.colors.brightRed')"></span>
+              <span class="settings-theme-swatch" :style="{ background: settings.theme.brightBlue }" :title="$t('settings.colors.brightBlue')"></span>
             </div>
           </div>
 
           <div class="settings-theme-subsection">
-            <div class="settings-theme-subtitle">Core colors</div>
+            <div class="settings-theme-subtitle">{{ $t('settings.coreColors') }}</div>
             <div class="settings-theme-grid">
               <label v-for="field in basicThemeFields" :key="field.key" class="settings-theme-grid-item">
                 <span>{{ field.label }}</span>
@@ -933,7 +944,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </div>
 
           <div class="settings-theme-subsection">
-            <div class="settings-theme-subtitle">ANSI colors</div>
+            <div class="settings-theme-subtitle">{{ $t('settings.ansiColors') }}</div>
             <div class="settings-theme-grid">
               <label v-for="field in ansiThemeFields" :key="field.key" class="settings-theme-grid-item">
                 <span>{{ field.label }}</span>
@@ -953,7 +964,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </div>
 
           <div class="settings-theme-subsection">
-            <div class="settings-theme-subtitle">Bright ANSI colors</div>
+            <div class="settings-theme-subtitle">{{ $t('settings.brightAnsiColors') }}</div>
             <div class="settings-theme-grid">
               <label v-for="field in brightAnsiThemeFields" :key="field.key" class="settings-theme-grid-item">
                 <span>{{ field.label }}</span>
@@ -977,67 +988,67 @@ async function toggleRememberMasterPassword(enabled: boolean) {
         <div v-show="activeTab === 'automation'" class="settings-section settings-rules-section">
           <div class="settings-rules-header">
             <div>
-              <strong>Output Rules</strong>
-              <small>One matcher powers highlighting, alerts, and automatic responses.</small>
+              <strong>{{ $t('settings.rules.title') }}</strong>
+              <small>{{ $t('settings.rules.subtitle') }}</small>
             </div>
             <div class="settings-rules-header-actions">
-              <button class="settings-btn-secondary" type="button" @click="void enableDesktopNotifications()">Enable notifications</button>
-              <button class="settings-btn-primary" type="button" @click="addOutputRule">+ Add rule</button>
+              <button class="settings-btn-secondary" type="button" @click="void enableDesktopNotifications()">{{ $t('settings.rules.enableNotifications') }}</button>
+              <button class="settings-btn-primary" type="button" @click="addOutputRule">{{ $t('settings.rules.addRule') }}</button>
             </div>
           </div>
 
           <div v-if="settings.outputRules.length === 0" class="settings-field-full-hint">
-            No output rules yet. Add one to highlight keywords or react to terminal output.
+            {{ $t('settings.rules.empty') }}
           </div>
 
           <div v-for="rule in settings.outputRules" :key="rule.id" class="settings-rule-card">
             <div class="settings-rule-card-title">
               <label class="settings-rule-enabled">
                 <input type="checkbox" :checked="rule.enabled" @change="updateOutputRule(rule.id, 'enabled', inputChecked($event))">
-                <input type="text" :value="rule.name" placeholder="Rule name" @input="updateOutputRule(rule.id, 'name', inputValue($event))">
+                <input type="text" :value="rule.name" :placeholder="$t('settings.rules.ruleName')" @input="updateOutputRule(rule.id, 'name', inputValue($event))">
               </label>
-              <button class="settings-btn-danger" type="button" @click="removeOutputRule(rule.id)">Delete</button>
+              <button class="settings-btn-danger" type="button" @click="removeOutputRule(rule.id)">{{ $t('common.delete') }}</button>
             </div>
             <div class="settings-rule-grid">
               <label class="settings-field settings-field--stacked settings-rule-pattern">
-                <span>Pattern</span>
+                <span>{{ $t('settings.rules.pattern') }}</span>
                 <input type="text" :value="rule.pattern" autocapitalize="none" autocorrect="off" spellcheck="false" @input="updateOutputRule(rule.id, 'pattern', inputValue($event))">
                 <small v-if="outputRulePatternError(rule)" class="settings-rule-error">{{ outputRulePatternError(rule) }}</small>
               </label>
               <label class="settings-field settings-field--stacked">
-                <span>Scope</span>
+                <span>{{ $t('settings.rules.scope') }}</span>
                 <select :value="rule.scope" @change="updateOutputRule(rule.id, 'scope', inputValue($event) === 'hosts' ? 'hosts' : 'global')">
-                  <option value="global">All sessions</option>
-                  <option value="hosts">SSH hosts</option>
+                  <option value="global">{{ $t('settings.rules.scopeAll') }}</option>
+                  <option value="hosts">{{ $t('settings.rules.scopeHosts') }}</option>
                 </select>
               </label>
               <label v-if="rule.scope === 'hosts'" class="settings-field settings-field--stacked settings-rule-hosts">
-                <span>Host patterns (comma separated)</span>
+                <span>{{ $t('settings.rules.hostPatterns') }}</span>
                 <input type="text" :value="rule.hosts.join(', ')" placeholder="prod-*, router.example.com" @input="updateOutputRule(rule.id, 'hosts', parseHostPatterns(inputValue($event)))">
               </label>
             </div>
             <div class="settings-rule-options">
-              <label><input type="checkbox" :checked="rule.isRegex" @change="updateOutputRule(rule.id, 'isRegex', inputChecked($event))"> Regular expression</label>
-              <label><input type="checkbox" :checked="rule.caseSensitive" @change="updateOutputRule(rule.id, 'caseSensitive', inputChecked($event))"> Case sensitive</label>
-              <label><input type="checkbox" :checked="Boolean(rule.foreground || rule.background)" @change="updateOutputRule(rule.id, 'foreground', inputChecked($event) ? (rule.foreground || '#ff6b6b') : undefined); !inputChecked($event) && updateOutputRule(rule.id, 'background', undefined)"> Highlight</label>
-              <label><input type="checkbox" :checked="rule.bell" @change="updateOutputRule(rule.id, 'bell', inputChecked($event))"> Bell</label>
-              <label><input type="checkbox" :checked="rule.notify" @change="updateOutputRule(rule.id, 'notify', inputChecked($event))"> Notification</label>
+              <label><input type="checkbox" :checked="rule.isRegex" @change="updateOutputRule(rule.id, 'isRegex', inputChecked($event))"> {{ $t('settings.rules.regex') }}</label>
+              <label><input type="checkbox" :checked="rule.caseSensitive" @change="updateOutputRule(rule.id, 'caseSensitive', inputChecked($event))"> {{ $t('settings.rules.caseSensitive') }}</label>
+              <label><input type="checkbox" :checked="Boolean(rule.foreground || rule.background)" @change="updateOutputRule(rule.id, 'foreground', inputChecked($event) ? (rule.foreground || '#ff6b6b') : undefined); !inputChecked($event) && updateOutputRule(rule.id, 'background', undefined)"> {{ $t('settings.rules.highlight') }}</label>
+              <label><input type="checkbox" :checked="rule.bell" @change="updateOutputRule(rule.id, 'bell', inputChecked($event))"> {{ $t('settings.rules.bell') }}</label>
+              <label><input type="checkbox" :checked="rule.notify" @change="updateOutputRule(rule.id, 'notify', inputChecked($event))"> {{ $t('settings.rules.notification') }}</label>
             </div>
             <div class="settings-rule-grid">
               <label class="settings-field settings-field--stacked">
-                <span>Text color</span>
+                <span>{{ $t('settings.rules.textColor') }}</span>
                 <input type="color" :disabled="!rule.foreground && !rule.background" :value="rule.foreground || '#ff6b6b'" @input="updateOutputRule(rule.id, 'foreground', inputValue($event))">
               </label>
               <label class="settings-field settings-field--stacked">
-                <span>Background (optional)</span>
+                <span>{{ $t('settings.rules.backgroundOptional') }}</span>
                 <input type="text" :value="rule.background || ''" placeholder="#3b2020" @input="updateOutputRule(rule.id, 'background', inputValue($event) || undefined)">
               </label>
               <label class="settings-field settings-field--stacked settings-rule-response">
-                <span>Automatic response (optional, $1 uses capture group)</span>
+                <span>{{ $t('settings.rules.autoResponse') }}</span>
                 <input type="text" :value="rule.autoResponse || ''" placeholder="ack $1\n" @input="updateOutputRule(rule.id, 'autoResponse', inputValue($event) || undefined)">
               </label>
               <label class="settings-field settings-field--stacked">
-                <span>Cooldown (ms)</span>
+                <span>{{ $t('settings.rules.cooldown') }}</span>
                 <input type="number" min="0" :value="rule.cooldownMs" @input="updateOutputRule(rule.id, 'cooldownMs', Math.max(0, Number(inputValue($event)) || 0))">
               </label>
             </div>
@@ -1049,15 +1060,13 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           <!-- Master Password -->
           <div class="settings-security-header">
             <div>
-              <div class="settings-security-title">Master Password</div>
+              <div class="settings-security-title">{{ $t('settings.security.masterPassword') }}</div>
               <div class="settings-security-subtitle">
                 <template v-if="credentialState.passwordEnabled">
-                  A master password is set; saved credentials are encrypted with it.
+                  {{ $t('settings.security.masterPasswordSetDesc') }}
                 </template>
                 <template v-else>
-                  No master password — credentials are encrypted with a device-local key and the
-                  app never prompts on startup. Anyone able to sign in as you can read them, so keep
-                  an encrypted backup (below).
+                  {{ $t('settings.security.masterPasswordNoneDesc') }}
                 </template>
               </div>
             </div>
@@ -1068,24 +1077,24 @@ async function toggleRememberMasterPassword(enabled: boolean) {
 
           <!-- No password: offer to enable one -->
           <div v-if="!credentialState.passwordEnabled" class="settings-backup-card" style="margin-top: 12px;">
-            <div class="settings-backup-card-title">Set a master password</div>
+            <div class="settings-backup-card-title">{{ $t('settings.security.setMasterPassword') }}</div>
             <div class="settings-backup-card-desc">
-              You'll enter it on launch (or have it remembered on this device).
+              {{ $t('settings.security.setMasterPasswordDesc') }}
             </div>
             <div class="settings-form-row">
-              <label>New password (min 8 chars)</label>
+              <label>{{ $t('settings.security.newPassword') }}</label>
               <input v-model="enableNewPassword" type="password" autocomplete="new-password" :disabled="mpBusy" />
             </div>
             <div class="settings-form-row">
-              <label>Confirm password</label>
+              <label>{{ $t('settings.security.confirmPassword') }}</label>
               <input v-model="enableConfirm" type="password" autocomplete="new-password" :disabled="mpBusy" />
             </div>
             <label v-if="credentialState.rememberAvailable" class="settings-remember-row">
               <input v-model="enableRemember" type="checkbox" :disabled="mpBusy" />
-              <span>Remember on this device (auto-unlock via system keychain)</span>
+              <span>{{ $t('settings.security.rememberDevice') }}</span>
             </label>
             <button class="settings-btn-primary" type="button" :disabled="mpBusy" @click="enableMasterPassword">
-              {{ mpBusy ? 'Working...' : 'Enable Master Password' }}
+              {{ mpBusy ? $t('settings.security.working') : $t('settings.security.enableMasterPassword') }}
             </button>
           </div>
 
@@ -1098,43 +1107,43 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 :disabled="mpBusy"
                 @change="toggleRememberMasterPassword(($event.target as HTMLInputElement).checked)"
               />
-              <span>Remember on this device (auto-unlock via system keychain)</span>
+              <span>{{ $t('settings.security.rememberDevice') }}</span>
             </label>
             <div v-else class="settings-backup-card-desc" style="margin: 12px 0 16px;">
-              Auto-unlock via the system keychain is available on macOS and Windows only.
+              {{ $t('settings.security.rememberUnavailable') }}
             </div>
 
             <div class="settings-backup-grid">
               <div class="settings-backup-card">
-                <div class="settings-backup-card-title">Change Password</div>
+                <div class="settings-backup-card-title">{{ $t('settings.security.changePassword') }}</div>
                 <div class="settings-form-row">
-                  <label>Current password</label>
+                  <label>{{ $t('settings.security.currentPassword') }}</label>
                   <input v-model="changeCurrent" type="password" autocomplete="off" :disabled="mpBusy" />
                 </div>
                 <div class="settings-form-row">
-                  <label>New password (min 8 chars)</label>
+                  <label>{{ $t('settings.security.newPassword') }}</label>
                   <input v-model="changeNew" type="password" autocomplete="new-password" :disabled="mpBusy" />
                 </div>
                 <div class="settings-form-row">
-                  <label>Confirm new password</label>
+                  <label>{{ $t('settings.security.confirmNewPassword') }}</label>
                   <input v-model="changeConfirm" type="password" autocomplete="new-password" :disabled="mpBusy" />
                 </div>
                 <button class="settings-btn-primary" type="button" :disabled="mpBusy" @click="changeMasterPassword">
-                  {{ mpBusy ? 'Working...' : 'Change Password' }}
+                  {{ mpBusy ? $t('settings.security.working') : $t('settings.security.changePassword') }}
                 </button>
               </div>
 
               <div class="settings-backup-card">
-                <div class="settings-backup-card-title">Remove Password</div>
+                <div class="settings-backup-card-title">{{ $t('settings.security.removePassword') }}</div>
                 <div class="settings-backup-card-desc">
-                  Switch back to a device-local key (no prompt on startup).
+                  {{ $t('settings.security.removePasswordDesc') }}
                 </div>
                 <div class="settings-form-row">
-                  <label>Current password</label>
+                  <label>{{ $t('settings.security.currentPassword') }}</label>
                   <input v-model="disableCurrent" type="password" autocomplete="off" :disabled="mpBusy" />
                 </div>
                 <button class="settings-btn-secondary settings-btn-danger" type="button" :disabled="mpBusy" @click="disableMasterPassword">
-                  {{ mpBusy ? 'Working...' : 'Remove Master Password' }}
+                  {{ mpBusy ? $t('settings.security.working') : $t('settings.security.removeMasterPassword') }}
                 </button>
               </div>
             </div>
@@ -1142,14 +1151,14 @@ async function toggleRememberMasterPassword(enabled: boolean) {
 
           <div class="settings-security-header" style="margin-top: 32px;">
             <div>
-              <div class="settings-security-title">Trusted SSH Host Fingerprints</div>
+              <div class="settings-security-title">{{ $t('settings.security.trustedHosts') }}</div>
               <div class="settings-security-subtitle">
-                Review and manage fingerprints saved for host verification.
+                {{ $t('settings.security.trustedHostsDesc') }}
               </div>
             </div>
             <div class="settings-security-actions">
               <button class="settings-btn-secondary" type="button" @click="refreshTrustedHostKeys" :disabled="trustedHostKeysLoading">
-                Refresh
+                {{ $t('settings.security.refresh') }}
               </button>
               <button
                 class="settings-btn-secondary settings-btn-danger"
@@ -1157,17 +1166,17 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 @click="resetTrustedHostKeys"
                 :disabled="resettingHostKeys || trustedHostKeysLoading || trustedHostKeys.length === 0"
               >
-                {{ resettingHostKeys ? 'Resetting...' : 'Reset All' }}
+                {{ resettingHostKeys ? $t('settings.security.resetting') : $t('settings.security.resetAll') }}
               </button>
             </div>
           </div>
 
           <div v-if="trustedHostKeysError" class="settings-security-error">{{ trustedHostKeysError }}</div>
 
-          <div v-if="trustedHostKeysLoading" class="settings-security-loading">Loading trusted host keys...</div>
+          <div v-if="trustedHostKeysLoading" class="settings-security-loading">{{ $t('settings.security.loadingHostKeys') }}</div>
 
           <div v-else-if="trustedHostKeys.length === 0" class="settings-security-empty">
-            No trusted SSH host fingerprints found.
+            {{ $t('settings.security.noHostKeys') }}
           </div>
 
           <div v-else class="settings-security-list">
@@ -1185,7 +1194,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 @click="removeTrustedHostKey(entry)"
                 :disabled="deletingHostKeyScope === trustedHostScope(entry) || resettingHostKeys"
               >
-                {{ deletingHostKeyScope === trustedHostScope(entry) ? 'Removing...' : 'Delete' }}
+                {{ deletingHostKeyScope === trustedHostScope(entry) ? $t('settings.security.removing') : $t('common.delete') }}
               </button>
             </div>
           </div>
@@ -1193,10 +1202,9 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           <!-- Encrypted Credential Backup -->
           <div class="settings-security-header" style="margin-top: 32px;">
             <div>
-              <div class="settings-security-title">Encrypted Credential Backup</div>
+              <div class="settings-security-title">{{ $t('settings.security.credentialBackup') }}</div>
               <div class="settings-security-subtitle">
-                Export saved connection passwords/SSH keys to an encrypted backup, or import a previous backup.
-                The backup uses its own password (independent of your master password).
+                {{ $t('settings.security.credentialBackupDesc') }}
               </div>
             </div>
           </div>
@@ -1204,12 +1212,12 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           <div class="settings-backup-grid">
             <!-- Export -->
             <div class="settings-backup-card">
-              <div class="settings-backup-card-title">Export Backup</div>
+              <div class="settings-backup-card-title">{{ $t('settings.security.exportBackup') }}</div>
               <div class="settings-backup-card-desc">
-                Choose a strong password to encrypt the exported file.
+                {{ $t('settings.security.exportBackupDesc') }}
               </div>
               <div class="settings-form-row">
-                <label>Backup password (min 8 chars)</label>
+                <label>{{ $t('settings.security.backupPasswordMin') }}</label>
                 <input
                   v-model="exportPassword"
                   type="password"
@@ -1218,7 +1226,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 />
               </div>
               <div class="settings-form-row">
-                <label>Confirm password</label>
+                <label>{{ $t('settings.security.confirmPassword') }}</label>
                 <input
                   v-model="exportPasswordConfirm"
                   type="password"
@@ -1234,18 +1242,18 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 :disabled="exportLoading"
                 @click="exportCredentials"
               >
-                {{ exportLoading ? 'Exporting...' : 'Export & Download' }}
+                {{ exportLoading ? $t('settings.security.exporting') : $t('settings.security.exportDownload') }}
               </button>
             </div>
 
             <!-- Import -->
             <div class="settings-backup-card">
-              <div class="settings-backup-card-title">Import Backup</div>
+              <div class="settings-backup-card-title">{{ $t('settings.security.importBackup') }}</div>
               <div class="settings-backup-card-desc">
-                Existing connections with the same ID will be overwritten.
+                {{ $t('settings.security.importBackupDesc') }}
               </div>
               <div class="settings-form-row">
-                <label>Backup file</label>
+                <label>{{ $t('settings.security.backupFile') }}</label>
                 <input
                   ref="importFileInput"
                   type="file"
@@ -1253,10 +1261,10 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                   :disabled="importLoading"
                   @change="onImportFileSelected"
                 />
-                <small v-if="pendingImportFileName">Selected: {{ pendingImportFileName }}</small>
+                <small v-if="pendingImportFileName">{{ $t('settings.security.selectedFile', { name: pendingImportFileName }) }}</small>
               </div>
               <div class="settings-form-row">
-                <label>Backup password</label>
+                <label>{{ $t('settings.security.backupPassword') }}</label>
                 <input
                   v-model="importPassword"
                   type="password"
@@ -1272,7 +1280,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 :disabled="importLoading || !pendingImportContent"
                 @click="importCredentials"
               >
-                {{ importLoading ? 'Importing...' : 'Import' }}
+                {{ importLoading ? $t('settings.security.importing') : $t('settings.security.import') }}
               </button>
             </div>
           </div>
@@ -1280,10 +1288,9 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           <!-- Lock master password (only relevant when one is set) -->
           <div v-if="credentialState.passwordEnabled" class="settings-security-header" style="margin-top: 32px;">
             <div>
-              <div class="settings-security-title">Lock Master Password</div>
+              <div class="settings-security-title">{{ $t('settings.security.lockMasterPassword') }}</div>
               <div class="settings-security-subtitle">
-                Clear the cached master password from memory. The app will reload and prompt
-                you to enter it again before accessing saved credentials.
+                {{ $t('settings.security.lockMasterPasswordDesc') }}
               </div>
             </div>
             <div class="settings-security-actions">
@@ -1293,7 +1300,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 :disabled="lockingMasterPassword"
                 @click="lockMasterPasswordNow"
               >
-                {{ lockingMasterPassword ? 'Locking...' : 'Lock Now' }}
+                {{ lockingMasterPassword ? $t('settings.security.locking') : $t('settings.security.lockNow') }}
               </button>
             </div>
           </div>
@@ -1301,8 +1308,8 @@ async function toggleRememberMasterPassword(enabled: boolean) {
       </div>
 
       <div class="settings-footer">
-        <button class="settings-btn-cancel" type="button" @click="emit('cancel')">Cancel</button>
-        <button class="settings-btn-save" type="button" @click="emit('save', settings)">Save</button>
+        <button class="settings-btn-cancel" type="button" @click="emit('cancel')">{{ $t('common.cancel') }}</button>
+        <button class="settings-btn-save" type="button" @click="emit('save', settings)">{{ $t('common.save') }}</button>
       </div>
     </div>
   </div>
