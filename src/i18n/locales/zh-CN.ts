@@ -98,6 +98,8 @@ const zhCN: Messages = {
       test: "测试连接",
       testing: "测试中…",
       testOk: "连接成功。",
+      testNeedsEnable: "请先在上方启用 AI 助手后再测试。",
+      testNeedsKey: "请先保存 API 密钥后再测试。",
     },
     fontSize: "字号",
     fontFamily: "字体",
