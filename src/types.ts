@@ -254,4 +254,7 @@ export interface TerminalHandle {
   nextCommand: () => boolean;
   rerunLastCommand: () => boolean;
   copyLastCommand: () => Promise<boolean>;
+  /** Command + captured output of the most recent (optionally failed) shell
+   *  command block, for the AI assistant. Null without shell integration data. */
+  lastCommandContext: (failedOnly?: boolean) => import("./aiContext").CommandContext | null;
 }

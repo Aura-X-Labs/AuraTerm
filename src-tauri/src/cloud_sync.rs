@@ -74,6 +74,9 @@ const SYNCED_SETTINGS_KEYS: &[&str] = &[
     "autoOpenSftp",
     "zmodemDownloadPath",
     "restoreTabsOnStartup",
+    // AI assistant config only — the API key lives outside settings.json
+    // (encrypted under the device-local key) and never syncs.
+    "aiConfig",
 ];
 
 // ============================================================================

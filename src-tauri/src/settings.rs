@@ -170,6 +170,44 @@ impl Language {
     }
 }
 
+/// AI assistant configuration. Mirrors the frontend `AiConfig` type. The API
+/// key deliberately lives outside settings.json — encrypted under the
+/// device-local key (see `ai.rs`) — so it can never ride along with settings
+/// export or cloud sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// "anthropic" | "openai-compatible"
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    /// Required for openai-compatible (e.g. https://api.deepseek.com/v1);
+    /// empty for anthropic means the official endpoint.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// Per-reply output token cap; None falls back to the built-in default.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_ai_provider(),
+            base_url: None,
+            model: default_ai_model(),
+            max_tokens: None,
+        }
+    }
+}
+
+fn default_ai_provider() -> String { "anthropic".to_string() }
+fn default_ai_model() -> String { "claude-opus-4-8".to_string() }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -249,6 +287,9 @@ pub struct Settings {
     /// for silent auto-unlock on the next launch (macOS / Windows only).
     #[serde(default)]
     pub remember_master_password: bool,
+    /// AI assistant configuration (API key excluded; stored encrypted separately).
+    #[serde(default)]
+    pub ai_config: AiConfig,
 }
 
 fn default_true() -> bool { true }
@@ -291,6 +332,7 @@ impl Default for Settings {
             master_password_salt: None,
             credentials_initialized: false,
             remember_master_password: false,
+            ai_config: AiConfig::default(),
         }
     }
 }

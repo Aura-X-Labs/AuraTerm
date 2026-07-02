@@ -15,6 +15,7 @@ import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { OutputRuleEngine } from "./outputRules";
 import { decodeControlCharacters } from "./snippets";
 import { ShellIntegration } from "./shellIntegration";
+import type { CommandContext } from "./aiContext";
 import type {
   SerialConnectionState,
   SessionConfig,
@@ -523,6 +524,54 @@ async function copyLastCommand() {
   return true;
 }
 
+/** Bound on buffer lines read for AI context; char-level trimming happens later. */
+const MAX_AI_CONTEXT_LINES = 1500;
+
+function sessionContextLabel(): string | undefined {
+  const session = activeSessionRef.value;
+  switch (session.protocol) {
+    case "ssh":
+      return `ssh ${session.sshConfig.user}@${session.sshConfig.host}`;
+    case "telnet":
+      return `telnet ${session.telnetConfig.host}`;
+    case "serial":
+      return `serial ${session.serialConfig.portName}`;
+    default:
+      return effectiveSettings.value.shellPath ?? undefined;
+  }
+}
+
+function lastCommandContext(failedOnly = false): CommandContext | null {
+  if (!terminal || !shellIntegration) return null;
+  const block = shellIntegration.lastBlockSpan(
+    failedOnly
+      ? (record) => record.exitCode !== undefined && record.exitCode !== 0
+      : undefined,
+  );
+  if (!block) return null;
+
+  const buffer = terminal.buffer.active;
+  const start = Math.max(0, block.liveStartLine);
+  const end = Math.min(
+    block.liveEndLine ?? start + MAX_AI_CONTEXT_LINES,
+    start + MAX_AI_CONTEXT_LINES,
+    buffer.length - 1,
+  );
+  const lines: string[] = [];
+  for (let lineIndex = start; lineIndex <= end; lineIndex++) {
+    const line = buffer.getLine(lineIndex);
+    if (line) lines.push(line.translateToString(true));
+  }
+
+  return {
+    command: block.command,
+    output: lines.join("\n").trim(),
+    exitCode: block.exitCode,
+    shell: sessionContextLabel(),
+    os: osType.value === "unknown" ? undefined : osType.value,
+  };
+}
+
 async function reconnectSshSession() {
   if (activeSessionRef.value.protocol !== "ssh" || !terminal) {
     return;
@@ -567,6 +616,7 @@ defineExpose<TerminalHandle>({
   nextCommand,
   rerunLastCommand,
   copyLastCommand,
+  lastCommandContext,
 });
 
 onMounted(() => {

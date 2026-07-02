@@ -618,3 +618,36 @@
   color: var(--app-text-secondary);
   font-size: 12px;
 }
+
+/* AI settings tab */
+.settings-ai-key-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.settings-ai-key-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-ai-test-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.settings-ai-test-result {
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.settings-ai-test-result.ok {
+  color: var(--app-success, #98c379);
+}
+
+.settings-ai-test-result.error {
+  color: var(--app-danger, #e06c75);
+}

@@ -50,6 +50,36 @@ export type UiThemeMode = "follow-terminal" | ThemeAppearance;
  */
 export type RendererMode = "auto" | "webgl" | "dom";
 
+export type AiProvider = "anthropic" | "openai-compatible";
+
+/**
+ * AI assistant configuration. The API key deliberately lives outside this
+ * structure (and outside settings.json): it is stored encrypted under the
+ * device-local key via the `ai_set_api_key` command and never syncs.
+ */
+export interface AiConfig {
+  enabled: boolean;
+  provider: AiProvider;
+  /** Required for openai-compatible (e.g. https://api.deepseek.com/v1); null for anthropic means the official endpoint. */
+  baseUrl: string | null;
+  model: string;
+  /** Per-reply output token cap; null falls back to the backend default (4096). */
+  maxTokens: number | null;
+}
+
+export const DEFAULT_AI_MODELS: Record<AiProvider, string> = {
+  anthropic: "claude-opus-4-8",
+  "openai-compatible": "",
+};
+
+export const DEFAULT_AI_CONFIG: AiConfig = {
+  enabled: false,
+  provider: "anthropic",
+  baseUrl: null,
+  model: DEFAULT_AI_MODELS.anthropic,
+  maxTokens: null,
+};
+
 export const TERMINAL_THEME_KEYS: Array<keyof TerminalTheme> = [
   "background",
   "foreground",
@@ -183,6 +213,8 @@ export interface AppSettings {
   credentialsInitialized?: boolean;
   /** When a master password is set, cache it in the OS keychain for auto-unlock (macOS/Windows) */
   rememberMasterPassword?: boolean;
+  /** AI assistant configuration (API key excluded; stored encrypted separately) */
+  aiConfig: AiConfig;
 }
 
 const LEGACY_DEFAULT_THEME: TerminalTheme = {
@@ -509,6 +541,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   masterPasswordSalt: null,
   credentialsInitialized: false,
   rememberMasterPassword: false,
+  aiConfig: DEFAULT_AI_CONFIG,
 };
 
 export const MAX_INPUT_HISTORY = 100;
@@ -533,6 +566,26 @@ function normalizeRendererMode(value?: string | null): RendererMode {
   return value === "auto" || value === "webgl" || value === "dom"
     ? value
     : DEFAULT_SETTINGS.rendererMode;
+}
+
+function normalizeAiProvider(value?: string | null): AiProvider {
+  return value === "anthropic" || value === "openai-compatible"
+    ? value
+    : DEFAULT_AI_CONFIG.provider;
+}
+
+export function normalizeAiConfig(value?: Partial<AiConfig> | null): AiConfig {
+  const provider = normalizeAiProvider(value?.provider);
+  const maxTokens = typeof value?.maxTokens === "number" && Number.isFinite(value.maxTokens)
+    ? Math.max(1, Math.floor(value.maxTokens))
+    : null;
+  return {
+    enabled: value?.enabled === true,
+    provider,
+    baseUrl: value?.baseUrl?.trim() || null,
+    model: value?.model?.trim() || DEFAULT_AI_MODELS[provider],
+    maxTokens,
+  };
 }
 
 function shouldMigrateLegacyTheme(theme?: Partial<TerminalTheme> | null) {
@@ -600,6 +653,7 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     masterPasswordSalt: value?.masterPasswordSalt ?? DEFAULT_SETTINGS.masterPasswordSalt,
     credentialsInitialized: value?.credentialsInitialized ?? DEFAULT_SETTINGS.credentialsInitialized,
     rememberMasterPassword: value?.rememberMasterPassword ?? DEFAULT_SETTINGS.rememberMasterPassword,
+    aiConfig: normalizeAiConfig(value?.aiConfig),
   };
 }
 

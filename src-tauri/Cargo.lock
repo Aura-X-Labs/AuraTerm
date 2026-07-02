@@ -198,6 +198,7 @@ dependencies = [
  "async-trait",
  "base64 0.21.7",
  "chrono",
+ "futures-util",
  "keyring",
  "libc",
  "portable-pty",

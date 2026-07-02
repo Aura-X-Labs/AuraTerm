@@ -21,6 +21,7 @@ use tauri::{
 
 #[macro_use]
 mod logging;
+mod ai;
 mod cloud_sync;
 mod connections;
 mod encryption;
@@ -1135,6 +1136,7 @@ fn main() {
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
         .manage(cloud_sync::SyncState::default())
+        .manage(ai::AiState::default())
         .invoke_handler(tauri::generate_handler![
             get_version_info,
             get_startup_dir,
@@ -1211,6 +1213,13 @@ fn main() {
             cloud_sync::auraxlab_register,
             cloud_sync::auraxlab_login,
             cloud_sync::auraxlab_logout,
+            ai::ai_chat_start,
+            ai::ai_chat_cancel,
+            ai::ai_complete,
+            ai::ai_test_connection,
+            ai::ai_set_api_key,
+            ai::ai_clear_api_key,
+            ai::ai_has_api_key,
             save_terminal_log,
             append_to_log,
         ])

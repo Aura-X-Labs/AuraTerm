@@ -194,9 +194,63 @@
   transition: background 0.15s;
 }
 
-.terminal-input-send-btn:hover {
+.terminal-input-send-btn:hover:not(:disabled) {
   background: var(--app-accent);
   color: var(--app-accent-contrast);
+}
+
+.terminal-input-send-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* AI command generation */
+.terminal-input-actions {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.terminal-input-ai-btn {
+  width: 34px;
+  flex-shrink: 0;
+  background: var(--app-surface-1);
+  border: none;
+  border-right: 1px solid var(--app-border);
+  color: var(--app-text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.terminal-input-ai-btn:hover {
+  color: var(--app-accent);
+}
+
+.terminal-input-ai-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.terminal-input-row.ai-mode .terminal-input-textarea {
+  background: var(--app-accent-soft);
+}
+
+.terminal-input-ai-status {
+  padding: 3px 10px;
+  font-size: 11px;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-input-bg);
+}
+
+.terminal-input-ai-hint {
+  color: var(--app-text-dim);
+}
+
+.terminal-input-ai-error {
+  color: var(--app-danger, #e06c75);
+  word-break: break-word;
 }
 
 /* Quick-button editor dialog */

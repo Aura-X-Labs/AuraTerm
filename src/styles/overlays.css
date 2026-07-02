@@ -327,3 +327,20 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* AI assistant transient toast (e.g. "no command to explain") */
+.ai-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--app-panel, rgba(30, 30, 30, 0.95));
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}

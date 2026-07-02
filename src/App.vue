@@ -13,6 +13,9 @@ import MasterPasswordDialog from "./MasterPasswordDialog.vue";
 import TunnelManager from "./TunnelManager.vue";
 import CommandPalette from "./CommandPalette.vue";
 import CloudSyncDialog from "./CloudSyncDialog.vue";
+import AiAssistantPanel from "./AiAssistantPanel.vue";
+import { aiHasApiKey } from "./ai";
+import { buildExplainPrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useSshTunnels } from "./composables/useSshTunnels";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
@@ -22,7 +25,7 @@ import { useAppMenus } from "./composables/useAppMenus";
 import { useTitlebarControls } from "./composables/useTitlebarControls";
 import { useTerminalFontSize } from "./composables/useTerminalFontSize";
 import { useTabManager } from "./composables/useTabManager";
-import { setLanguage, t, type AppLanguage } from "./i18n";
+import { currentLocale, setLanguage, t, type AppLanguage } from "./i18n";
 import {
   DEFAULT_SETTINGS,
   deriveUiTheme,
@@ -97,6 +100,12 @@ const sidebarExpandGroup = ref<string | undefined>(undefined);
 const showRemoteFileManager = ref(false);
 const showTunnelManager = ref(false);
 const showCommandPalette = ref(false);
+// AI assistant panel: visibility, whether an API key is stored, and the current
+// draft (seeded from "explain command" actions and reviewed before sending).
+const showAiPanel = ref(false);
+const aiHasKey = ref(false);
+const aiDraft = ref("");
+const aiDraftKey = ref(0);
 // Shared SSH port-forwarding runtime state (status mirror + start/stop/list).
 const tunnels = useSshTunnels();
 // Per-tab configured tunnels, kept out of `tab.session` so editing them never
@@ -450,6 +459,8 @@ onMounted(async () => {
   }
 
   hasLoadedSettings.value = true;
+
+  void refreshAiKeyState();
 
   // 凭据保护状态:
   //  - 无主密码(本地密钥模式,默认):不弹窗;
@@ -811,6 +822,9 @@ async function handleSaveSettings(newSettings: AppSettings) {
   settingsRef.value = normalizedSettings;
   settings.value = normalizedSettings;
   showSettings.value = false;
+  // The AI key is set/cleared from inside the settings dialog; refresh the flag
+  // the panel relies on.
+  void refreshAiKeyState();
 }
 
 function rememberSerialConfig(serialConfig: SerialConfig) {
@@ -873,6 +887,66 @@ function handleInputSend(text: string, raw = false) {
     addToInputHistory(text.replace(/\n$/, '')); // Remove trailing newline for history
   }
   sendToActiveTerminal(text, raw);
+}
+
+// ---- AI assistant ----------------------------------------------------------
+const aiEnv = computed(() => ({
+  os: osType.value === "unknown" ? undefined : osType.value,
+  shell: activeSshConfig.value
+    ? `ssh ${activeSshConfig.value.user}@${activeSshConfig.value.host}`
+    : settings.value.shellPath ?? undefined,
+}));
+
+// AI command generation (input bar Ctrl/Cmd+K) is available only when the
+// assistant is enabled and an API key is stored.
+const aiAvailable = computed(() => settings.value.aiConfig.enabled && aiHasKey.value);
+
+async function refreshAiKeyState() {
+  try {
+    aiHasKey.value = await aiHasApiKey();
+  } catch {
+    aiHasKey.value = false;
+  }
+}
+
+function openAiPanel() {
+  void refreshAiKeyState();
+  showAiPanel.value = true;
+}
+
+function toggleAiPanel() {
+  closeOpenMenus();
+  if (showAiPanel.value) {
+    showAiPanel.value = false;
+    return;
+  }
+  openAiPanel();
+}
+
+/** Seed the AI panel with an "explain this command" prompt built from the
+ *  active terminal's most recent (optionally failed) shell command block. */
+function explainCommand(failedOnly: boolean) {
+  closeOpenMenus();
+  const handle = termRefs.get(activeTabId.value);
+  const context = handle?.lastCommandContext(failedOnly) ?? null;
+  if (!context) {
+    aiExplainUnavailable.value = true;
+    window.setTimeout(() => { aiExplainUnavailable.value = false; }, 2500);
+    return;
+  }
+  aiDraft.value = buildExplainPrompt(context, currentLocale());
+  aiDraftKey.value += 1;
+  openAiPanel();
+}
+
+// Transient flag shown when there is no shell command block to explain.
+const aiExplainUnavailable = ref(false);
+
+function handleAiInsertCommand(text: string) {
+  const handle = termRefs.get(activeTabId.value);
+  if (!handle) return;
+  handle.writeInput(text);
+  handle.focus();
 }
 
 async function handleButtonsChange(buttons: QuickButton[]) {
@@ -1401,6 +1475,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "command-next", title: t("palette.cmd.nextCommand"), subtitle: "Ctrl/Cmd+Shift+Down", group: t("palette.groups.terminal"), keywords: "shell navigation osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.nextCommand(); } },
     { id: "command-rerun", title: t("palette.cmd.rerunCommand"), group: t("palette.groups.terminal"), keywords: "shell repeat osc 133", enabled: hasTab, run: () => { termRefs.get(activeTabId.value)?.rerunLastCommand(); } },
     { id: "command-copy", title: t("palette.cmd.copyCommand"), group: t("palette.groups.terminal"), keywords: "shell clipboard osc 133", enabled: hasTab, run: () => { void termRefs.get(activeTabId.value)?.copyLastCommand(); } },
+    { id: "ai-toggle", title: showAiPanel.value ? t("ai.hidePanel") : t("ai.showPanel"), group: t("palette.groups.tools"), keywords: "ai assistant chat llm gpt claude deepseek", run: () => toggleAiPanel() },
+    { id: "ai-explain", title: t("ai.explainCommand"), group: t("palette.groups.terminal"), keywords: "ai explain command osc 133 assistant", enabled: hasTab, run: () => explainCommand(false) },
+    { id: "ai-explain-error", title: t("ai.explainError"), group: t("palette.groups.terminal"), keywords: "ai analyze error failed command assistant", enabled: hasTab, run: () => explainCommand(true) },
     { id: "split-right", title: t("menu.splitRight"), group: t("palette.groups.layout"), keywords: "pane vertical", run: () => handleSplitPane("vertical") },
     { id: "split-down", title: t("menu.splitDown"), group: t("palette.groups.layout"), keywords: "pane horizontal", run: () => handleSplitPane("horizontal") },
     { id: "close-pane", title: t("menu.closePane"), group: t("palette.groups.layout"), enabled: paneLeaves.value.length > 1, run: () => handleClosePane() },
@@ -1599,6 +1676,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               </button>
               <button class="titlebar-menu-item" type="button" :disabled="!activeSshConfig" @click="handleToggleTunnelManager">
                 <span>{{ $t('menu.portForwarding') }}</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" @click="closeOpenMenus(); toggleAiPanel()">
+                <span>{{ showAiPanel ? $t('ai.hidePanel') : $t('ai.showPanel') }}</span>
               </button>
             </div>
           </div>
@@ -2089,6 +2169,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           :input-history="settings.inputHistory"
           :active-host="activeSshConfig?.host"
           :session-group="activeSshConfig?.savedConnectionGroup"
+          :ai-available="aiAvailable"
+          :ai-env="aiEnv"
           @send="handleInputSend"
           @buttons-change="handleButtonsChange"
           @resize="fitActiveTerminal"
@@ -2115,6 +2197,18 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
         :ssh-config="activeSshConfig"
         @close="showRemoteFileManager = false"
       />
+
+      <AiAssistantPanel
+        v-if="showAiPanel"
+        :config="settings.aiConfig"
+        :has-api-key="aiHasKey"
+        :env="aiEnv"
+        :draft="aiDraft"
+        :draft-key="aiDraftKey"
+        @close="showAiPanel = false"
+        @insert-command="handleAiInsertCommand"
+        @open-settings="showAiPanel = false; handleOpenSettings()"
+      />
     </div>
 
     <TunnelManager
@@ -2133,6 +2227,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       :commands="paletteCommands"
       @close="showCommandPalette = false"
     />
+
+    <div v-if="aiExplainUnavailable" class="ai-toast">{{ $t('ai.nothingToExplain') }}</div>
 
     <MasterPasswordDialog
       :is-open="showMasterPasswordDialog"
