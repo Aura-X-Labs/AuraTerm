@@ -1,14 +1,20 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type { QuickButton } from "./settings";
 import { buildSnippetPayload, snippetApplies, snippetVariables } from "./snippets";
 import { t } from "./i18n";
+import { aiComplete } from "./ai";
+import { commandGenerationSystemPrompt, extractCommand } from "./aiPrompts";
 
 const props = defineProps<{
   quickButtons: QuickButton[];
   inputHistory: string[];
   activeHost?: string;
   sessionGroup?: string;
+  /** Whether AI command generation is available (enabled + API key present). */
+  aiAvailable?: boolean;
+  /** Environment hints for the command-generation prompt. */
+  aiEnv?: { os?: string; shell?: string };
 }>();
 
 const emit = defineEmits<{
@@ -33,6 +39,51 @@ let dragStartH = 0;
 // History navigation state
 const historyIndex = ref(-1);
 const savedTextBeforeNav = ref("");
+
+// AI command-generation state. When `aiMode` is on, the textarea content is a
+// natural-language request; Enter generates a command (it does not send).
+const aiMode = ref(false);
+const aiGenerating = ref(false);
+const aiError = ref("");
+
+function toggleAiMode() {
+  if (!props.aiAvailable) return;
+  aiMode.value = !aiMode.value;
+  aiError.value = "";
+  if (aiMode.value) {
+    void nextTick(() => textareaRef.value?.focus());
+  }
+}
+
+async function generateCommand() {
+  const request = text.value.trim();
+  if (!request || aiGenerating.value || !props.aiAvailable) return;
+  aiGenerating.value = true;
+  aiError.value = "";
+  try {
+    const system = commandGenerationSystemPrompt(props.aiEnv ?? {});
+    const reply = await aiComplete([{ role: "user", content: request }], system);
+    const command = extractCommand(reply);
+    if (!command) {
+      aiError.value = t("inputBar.ai.noCommand");
+      return;
+    }
+    // Drop the generated command into the input for the user to review and run.
+    aiMode.value = false;
+    text.value = command;
+    void nextTick(() => {
+      const el = textareaRef.value;
+      if (el) {
+        el.focus();
+        el.selectionStart = el.selectionEnd = text.value.length;
+      }
+    });
+  } catch (error) {
+    aiError.value = String(error);
+  } finally {
+    aiGenerating.value = false;
+  }
+}
 
 watch(text, () => {
   // Reset history index when user types manually (not during navigation)
@@ -130,6 +181,28 @@ function navigateHistory(direction: 1 | -1) {
 }
 
 function handleKeyDown(event: KeyboardEvent) {
+  // Ctrl/Cmd+K: toggle AI command-generation mode.
+  if ((event.ctrlKey || event.metaKey) && (event.key === "k" || event.key === "K")) {
+    event.preventDefault();
+    toggleAiMode();
+    return;
+  }
+
+  // While in AI mode, Enter generates a command (does not send); Escape exits.
+  if (aiMode.value) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      aiMode.value = false;
+      aiError.value = "";
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      void generateCommand();
+      return;
+    }
+  }
+
   // PageUp: navigate to older history (index increases)
   if (event.key === "PageUp") {
     event.preventDefault();
@@ -310,20 +383,48 @@ function closeEditor() {
       </button>
     </div>
 
-    <div v-if="textareaH > 0" class="terminal-input-row">
+    <div v-if="textareaH > 0" class="terminal-input-row" :class="{ 'ai-mode': aiMode }">
       <textarea
         ref="textareaRef"
         class="terminal-input-textarea"
         :style="{ height: `${textareaH}px` }"
         :value="text"
-        :placeholder="$t('inputBar.placeholder')"
+        :placeholder="aiMode ? $t('inputBar.ai.placeholder') : $t('inputBar.placeholder')"
         spellcheck="false"
         autocorrect="off"
         autocapitalize="off"
         @input="text = inputValue($event)"
         @keydown="handleKeyDown"
       />
-      <button class="terminal-input-send-btn" type="button" :title="$t('inputBar.send')" @click="doSend(text); text = ''">▶</button>
+      <div class="terminal-input-actions">
+        <button
+          v-if="aiAvailable"
+          class="terminal-input-ai-btn"
+          :class="{ active: aiMode }"
+          type="button"
+          :title="$t('inputBar.ai.toggleHint')"
+          @click="toggleAiMode"
+        >AI</button>
+        <button
+          v-if="aiMode"
+          class="terminal-input-send-btn"
+          type="button"
+          :disabled="aiGenerating || !text.trim()"
+          :title="$t('inputBar.ai.generate')"
+          @click="generateCommand"
+        >{{ aiGenerating ? '…' : '✨' }}</button>
+        <button
+          v-else
+          class="terminal-input-send-btn"
+          type="button"
+          :title="$t('inputBar.send')"
+          @click="doSend(text); text = ''"
+        >▶</button>
+      </div>
+    </div>
+    <div v-if="aiMode && textareaH > 0" class="terminal-input-ai-status">
+      <span v-if="aiError" class="terminal-input-ai-error">{{ aiError }}</span>
+      <span v-else class="terminal-input-ai-hint">{{ aiGenerating ? $t('inputBar.ai.generating') : $t('inputBar.ai.hint') }}</span>
     </div>
 
     <div v-if="showEditor" class="quick-btn-editor-overlay" @click="closeEditor">

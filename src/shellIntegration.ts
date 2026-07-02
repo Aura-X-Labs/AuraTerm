@@ -114,6 +114,33 @@ export class ShellIntegration {
     return command ? publicRecord(command) : null;
   }
 
+  /**
+   * Most recent finished command block matching `predicate`, with *live*
+   * buffer line numbers. Stored `startLine`/`endLine` go stale once the
+   * scrollback trims; the marker tracks trimming, so the live span is the
+   * recorded length re-anchored at the marker's current line. Returns null
+   * when no block matches or its marker has been trimmed away.
+   */
+  lastBlockSpan(
+    predicate?: (record: ShellCommandRecord) => boolean,
+  ): (ShellCommandRecord & { liveStartLine: number; liveEndLine?: number }) | null {
+    for (let index = this.commands.length - 1; index >= 0; index--) {
+      const command = this.commands[index];
+      if (!command.command.trim()) continue;
+      const record = publicRecord(command);
+      if (predicate && !predicate(record)) continue;
+      const liveStartLine = command.marker.line;
+      if (liveStartLine < 0) return null;
+      const span = command.endLine !== undefined ? command.endLine - command.startLine : undefined;
+      return {
+        ...record,
+        liveStartLine,
+        liveEndLine: span !== undefined ? liveStartLine + span : undefined,
+      };
+    }
+    return null;
+  }
+
   records(): ShellCommandRecord[] {
     return this.commands.map(publicRecord);
   }

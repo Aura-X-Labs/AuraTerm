@@ -34,9 +34,12 @@ zeroize = { version = "1.6", features = ["derive"] }
 base64 = "0.21"
 rand = "0.8"
 # HTTP client for end-to-end-encrypted cloud sync (GitHub/Gitee Gist, WebDAV,
-# AuraXLab account). rustls-tls reuses aws-lc-rs already pulled in by russh, so
-# no OpenSSL/native-tls system dependency is added on any platform.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# AuraXLab account) and AI assistant streaming. rustls-tls reuses aws-lc-rs
+# already pulled in by russh, so no OpenSSL/native-tls system dependency is
+# added on any platform. "stream" exposes bytes_stream() for SSE consumption.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+# StreamExt for consuming reqwest byte streams (AI assistant SSE).
+futures-util = { version = "0.3", default-features = false }
 
 # OS keychain for opt-in "remember master password" auto-unlock.
 # Scoped to macOS/Windows native backends so Linux does not pull in

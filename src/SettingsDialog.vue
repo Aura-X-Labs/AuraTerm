@@ -4,16 +4,20 @@ import { ref, computed, watch } from "vue";
 import { LANGUAGE_OPTIONS, t } from "./i18n";
 import {
   cloneTerminalTheme,
+  DEFAULT_AI_MODELS,
   getMatchingTerminalThemePreset,
   getTerminalThemePreset,
   normalizeAppSettings,
   TERMINAL_THEME_PRESETS,
+  type AiConfig,
+  type AiProvider,
   type AppSettings,
   type OutputRule,
   type RendererMode,
   type TerminalTheme,
   type UiThemeMode,
 } from "./settings";
+import { aiClearApiKey, aiHasApiKey, aiSetApiKey, aiTestConnection } from "./ai";
 
 const props = defineProps<{
   initial: AppSettings;
@@ -26,7 +30,7 @@ const emit = defineEmits<{
 
 const settings = ref<AppSettings>(normalizeAppSettings(props.initial));
 
-const activeTab = ref<"terminal" | "keyboard" | "theme" | "automation" | "security">("terminal");
+const activeTab = ref<"terminal" | "keyboard" | "theme" | "automation" | "ai" | "security">("terminal");
 
 type TrustedSshHostKeyEntry = {
   host: string;
@@ -152,6 +156,79 @@ const selectedRendererModeDescription = computed(() => {
 
 function update<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
   settings.value = { ...settings.value, [key]: value };
+}
+
+// ---- AI assistant ----------------------------------------------------------
+const aiProviderOptions = computed<Array<{ value: AiProvider; label: string }>>(() => [
+  { value: "anthropic", label: t("settings.ai.providerAnthropic") },
+  { value: "openai-compatible", label: t("settings.ai.providerOpenAi") },
+]);
+// The key is write-only from the UI: we only ever learn whether one is stored.
+const aiHasKey = ref(false);
+const aiKeyInput = ref("");
+const aiKeyBusy = ref(false);
+const aiTesting = ref(false);
+const aiTestResult = ref<{ ok: boolean; message: string } | null>(null);
+
+void aiHasApiKey().then((has) => { aiHasKey.value = has; }).catch(() => {});
+
+function updateAi<K extends keyof AiConfig>(key: K, value: AiConfig[K]) {
+  update("aiConfig", { ...settings.value.aiConfig, [key]: value });
+}
+
+function onAiProviderChange(provider: AiProvider) {
+  // Swapping providers with an empty/default model resets to that provider's
+  // default so the field is never left pointing at a foreign model id.
+  const current = settings.value.aiConfig;
+  const model = !current.model.trim() || current.model === DEFAULT_AI_MODELS[current.provider]
+    ? DEFAULT_AI_MODELS[provider]
+    : current.model;
+  update("aiConfig", { ...current, provider, model });
+}
+
+async function saveAiKey() {
+  const key = aiKeyInput.value.trim();
+  if (!key) return;
+  aiKeyBusy.value = true;
+  aiTestResult.value = null;
+  try {
+    await aiSetApiKey(key);
+    aiKeyInput.value = "";
+    aiHasKey.value = true;
+  } catch (error) {
+    aiTestResult.value = { ok: false, message: String(error) };
+  } finally {
+    aiKeyBusy.value = false;
+  }
+}
+
+async function clearAiKey() {
+  aiKeyBusy.value = true;
+  try {
+    await aiClearApiKey();
+    aiHasKey.value = false;
+    aiTestResult.value = null;
+  } catch (error) {
+    aiTestResult.value = { ok: false, message: String(error) };
+  } finally {
+    aiKeyBusy.value = false;
+  }
+}
+
+async function testAiConnection() {
+  aiTesting.value = true;
+  aiTestResult.value = null;
+  try {
+    // Persist current settings first (without closing the dialog) so the
+    // backend probe reads the config as shown.
+    await invoke("save_settings", { settings: normalizeAppSettings(settings.value) });
+    await aiTestConnection();
+    aiTestResult.value = { ok: true, message: t("settings.ai.testOk") };
+  } catch (error) {
+    aiTestResult.value = { ok: false, message: String(error) };
+  } finally {
+    aiTesting.value = false;
+  }
 }
 
 function updateTheme<K extends keyof AppSettings["theme"]>(key: K, value: AppSettings["theme"][K]) {
@@ -647,6 +724,11 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           @click="activeTab = 'automation'"
         >{{ $t('settings.tabs.rules') }}</button>
         <button
+          :class="['settings-tab', { 'settings-tab--active': activeTab === 'ai' }]"
+          type="button"
+          @click="activeTab = 'ai'"
+        >{{ $t('settings.tabs.ai') }}</button>
+        <button
           :class="['settings-tab', { 'settings-tab--active': activeTab === 'security' }]"
           type="button"
           @click="activeTab = 'security'"
@@ -1056,6 +1138,110 @@ async function toggleRememberMasterPassword(enabled: boolean) {
         </div>
 
         <!-- Security Tab -->
+        <!-- AI Tab -->
+        <div v-show="activeTab === 'ai'" class="settings-section">
+          <label class="settings-field">
+            <span>{{ $t('settings.ai.enable') }}</span>
+            <input
+              type="checkbox"
+              :checked="settings.aiConfig.enabled"
+              @change="updateAi('enabled', inputChecked($event))"
+            />
+          </label>
+          <div class="settings-field-full-hint">{{ $t('settings.ai.enableHint') }}</div>
+
+          <label class="settings-field settings-field--stacked">
+            <span>{{ $t('settings.ai.provider') }}</span>
+            <select
+              :value="settings.aiConfig.provider"
+              @change="onAiProviderChange(inputValue($event) as AiProvider)"
+            >
+              <option v-for="option in aiProviderOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+
+          <label class="settings-field settings-field--stacked">
+            <span>{{ $t('settings.ai.baseUrl') }}</span>
+            <input
+              type="text"
+              :value="settings.aiConfig.baseUrl ?? ''"
+              :placeholder="settings.aiConfig.provider === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.deepseek.com/v1'"
+              @input="updateAi('baseUrl', inputValue($event).trim() || null)"
+            />
+          </label>
+          <div class="settings-field-full-hint">
+            {{ settings.aiConfig.provider === 'anthropic' ? $t('settings.ai.baseUrlHintAnthropic') : $t('settings.ai.baseUrlHintOpenAi') }}
+          </div>
+
+          <label class="settings-field settings-field--stacked">
+            <span>{{ $t('settings.ai.model') }}</span>
+            <input
+              type="text"
+              :value="settings.aiConfig.model"
+              :placeholder="DEFAULT_AI_MODELS[settings.aiConfig.provider] || 'deepseek-chat'"
+              @input="updateAi('model', inputValue($event))"
+            />
+          </label>
+
+          <label class="settings-field settings-field--stacked">
+            <span>{{ $t('settings.ai.maxTokens') }}</span>
+            <input
+              type="number"
+              min="1"
+              :value="settings.aiConfig.maxTokens ?? ''"
+              placeholder="4096"
+              @input="updateAi('maxTokens', inputValue($event) ? Math.max(1, Number(inputValue($event))) : null)"
+            />
+          </label>
+
+          <div class="settings-security-header" style="margin-top: 24px;">
+            <div>
+              <div class="settings-security-title">{{ $t('settings.ai.apiKey') }}</div>
+              <div class="settings-security-subtitle">
+                {{ aiHasKey ? $t('settings.ai.apiKeySet') : $t('settings.ai.apiKeyNone') }}
+              </div>
+            </div>
+          </div>
+          <div class="settings-field-full-hint">{{ $t('settings.ai.apiKeyHint') }}</div>
+          <div class="settings-ai-key-row">
+            <input
+              v-model="aiKeyInput"
+              type="password"
+              autocomplete="off"
+              :placeholder="$t('settings.ai.apiKeyPlaceholder')"
+            />
+            <button
+              class="settings-btn-secondary"
+              type="button"
+              :disabled="aiKeyBusy || !aiKeyInput.trim()"
+              @click="saveAiKey"
+            >{{ $t('common.save') }}</button>
+            <button
+              v-if="aiHasKey"
+              class="settings-btn-secondary settings-btn-danger"
+              type="button"
+              :disabled="aiKeyBusy"
+              @click="clearAiKey"
+            >{{ $t('common.delete') }}</button>
+          </div>
+
+          <div class="settings-ai-test-row">
+            <button
+              class="settings-btn-secondary"
+              type="button"
+              :disabled="aiTesting || !aiHasKey || !settings.aiConfig.enabled"
+              @click="testAiConnection"
+            >{{ aiTesting ? $t('settings.ai.testing') : $t('settings.ai.test') }}</button>
+            <span
+              v-if="aiTestResult"
+              class="settings-ai-test-result"
+              :class="{ ok: aiTestResult.ok, error: !aiTestResult.ok }"
+            >{{ aiTestResult.message }}</span>
+          </div>
+        </div>
+
         <div v-show="activeTab === 'security'" class="settings-section">
           <!-- Master Password -->
           <div class="settings-security-header">
