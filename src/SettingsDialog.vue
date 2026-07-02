@@ -215,6 +215,14 @@ async function clearAiKey() {
   }
 }
 
+// Why the test button is disabled, so the user isn't left clicking a dead
+// button with no feedback. Empty string = enabled.
+const aiTestBlockedReason = computed(() => {
+  if (!settings.value.aiConfig.enabled) return t("settings.ai.testNeedsEnable");
+  if (!aiHasKey.value) return t("settings.ai.testNeedsKey");
+  return "";
+});
+
 async function testAiConnection() {
   aiTesting.value = true;
   aiTestResult.value = null;
@@ -1239,6 +1247,10 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               class="settings-ai-test-result"
               :class="{ ok: aiTestResult.ok, error: !aiTestResult.ok }"
             >{{ aiTestResult.message }}</span>
+            <span
+              v-else-if="aiTestBlockedReason"
+              class="settings-ai-test-result hint"
+            >{{ aiTestBlockedReason }}</span>
           </div>
         </div>
 

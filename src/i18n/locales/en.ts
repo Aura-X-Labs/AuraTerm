@@ -101,6 +101,8 @@ const en = {
       test: "Test connection",
       testing: "Testing…",
       testOk: "Connection succeeded.",
+      testNeedsEnable: "Enable the AI assistant above to test.",
+      testNeedsKey: "Save an API key first to test.",
     },
     fontSize: "Font Size",
     fontFamily: "Font Family",
