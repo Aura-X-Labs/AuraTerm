@@ -15,7 +15,7 @@ import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { OutputRuleEngine } from "./outputRules";
 import { decodeControlCharacters } from "./snippets";
 import { ShellIntegration } from "./shellIntegration";
-import type { CommandContext } from "./aiContext";
+import type { CommandContext, OutputContext } from "./aiContext";
 import type {
   SerialConnectionState,
   SessionConfig,
@@ -572,6 +572,28 @@ function lastCommandContext(failedOnly = false): CommandContext | null {
   };
 }
 
+/** Rows currently visible in the viewport (what the user is looking at, even
+ *  mid-scrollback), independent of shell-integration command markers. */
+function visibleOutputContext(): OutputContext | null {
+  if (!terminal) return null;
+  const buffer = terminal.buffer.active;
+  const start = buffer.viewportY;
+  const end = Math.min(start + terminal.rows - 1, buffer.length - 1);
+  const lines: string[] = [];
+  for (let lineIndex = start; lineIndex <= end; lineIndex++) {
+    const line = buffer.getLine(lineIndex);
+    if (line) lines.push(line.translateToString(true));
+  }
+  const output = lines.join("\n").trim();
+  if (!output) return null;
+
+  return {
+    output,
+    shell: sessionContextLabel(),
+    os: osType.value === "unknown" ? undefined : osType.value,
+  };
+}
+
 async function reconnectSshSession() {
   if (activeSessionRef.value.protocol !== "ssh" || !terminal) {
     return;
@@ -617,6 +639,7 @@ defineExpose<TerminalHandle>({
   rerunLastCommand,
   copyLastCommand,
   lastCommandContext,
+  visibleOutputContext,
 });
 
 onMounted(() => {

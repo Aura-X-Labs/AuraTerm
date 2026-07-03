@@ -257,4 +257,11 @@ export interface TerminalHandle {
   /** Command + captured output of the most recent (optionally failed) shell
    *  command block, for the AI assistant. Null without shell integration data. */
   lastCommandContext: (failedOnly?: boolean) => import("./aiContext").CommandContext | null;
+  /** Plain text of the rows currently visible in the viewport, for the AI
+   *  assistant's "summarize output" action. Works without shell integration;
+   *  null when the viewport is blank. */
+  visibleOutputContext: () => import("./aiContext").OutputContext | null;
 }
+
+/** Quick actions offered as chips in the AI assistant panel. */
+export type AiQuickAction = "explain" | "explain-error" | "optimize" | "summarize";

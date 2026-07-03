@@ -15,7 +15,7 @@ import CommandPalette from "./CommandPalette.vue";
 import CloudSyncDialog from "./CloudSyncDialog.vue";
 import AiAssistantPanel from "./AiAssistantPanel.vue";
 import { aiHasApiKey } from "./ai";
-import { buildExplainPrompt } from "./aiContext";
+import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useSshTunnels } from "./composables/useSshTunnels";
 import { usePaneLayout, type PaneAxis, type PaneLayoutTab } from "./usePaneLayout";
@@ -41,6 +41,7 @@ import {
   buildSessionFromSavedConnection,
 } from "./composables/sessionMapping";
 import type {
+  AiQuickAction,
   ConnectResult,
   ConnectionProtocol,
   PaletteCommand,
@@ -923,24 +924,56 @@ function toggleAiPanel() {
   openAiPanel();
 }
 
-/** Seed the AI panel with an "explain this command" prompt built from the
- *  active terminal's most recent (optionally failed) shell command block. */
-function explainCommand(failedOnly: boolean) {
-  closeOpenMenus();
-  const handle = termRefs.get(activeTabId.value);
-  const context = handle?.lastCommandContext(failedOnly) ?? null;
-  if (!context) {
-    aiExplainUnavailable.value = true;
-    window.setTimeout(() => { aiExplainUnavailable.value = false; }, 2500);
-    return;
-  }
-  aiDraft.value = buildExplainPrompt(context, currentLocale());
+/** Seed the AI panel composer with a prepared prompt for user review. */
+function seedAiDraft(draft: string) {
+  aiDraft.value = draft;
   aiDraftKey.value += 1;
   openAiPanel();
 }
 
-// Transient flag shown when there is no shell command block to explain.
-const aiExplainUnavailable = ref(false);
+function flashAiActionUnavailable() {
+  aiActionUnavailable.value = true;
+  window.setTimeout(() => { aiActionUnavailable.value = false; }, 2500);
+}
+
+/** Seed the AI panel with an "explain this command" prompt built from the
+ *  active terminal's most recent (optionally failed) shell command block. */
+function explainCommand(failedOnly: boolean) {
+  closeOpenMenus();
+  const context = termRefs.get(activeTabId.value)?.lastCommandContext(failedOnly) ?? null;
+  if (!context) return flashAiActionUnavailable();
+  seedAiDraft(buildExplainPrompt(context, currentLocale()));
+}
+
+/** Seed the AI panel with a "suggest a better way to write this command"
+ *  prompt from the same command-block context as explainCommand. */
+function optimizeCommand() {
+  closeOpenMenus();
+  const context = termRefs.get(activeTabId.value)?.lastCommandContext(false) ?? null;
+  if (!context) return flashAiActionUnavailable();
+  seedAiDraft(buildOptimizePrompt(context, currentLocale()));
+}
+
+/** Seed the AI panel with a "summarize this output" prompt built from the
+ *  rows currently visible in the active terminal's viewport. */
+function summarizeVisibleOutput() {
+  closeOpenMenus();
+  const context = termRefs.get(activeTabId.value)?.visibleOutputContext() ?? null;
+  if (!context) return flashAiActionUnavailable();
+  seedAiDraft(buildSummarizePrompt(context, currentLocale()));
+}
+
+function handleAiQuickAction(action: AiQuickAction) {
+  switch (action) {
+    case "explain": explainCommand(false); break;
+    case "explain-error": explainCommand(true); break;
+    case "optimize": optimizeCommand(); break;
+    case "summarize": summarizeVisibleOutput(); break;
+  }
+}
+
+// Transient flag shown when an AI quick action has no terminal content to act on.
+const aiActionUnavailable = ref(false);
 
 function handleAiInsertCommand(text: string) {
   const handle = termRefs.get(activeTabId.value);
@@ -1478,6 +1511,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "ai-toggle", title: showAiPanel.value ? t("ai.hidePanel") : t("ai.showPanel"), group: t("palette.groups.tools"), keywords: "ai assistant chat llm gpt claude deepseek", run: () => toggleAiPanel() },
     { id: "ai-explain", title: t("ai.explainCommand"), group: t("palette.groups.terminal"), keywords: "ai explain command osc 133 assistant", enabled: hasTab, run: () => explainCommand(false) },
     { id: "ai-explain-error", title: t("ai.explainError"), group: t("palette.groups.terminal"), keywords: "ai analyze error failed command assistant", enabled: hasTab, run: () => explainCommand(true) },
+    { id: "ai-optimize", title: t("ai.optimizeCommand"), group: t("palette.groups.terminal"), keywords: "ai optimize improve rewrite command assistant", enabled: hasTab, run: () => optimizeCommand() },
+    { id: "ai-summarize", title: t("ai.summarizeOutput"), group: t("palette.groups.terminal"), keywords: "ai summarize output screen viewport assistant", enabled: hasTab, run: () => summarizeVisibleOutput() },
     { id: "split-right", title: t("menu.splitRight"), group: t("palette.groups.layout"), keywords: "pane vertical", run: () => handleSplitPane("vertical") },
     { id: "split-down", title: t("menu.splitDown"), group: t("palette.groups.layout"), keywords: "pane horizontal", run: () => handleSplitPane("horizontal") },
     { id: "close-pane", title: t("menu.closePane"), group: t("palette.groups.layout"), enabled: paneLeaves.value.length > 1, run: () => handleClosePane() },
@@ -2221,6 +2256,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
         :draft-key="aiDraftKey"
         @close="showAiPanel = false"
         @insert-command="handleAiInsertCommand"
+        @quick-action="handleAiQuickAction"
         @open-settings="showAiPanel = false; handleOpenSettings()"
       />
     </div>
@@ -2242,7 +2278,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       @close="showCommandPalette = false"
     />
 
-    <div v-if="aiExplainUnavailable" class="ai-toast">{{ $t('ai.nothingToExplain') }}</div>
+    <div v-if="aiActionUnavailable" class="ai-toast">{{ $t('ai.nothingToActOn') }}</div>
 
     <MasterPasswordDialog
       :is-open="showMasterPasswordDialog"

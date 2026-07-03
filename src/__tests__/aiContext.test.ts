@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildExplainPrompt, trimOutput, MAX_OUTPUT_CHARS } from "../aiContext";
+import {
+  buildExplainPrompt,
+  buildOptimizePrompt,
+  buildSummarizePrompt,
+  trimOutput,
+  MAX_OUTPUT_CHARS,
+} from "../aiContext";
 
 describe("trimOutput", () => {
   it("returns short output unchanged", () => {
@@ -93,6 +99,82 @@ describe("buildExplainPrompt", () => {
         command: "cat big.log",
         output: Array.from({ length: 5000 }, (_, i) => `entry ${i}`).join("\n"),
       },
+      "en",
+    );
+    expect(prompt).toMatch(/… \[\d+ lines truncated\] …/);
+    expect(prompt.length).toBeLessThan(MAX_OUTPUT_CHARS + 1000);
+  });
+});
+
+describe("buildOptimizePrompt", () => {
+  it("includes command, environment, and fenced output", () => {
+    const prompt = buildOptimizePrompt(
+      {
+        command: "ls | grep foo",
+        output: "foo.txt\nfoobar.txt",
+        exitCode: 0,
+        shell: "/bin/zsh",
+        os: "macOS",
+      },
+      "en",
+    );
+
+    expect(prompt).toContain("Suggest a better way");
+    expect(prompt).toContain("ls | grep foo");
+    expect(prompt).toContain("Exit code: 0");
+    expect(prompt).toContain("foobar.txt");
+    expect(prompt).toContain("OS: macOS");
+    expect(prompt).toContain("Shell/session: /bin/zsh");
+    expect(prompt).toContain("Respond in English.");
+  });
+
+  it("marks empty output and follows the zh-CN locale", () => {
+    const prompt = buildOptimizePrompt({ command: "true", output: "  " }, "zh-CN");
+    expect(prompt).toContain("Output: (empty)");
+    expect(prompt).not.toContain("Exit code:");
+    expect(prompt).toContain("请用简体中文回答。");
+  });
+
+  it("trims oversized output inside the prompt", () => {
+    const prompt = buildOptimizePrompt(
+      {
+        command: "cat big.log",
+        output: Array.from({ length: 5000 }, (_, i) => `entry ${i}`).join("\n"),
+      },
+      "en",
+    );
+    expect(prompt).toMatch(/… \[\d+ lines truncated\] …/);
+    expect(prompt.length).toBeLessThan(MAX_OUTPUT_CHARS + 1000);
+  });
+});
+
+describe("buildSummarizePrompt", () => {
+  it("includes environment hints and fenced output", () => {
+    const prompt = buildSummarizePrompt(
+      {
+        output: "PASS test_a\nFAIL test_b — assertion error",
+        shell: "ssh root@web-01",
+        os: "linux",
+      },
+      "en",
+    );
+
+    expect(prompt).toContain("Summarize the following terminal output");
+    expect(prompt).toContain("FAIL test_b");
+    expect(prompt).toContain("OS: linux");
+    expect(prompt).toContain("Shell/session: ssh root@web-01");
+    expect(prompt).toContain("Respond in English.");
+  });
+
+  it("marks empty output and follows the zh-CN locale", () => {
+    const prompt = buildSummarizePrompt({ output: "   " }, "zh-CN");
+    expect(prompt).toContain("Output: (empty)");
+    expect(prompt).toContain("请用简体中文回答。");
+  });
+
+  it("trims oversized output inside the prompt", () => {
+    const prompt = buildSummarizePrompt(
+      { output: Array.from({ length: 5000 }, (_, i) => `row ${i}`).join("\n") },
       "en",
     );
     expect(prompt).toMatch(/… \[\d+ lines truncated\] …/);
