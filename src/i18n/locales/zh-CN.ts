@@ -442,6 +442,8 @@ const zhCN: Messages = {
     importResult: "已导入 {imported} 个；跳过 {skipped} 个",
     importFailed: "导入失败：{error}",
     saveFailed: "保存失败：{error}",
+    reconnectTmux: "自动重连并用 tmux 保持会话",
+    reconnectScreen: "自动重连并用 screen 保持会话",
   },
   bookmarkEditor: {
     title: "编辑书签",
