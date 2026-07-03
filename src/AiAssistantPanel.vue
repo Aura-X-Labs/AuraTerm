@@ -10,6 +10,7 @@ import {
 } from "./ai";
 import { terminalSystemPrompt } from "./aiPrompts";
 import type { AiConfig } from "./settings";
+import type { AiQuickAction } from "./types";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 const props = defineProps<{
@@ -28,7 +29,17 @@ const emit = defineEmits<{
   close: [];
   insertCommand: [text: string];
   openSettings: [];
+  /** A quick-action chip was clicked; the parent builds the terminal-context
+   *  prompt and seeds it back through the draft props. */
+  quickAction: [action: AiQuickAction];
 }>();
+
+const quickActions: Array<{ action: AiQuickAction; labelKey: string }> = [
+  { action: "explain", labelKey: "ai.chipExplain" },
+  { action: "explain-error", labelKey: "ai.chipExplainError" },
+  { action: "optimize", labelKey: "ai.chipOptimize" },
+  { action: "summarize", labelKey: "ai.chipSummarize" },
+];
 
 interface ChatEntry {
   role: "user" | "assistant";
@@ -252,6 +263,16 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="errorBanner" class="ai-error-banner">{{ errorBanner }}</div>
 
+      <div class="ai-quick-actions">
+        <button
+          v-for="chip in quickActions"
+          :key="chip.action"
+          class="ai-chip"
+          type="button"
+          @click="emit('quickAction', chip.action)"
+        >{{ $t(chip.labelKey) }}</button>
+      </div>
+
       <div class="ai-composer">
         <textarea
           ref="composerRef"
@@ -460,8 +481,32 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.ai-composer {
+.ai-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px 0;
   border-top: 1px solid var(--app-border);
+}
+
+.ai-chip {
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ai-chip:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+  border-color: var(--app-accent, #61afef);
+}
+
+.ai-composer {
   padding: 10px 16px 14px;
   display: flex;
   flex-direction: column;

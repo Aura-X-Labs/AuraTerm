@@ -18,6 +18,18 @@ export interface CommandContext {
 }
 
 /**
+ * Free-form terminal content not tied to a shell-integration command block —
+ * e.g. the lines currently visible in the viewport. Used for "summarize what
+ * I'm looking at" style actions that must work without OSC 133 markers.
+ */
+export interface OutputContext {
+  output: string;
+  /** Shell path or session kind (ssh/telnet/serial) for environment hints. */
+  shell?: string;
+  os?: string;
+}
+
+/**
  * Soft cap for the output portion of a prompt. Measured in UTF-16 code units,
  * which tracks bytes closely enough for a guardrail against runaway prompts.
  */
@@ -76,6 +88,13 @@ function replyLanguageInstruction(locale: Locale): string {
   return locale === "zh-CN" ? "请用简体中文回答。" : "Respond in English.";
 }
 
+function envLine(ctx: { shell?: string; os?: string }): string | null {
+  const env: string[] = [];
+  if (ctx.os) env.push(`OS: ${ctx.os}`);
+  if (ctx.shell) env.push(`Shell/session: ${ctx.shell}`);
+  return env.length ? env.join("; ") : null;
+}
+
 /**
  * Build the user message for "explain this command block". The context data is
  * fenced so the model cannot confuse terminal content with instructions.
@@ -90,13 +109,57 @@ export function buildExplainPrompt(ctx: CommandContext, locale: Locale): string 
       : "Explain the following terminal command and its output.",
   );
 
-  const env: string[] = [];
-  if (ctx.os) env.push(`OS: ${ctx.os}`);
-  if (ctx.shell) env.push(`Shell/session: ${ctx.shell}`);
-  if (env.length) parts.push(env.join("; "));
+  const env = envLine(ctx);
+  if (env) parts.push(env);
 
   parts.push(`Command:\n\`\`\`\n${ctx.command}\n\`\`\``);
   if (ctx.exitCode !== undefined) parts.push(`Exit code: ${ctx.exitCode}`);
+
+  const output = trimOutput(ctx.output).trim();
+  parts.push(output ? `Output:\n\`\`\`\n${output}\n\`\`\`` : "Output: (empty)");
+
+  parts.push(replyLanguageInstruction(locale));
+  return parts.join("\n\n");
+}
+
+/**
+ * Build the user message for "suggest a better way to write this command".
+ * Reuses the same command-block context as buildExplainPrompt; the output is
+ * included so the model can judge whether the command achieved its intent.
+ */
+export function buildOptimizePrompt(ctx: CommandContext, locale: Locale): string {
+  const parts: string[] = [];
+
+  parts.push(
+    "Suggest a better way to write the following terminal command: more idiomatic, safer, or more efficient. Show the improved command in a code block and briefly explain what you changed and why. If the command is already fine, say so.",
+  );
+
+  const env = envLine(ctx);
+  if (env) parts.push(env);
+
+  parts.push(`Command:\n\`\`\`\n${ctx.command}\n\`\`\``);
+  if (ctx.exitCode !== undefined) parts.push(`Exit code: ${ctx.exitCode}`);
+
+  const output = trimOutput(ctx.output).trim();
+  parts.push(output ? `Output:\n\`\`\`\n${output}\n\`\`\`` : "Output: (empty)");
+
+  parts.push(replyLanguageInstruction(locale));
+  return parts.join("\n\n");
+}
+
+/**
+ * Build the user message for "summarize this terminal output". Works on raw
+ * viewport content, so it needs no shell-integration command block.
+ */
+export function buildSummarizePrompt(ctx: OutputContext, locale: Locale): string {
+  const parts: string[] = [];
+
+  parts.push(
+    "Summarize the following terminal output: the key results, any errors or warnings, and anything that needs attention. Be concise.",
+  );
+
+  const env = envLine(ctx);
+  if (env) parts.push(env);
 
   const output = trimOutput(ctx.output).trim();
   parts.push(output ? `Output:\n\`\`\`\n${output}\n\`\`\`` : "Output: (empty)");
