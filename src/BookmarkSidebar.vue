@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
-import { type SavedConnection } from "./types";
+import { normalizeReconnectType, type SavedConnection } from "./types";
 import { buildBookmarkTree, flattenBookmarkTree } from "./bookmarks";
 import { t } from "./i18n";
 import BookmarkEditor from "./BookmarkEditor.vue";
@@ -40,6 +40,24 @@ function buildIcon(connection: SavedConnection) {
     return "🌐";
   }
   return "🖥";
+}
+
+/** Session-persistence badge for SSH bookmarks; null when the bookmark does
+ *  not restore its remote session (manual/simple), so plain entries stay clean. */
+function reconnectBadge(connection: SavedConnection): "tmux" | "screen" | null {
+  if (connection.protocol === "serial" || connection.protocol === "telnet") {
+    return null;
+  }
+  const type = normalizeReconnectType(connection);
+  return type === "tmux" || type === "screen" ? type : null;
+}
+
+function reconnectBadgeTitle(badge: "tmux" | "screen") {
+  return badge === "tmux" ? t("bookmarks.reconnectTmux") : t("bookmarks.reconnectScreen");
+}
+
+function reconnectBadgeLabel(badge: "tmux" | "screen") {
+  return badge === "tmux" ? "T" : "S";
 }
 
 const connections = ref<SavedConnection[]>([]);
@@ -139,7 +157,8 @@ const filteredConnections = computed(() => {
       c.host.toLowerCase().includes(query) ||
       (c.user && c.user.toLowerCase().includes(query)) ||
       (c.portName && c.portName.toLowerCase().includes(query)) ||
-      (c.group && c.group.toLowerCase().includes(query))
+      (c.group && c.group.toLowerCase().includes(query)) ||
+      (reconnectBadge(c)?.includes(query) ?? false)
     );
   });
 });
@@ -281,7 +300,14 @@ async function handleImportFile(event: Event) {
           >
             <span class="bookmark-icon">{{ buildIcon(connection) }}</span>
             <div class="bookmark-info">
-              <span class="bookmark-name">{{ connection.name }}</span>
+              <div class="bookmark-name-row">
+                <span class="bookmark-name">{{ connection.name }}</span>
+                <span
+                  v-if="reconnectBadge(connection)"
+                  class="bookmark-badge"
+                  :title="reconnectBadgeTitle(reconnectBadge(connection)!)"
+                >{{ reconnectBadgeLabel(reconnectBadge(connection)!) }}</span>
+              </div>
               <span class="bookmark-host">{{ buildSubtitle(connection) }}</span>
             </div>
           </li>
@@ -312,7 +338,14 @@ async function handleImportFile(event: Event) {
         >
           <span class="bookmark-icon">{{ buildIcon(row.connection) }}</span>
           <div class="bookmark-info">
-            <span class="bookmark-name">{{ row.connection.name }}</span>
+            <div class="bookmark-name-row">
+              <span class="bookmark-name">{{ row.connection.name }}</span>
+              <span
+                v-if="reconnectBadge(row.connection)"
+                class="bookmark-badge"
+                :title="reconnectBadgeTitle(reconnectBadge(row.connection)!)"
+              >{{ reconnectBadgeLabel(reconnectBadge(row.connection)!) }}</span>
+            </div>
             <span class="bookmark-host">{{ buildSubtitle(row.connection) }}</span>
           </div>
         </div>
@@ -525,12 +558,30 @@ async function handleImportFile(event: Event) {
   min-width: 0;
 }
 
+.bookmark-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .bookmark-name {
   font-size: 0.9rem;
   color: var(--app-text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.bookmark-badge {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--app-accent);
+  border: 1px solid var(--app-border-accent);
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 1.5;
 }
 
 .bookmark-host {

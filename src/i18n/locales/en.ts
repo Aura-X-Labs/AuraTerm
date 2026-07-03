@@ -447,6 +447,8 @@ const en = {
     importResult: "Imported {imported}; skipped {skipped}",
     importFailed: "Import failed: {error}",
     saveFailed: "Failed to save: {error}",
+    reconnectTmux: "Auto reconnect with tmux session persistence",
+    reconnectScreen: "Auto reconnect with screen session persistence",
   },
   bookmarkEditor: {
     title: "Edit Bookmark",
