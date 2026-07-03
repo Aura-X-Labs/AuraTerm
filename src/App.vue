@@ -1749,7 +1749,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           key="__bookmark__"
           class="tab-new-btn bookmark-toggle-btn"
           :class="{ active: sidebarOpen }"
-          title="Bookmarks"
+          :title="sidebarOpen ? $t('menu.hideBookmarks') : $t('menu.showBookmarks')"
           style="margin-right: 4px"
           @click="sidebarOpen = !sidebarOpen"
         >
@@ -1761,7 +1761,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           :key="tab.id"
           class="tab-item"
           :data-tab-id="tab.id"
-          :title="renamingTabId === tab.id ? undefined : `${tab.title}\nRight-click to rename`"
+          :title="renamingTabId === tab.id ? undefined : `${tab.title}\n${$t('tabBar.rightClickToRename')}`"
           :class="{
             active: activeTabId === tab.id,
             dragging: draggedTabId === tab.id,
@@ -1790,8 +1790,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           >
           <span v-else class="tab-title">{{ tab.title }}</span>
           <!-- Step 4: 多 pane 可见性指示点 -->
-          <span v-if="visibleNonFocusedTabIds.has(tab.id)" class="tab-pane-dot" title="Visible in another pane" />
-          <button class="tab-close-btn" title="Close Tab" @click.stop="handleCloseTab(tab.id)">
+          <span v-if="visibleNonFocusedTabIds.has(tab.id)" class="tab-pane-dot" :title="$t('tabBar.visibleInAnotherPane')" />
+          <button class="tab-close-btn" :title="$t('menu.closeTab')" @click.stop="handleCloseTab(tab.id)">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
               <line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
               <line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -1799,7 +1799,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           </button>
         </div>
 
-        <button key="__newtab__" class="tab-new-btn" type="button" title="New Tab" @mousedown.stop @click="handleOpenNewTabMenu">+</button>
+        <button key="__newtab__" class="tab-new-btn" type="button" :title="$t('tabBar.newTab')" @mousedown.stop @click="handleOpenNewTabMenu">+</button>
       </TransitionGroup>
 
       <div class="tab-bar-actions">
@@ -1809,7 +1809,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             class="tab-new-btn tab-search-btn"
             :class="{ active: terminalSearchVisible }"
             type="button"
-            title="Find in Terminal (Ctrl+F)"
+            :title="`${$t('menu.findInTerminal')} (Ctrl+F)`"
             :disabled="!activeTab"
             @mousedown.stop
             @click.stop="handleOpenTerminalSearch"
@@ -1830,7 +1830,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             class="tab-new-btn tab-layout-btn"
             :class="{ active: showLayoutMenu }"
             type="button"
-            title="Layout"
+            :title="$t('palette.groups.layout')"
             @mousedown.stop
             @click.stop="toggleLayoutMenu"
           >
@@ -1854,10 +1854,10 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             type="button"
             :disabled="broadcastTargetCount < 2"
             :title="broadcastTargetCount < 2
-              ? 'Broadcast input (split into 2+ panes to enable)'
+              ? $t('tabBar.broadcastDisabled')
               : broadcastInput
-                ? `Broadcast ON — input goes to all ${broadcastTargetCount} visible panes`
-                : 'Broadcast input to all visible panes'"
+                ? $t('tabBar.broadcastOn', { count: broadcastTargetCount })
+                : $t('tabBar.broadcastOff')"
             @mousedown.stop
             @click.stop="toggleBroadcastInput"
           >
@@ -1873,7 +1873,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             class="tab-new-btn tab-files-btn"
             :class="{ active: showRemoteFileManager }"
             type="button"
-            title="Remote Files"
+            :title="showRemoteFileManager ? $t('menu.hideRemoteFiles') : $t('menu.showRemoteFiles')"
             @mousedown.stop
             @click.stop="toggleRemoteFileManager"
           >
@@ -1981,28 +1981,28 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               class="terminal-search-toggle"
               :class="{ active: terminalSearchOptions.caseSensitive }"
               type="button"
-              title="Match Case"
+              :title="$t('search.matchCase')"
               @click="toggleTerminalSearchOption('caseSensitive')"
             >Aa</button>
             <button
               class="terminal-search-toggle"
               :class="{ active: terminalSearchOptions.wholeWord }"
               type="button"
-              title="Match Whole Word"
+              :title="$t('search.wholeWord')"
               @click="toggleTerminalSearchOption('wholeWord')"
             >W</button>
             <button
               class="terminal-search-toggle"
               :class="{ active: terminalSearchOptions.regex }"
               type="button"
-              title="Use Regular Expression"
+              :title="$t('search.regex')"
               @click="toggleTerminalSearchOption('regex')"
             >.*</button>
           </div>
           <div class="terminal-search-actions">
-            <button class="terminal-search-action" type="button" :disabled="!terminalSearchQuery" title="Previous Match" @click="handleFindPreviousInTerminal">↑</button>
-            <button class="terminal-search-action" type="button" :disabled="!terminalSearchQuery" title="Next Match" @click="handleFindNextInTerminal">↓</button>
-            <button class="terminal-search-action close" type="button" title="Close Search" @click="handleCloseTerminalSearch">×</button>
+            <button class="terminal-search-action" type="button" :disabled="!terminalSearchQuery" :title="$t('search.previousMatch')" @click="handleFindPreviousInTerminal">↑</button>
+            <button class="terminal-search-action" type="button" :disabled="!terminalSearchQuery" :title="$t('search.nextMatch')" @click="handleFindNextInTerminal">↓</button>
+            <button class="terminal-search-action close" type="button" :title="$t('search.close')" @click="handleCloseTerminalSearch">×</button>
           </div>
         </div>
 
@@ -2097,19 +2097,19 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                     <span class="terminal-pane-protocol">{{ getTabProtocolLabel(pane.tabId) }}</span>
                   </div>
                   <div class="terminal-pane-actions">
-                    <button type="button" title="Split Right" @click.stop="focusPane(pane.paneId); handleSplitPane('vertical', pane.paneId)">
+                    <button type="button" :title="$t('menu.splitRight')" @click.stop="focusPane(pane.paneId); handleSplitPane('vertical', pane.paneId)">
                       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                         <rect x="1" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
                         <rect x="9" y="1" width="6" height="14" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
                       </svg>
                     </button>
-                    <button type="button" title="Split Down" @click.stop="focusPane(pane.paneId); handleSplitPane('horizontal', pane.paneId)">
+                    <button type="button" :title="$t('menu.splitDown')" @click.stop="focusPane(pane.paneId); handleSplitPane('horizontal', pane.paneId)">
                       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                         <rect x="1" y="1" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
                         <rect x="1" y="9" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
                       </svg>
                     </button>
-                    <button type="button" title="Close Pane" :disabled="paneLeaves.length <= 1" @click.stop="focusPane(pane.paneId); handleClosePane(pane.paneId)">
+                    <button type="button" :title="$t('menu.closePane')" :disabled="paneLeaves.length <= 1" @click.stop="focusPane(pane.paneId); handleClosePane(pane.paneId)">
                       <svg width="12" height="12" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                         <line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                         <line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>

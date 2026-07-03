@@ -69,6 +69,22 @@ const zhCN: Messages = {
     minimize: "最小化",
     zoom: "缩放",
   },
+  tabBar: {
+    newTab: "新建标签页",
+    rightClickToRename: "右键可重命名",
+    visibleInAnotherPane: "在另一个窗格中可见",
+    broadcastDisabled: "广播输入（拆分为 2 个以上窗格后可用）",
+    broadcastOn: "广播已开启 — 输入将发送到全部 {count} 个可见窗格",
+    broadcastOff: "将输入广播到所有可见窗格",
+  },
+  search: {
+    matchCase: "区分大小写",
+    wholeWord: "全字匹配",
+    regex: "使用正则表达式",
+    previousMatch: "上一个匹配",
+    nextMatch: "下一个匹配",
+    close: "关闭搜索",
+  },
   settings: {
     title: "设置",
     tabs: {
