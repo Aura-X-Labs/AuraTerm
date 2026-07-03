@@ -72,6 +72,22 @@ const en = {
     minimize: "Minimize",
     zoom: "Zoom",
   },
+  tabBar: {
+    newTab: "New Tab",
+    rightClickToRename: "Right-click to rename",
+    visibleInAnotherPane: "Visible in another pane",
+    broadcastDisabled: "Broadcast input (split into 2+ panes to enable)",
+    broadcastOn: "Broadcast ON — input goes to all {count} visible panes",
+    broadcastOff: "Broadcast input to all visible panes",
+  },
+  search: {
+    matchCase: "Match Case",
+    wholeWord: "Match Whole Word",
+    regex: "Use Regular Expression",
+    previousMatch: "Previous Match",
+    nextMatch: "Next Match",
+    close: "Close Search",
+  },
   settings: {
     title: "Settings",
     tabs: {
