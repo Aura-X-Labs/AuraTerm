@@ -404,3 +404,13 @@
   color: var(--app-accent);
 }
 
+.tab-ai-btn {
+  width: 34px;
+  font-size: 14px;
+}
+
+.tab-ai-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
