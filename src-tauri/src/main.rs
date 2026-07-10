@@ -2,16 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine as _;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 #[cfg(unix)]
 use std::ffi::CStr;
 
 use serde::Serialize;
 use std::{
-    collections::HashMap,
-    io::{Read, Write},
     sync::{Arc, Mutex},
-    thread,
     time::{Duration, Instant},
 };
 use tauri::{
@@ -26,22 +22,25 @@ mod cloud_sync;
 mod connections;
 mod encryption;
 mod keychain;
+mod pty_broker;
 mod serial;
 mod settings;
 mod ssh;
 mod telnet;
+mod terminal_event_hub;
 mod util;
 mod zmodem;
 
-struct PtySession {
-    master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Box<dyn portable_pty::Child + Send>,
-}
+use pty_broker::{
+    CloseReason, OpenTerminalRequest, PortablePtyAdapter, PtyBroker, TerminalSize, LOCAL_OWNER,
+};
+use terminal_event_hub::{TerminalEvent, TerminalEventHub};
 
 #[derive(Clone)]
 struct AppState {
-    sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    /// Owns every local PTY session; shared seam for the Tauri UI today and
+    /// the Cloud Console agent later.
+    broker: Arc<PtyBroker>,
     window_bounds_save_state: Arc<Mutex<WindowBoundsSaveState>>,
     startup_dir: Arc<Mutex<Option<String>>>,
 }
@@ -330,6 +329,43 @@ fn setup_window_bounds_persistence(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Local Tauri UI adapter: subscribes a session's raw output on the event hub
+/// and keeps the historical behaviour — Zmodem routing, streaming UTF-8
+/// decode, `pty-output:<id>` / `pty-exit:<id>` events — on the UI side of the
+/// raw-byte seam. Zmodem protocol responses are written back through the
+/// broker as trusted local input.
+fn attach_tauri_ui_adapter(
+    app: &AppHandle,
+    broker: &Arc<PtyBroker>,
+    zmodem: &zmodem::ZmodemState,
+    id: &str,
+) {
+    let app_handle = app.clone();
+    let pty_id = id.to_string();
+    let zmodem_state = zmodem.clone();
+    let broker_weak = Arc::downgrade(broker);
+    let mut decoder = util::Utf8StreamDecoder::new();
+    broker.hub().subscribe(id, move |event| match event {
+        TerminalEvent::Output(bytes) => {
+            let (_, response) = util::pump_stream_chunk(
+                &app_handle,
+                &pty_id,
+                &mut decoder,
+                bytes,
+                &zmodem_state,
+            );
+            if !response.is_empty() {
+                if let Some(broker) = broker_weak.upgrade() {
+                    let _ = broker.input(&pty_id, LOCAL_OWNER, &response, LOCAL_OWNER);
+                }
+            }
+        }
+        TerminalEvent::Exit(message) => {
+            util::emit_pty_exit(&app_handle, &pty_id, message.clone());
+        }
+    });
+}
+
 #[command]
 fn start_pty(
     app: AppHandle,
@@ -340,153 +376,46 @@ fn start_pty(
     id: String,
     cwd: Option<String>,
 ) -> Result<String, String> {
-
-    let pty_system = native_pty_system();
-    let pty_pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| error.to_string())?;
-
     let shell_path = resolve_local_shell_path(&app);
+    zmodem.reset_session(&id);
+    // Subscribe before opening so the first prompt bytes cannot be missed.
+    attach_tauri_ui_adapter(&app, &state.broker, zmodem.inner(), &id);
 
-    #[cfg(unix)]
-    let mut command = {
-        let mut command = CommandBuilder::new_default_prog();
-        command.env("SHELL", &shell_path);
-        command.env("TERM", "xterm-256color");
-        command
+    let request = OpenTerminalRequest {
+        session_id: id.clone(),
+        size: TerminalSize { cols, rows },
+        shell_path,
+        cwd,
     };
-
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = CommandBuilder::new(shell_path);
-        command.env("TERM", "xterm-256color");
-        command
-    };
-
-    // Set working directory if specified
-    if let Some(dir) = cwd {
-        if std::path::Path::new(&dir).is_dir() {
-            command.cwd(&dir);
-        }
+    if let Err(error) = state.broker.open(request) {
+        state.broker.hub().drop_session(&id);
+        return Err(error);
     }
-
-    let child = pty_pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| error.to_string())?;
-
-    drop(pty_pair.slave);
-
-    let writer = Arc::new(Mutex::new(pty_pair
-        .master
-        .take_writer()
-        .map_err(|error| error.to_string())?));
-
-    let mut reader = pty_pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| error.to_string())?;
-
-    {
-        let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
-        guard.insert(
-            id.clone(),
-            PtySession {
-                master: pty_pair.master,
-                writer: writer.clone(),
-                child,
-            },
-        );
-    }
-
-    let app_handle = app.clone();
-    let pty_id = id.clone();
-    let pty_writer = writer.clone();
-    let zmodem_state = zmodem.inner().clone();
-    zmodem_state.reset_session(&id);
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 4096];
-        let mut decoder = util::Utf8StreamDecoder::new();
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    util::emit_pty_exit(&app_handle, &pty_id, "PTY closed");
-                    break;
-                }
-                Ok(size) => {
-                    let (_, response) = util::pump_stream_chunk(
-                        &app_handle,
-                        &pty_id,
-                        &mut decoder,
-                        &buffer[..size],
-                        &zmodem_state,
-                    );
-                    if !response.is_empty() {
-                        if let Ok(mut writer) = pty_writer.lock() {
-                            let _ = writer.write_all(&response);
-                            let _ = writer.flush();
-                        }
-                    }
-                }
-                Err(_) => {
-                    util::emit_pty_exit(&app_handle, &pty_id, "PTY read error");
-                    break;
-                }
-            }
-        }
-    });
 
     Ok(id)
 }
 
 #[command]
 fn write_pty_input(state: State<'_, AppState>, id: String, data: String) -> Result<(), String> {
-    let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
-    let Some(session) = guard.get_mut(&id) else {
-        return Err("PTY session not found".to_string());
-    };
-
-    let mut writer = session.writer.lock().map_err(|error| error.to_string())?;
-    writer
-        .write_all(data.as_bytes())
-        .map_err(|error| error.to_string())?;
-    writer.flush().map_err(|error| error.to_string())?;
-
-    Ok(())
+    state
+        .broker
+        .input(&id, LOCAL_OWNER, data.as_bytes(), LOCAL_OWNER)
+        .map(|_| ())
 }
 
 #[command]
 fn write_pty_bytes(state: State<'_, AppState>, id: String, data: Vec<u8>) -> Result<(), String> {
-    let guard = state.sessions.lock().map_err(|error| error.to_string())?;
-    let session = guard.get(&id).ok_or_else(|| "PTY session not found".to_string())?;
-    let mut writer = session.writer.lock().map_err(|error| error.to_string())?;
-    writer.write_all(&data).map_err(|error| error.to_string())?;
-    writer.flush().map_err(|error| error.to_string())
+    state
+        .broker
+        .input(&id, LOCAL_OWNER, &data, LOCAL_OWNER)
+        .map(|_| ())
 }
 
 #[command]
 fn resize_pty(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
-    let Some(session) = guard.get_mut(&id) else {
-        return Ok(());
-    };
-
-    session
-        .master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| error.to_string())?;
-
-    Ok(())
+    state
+        .broker
+        .resize(&id, TerminalSize { cols, rows }, LOCAL_OWNER)
 }
 
 #[command]
@@ -495,10 +424,7 @@ fn close_pty(
     zmodem: State<'_, zmodem::ZmodemState>,
     id: String,
 ) -> Result<(), String> {
-    let mut guard = state.sessions.lock().map_err(|error| error.to_string())?;
-    if let Some(mut session) = guard.remove(&id) {
-        let _ = session.child.kill();
-    }
+    state.broker.close(&id, CloseReason::LocalRequest)?;
     zmodem.reset_session(&id);
     Ok(())
 }
@@ -1005,8 +931,9 @@ fn main() {
         .nth(1)
         .filter(|arg| !arg.starts_with('-') && std::path::Path::new(arg).is_dir());
 
+    let event_hub = Arc::new(TerminalEventHub::new());
     let app_state = AppState {
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        broker: Arc::new(PtyBroker::new(Box::new(PortablePtyAdapter), event_hub)),
         window_bounds_save_state: Arc::new(Mutex::new(WindowBoundsSaveState {
             last_saved: None,
             last_save_at: None,
