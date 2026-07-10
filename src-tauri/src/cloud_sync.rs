@@ -1228,8 +1228,13 @@ pub async fn auraxlab_register(
         .to_string())
 }
 
-/// Sign in to an AuraXLab account, store the returned API token, and select the
-/// AuraXLab provider.
+/// Sign in to an AuraXLab account and select the AuraXLab provider.
+///
+/// Preferred path: exchange the password for a **long-lived, revocable,
+/// sync-scoped credential** (`axsync_…`) so no short-lived generic token is
+/// ever stored on disk. Older servers without that endpoint fall back to the
+/// legacy `/tokens/` flow; those tokens now really expire server-side, after
+/// which the user is asked to sign in again (migration UX).
 #[tauri::command]
 pub async fn auraxlab_login(
     app: AppHandle,
@@ -1240,28 +1245,56 @@ pub async fn auraxlab_login(
 ) -> Result<SyncConfigView, String> {
     let client = http_client()?;
     let resolved_base = resolve_auraxlab_base(&base_url);
-    let url = format!("{}/api/v1/tokens/", resolved_base);
+
+    let device_label = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "AuraTerm".to_string());
+    let credentials_url = format!("{}/api/v1/auraterm/sync/credentials", resolved_base);
     let resp = client
-        .post(url)
-        .basic_auth(&email, Some(password))
+        .post(credentials_url)
+        .basic_auth(&email, Some(password.clone()))
+        .json(&json!({ "deviceLabel": device_label }))
         .send()
         .await
         .map_err(|e| format!("Network error: {e}"))?;
     let status = resp.status();
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     let body = parse_json(&bytes);
-    if !status.is_success() {
+
+    let token = if status.is_success() {
+        body.get("credential")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Server did not return a credential.".to_string())?
+            .to_string()
+    } else if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+    {
+        // Older server: fall back to the legacy short-lived token.
+        let url = format!("{}/api/v1/tokens/", resolved_base);
+        let resp = client
+            .post(url)
+            .basic_auth(&email, Some(password))
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {e}"))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        let body = parse_json(&bytes);
+        if !status.is_success() {
+            return Err(format!("Sign-in failed: {}", json_message(&body, status)));
+        }
+        body.get("token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Server did not return a token.".to_string())?
+            .to_string()
+    } else {
         return Err(format!("Sign-in failed: {}", json_message(&body, status)));
-    }
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Server did not return a token.".to_string())?;
+    };
 
     let mut config = load_config(&app)?;
     config.provider = "auraxlab".to_string();
     config.auraxlab.base_url = resolved_base;
-    config.auraxlab.token = token.to_string();
+    config.auraxlab.token = token;
     config.auraxlab.username = email.clone();
     if config.device_id.is_empty() {
         config.device_id = uuid::Uuid::new_v4().to_string();
@@ -1270,10 +1303,28 @@ pub async fn auraxlab_login(
     Ok(SyncConfigView::from_config(&config, sync_state.is_unlocked()))
 }
 
-/// Sign out of the AuraXLab account (clears the stored token only).
+/// Sign out of the AuraXLab account. A scoped sync credential is revoked
+/// server-side (best effort) before the local copy is cleared, so a leaked
+/// backup of the config cannot keep syncing.
 #[tauri::command]
-pub fn auraxlab_logout(app: AppHandle, sync_state: State<'_, SyncState>) -> Result<SyncConfigView, String> {
+pub async fn auraxlab_logout(
+    app: AppHandle,
+    sync_state: State<'_, SyncState>,
+) -> Result<SyncConfigView, String> {
     let mut config = load_config(&app)?;
+    if config.auraxlab.token.starts_with("axsync_") && !config.auraxlab.base_url.is_empty() {
+        if let Ok(client) = http_client() {
+            let url = format!(
+                "{}/api/v1/auraterm/sync/credentials/current",
+                config.auraxlab.base_url
+            );
+            let _ = client
+                .delete(url)
+                .basic_auth(&config.auraxlab.token, Some(""))
+                .send()
+                .await;
+        }
+    }
     config.auraxlab.token = String::new();
     config.last_remote_version = None;
     save_config(&app, &config)?;
