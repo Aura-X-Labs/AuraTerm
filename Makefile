@@ -1,4 +1,4 @@
-.PHONY: all build clean help release upload
+.PHONY: all build run clean help release upload
 
 all: help
 
@@ -28,6 +28,9 @@ run_timed = @$(subst $$(1),$(1),$(TIME_CMD))
 build: clean
 	$(call run_timed,npm run tauri -- build --bundles $(BUNDLE))
 
+run:
+	npm run tauri -- dev
+
 clean:
 	@python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]"
 
@@ -35,6 +38,7 @@ help:
 	@echo "Makefile targets:"
 	@echo "  all       - Build the application (default)"
 	@echo "  build     - Build the application"
+	@echo "  run       - Run AuraTerm in development mode"
 	@echo "  clean     - Remove build artifacts"
 	@echo "  release   - Update releases JSON metadata from target artifacts"
 	@echo "  upload    - Run release then upload target artifacts and JSON"
