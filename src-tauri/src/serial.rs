@@ -1,5 +1,7 @@
 use serde::Serialize;
-use serialport::{available_ports, DataBits, FlowControl, Parity, SerialPort, StopBits, SerialPortType};
+use serialport::{
+    available_ports, DataBits, FlowControl, Parity, SerialPort, SerialPortType, StopBits,
+};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{
@@ -18,6 +20,20 @@ struct SerialSession {
 #[derive(Clone, Default)]
 pub struct SerialState {
     sessions: Arc<Mutex<HashMap<String, SerialSession>>>,
+    hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
+}
+
+impl SerialState {
+    pub fn new(hub: Arc<crate::terminal_event_hub::TerminalEventHub>) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            hub,
+        }
+    }
+
+    pub async fn contains(&self, id: &str) -> bool {
+        self.sessions.lock().await.contains_key(id)
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -143,14 +159,13 @@ pub async fn start_serial_session(
 
     let _ = app.emit(
         &crate::util::session_event("serial-connected", &id),
-        SerialConnectedEvent {
-            id: id.clone(),
-        },
+        SerialConnectedEvent { id: id.clone() },
     );
 
     let app_handle = app.clone();
     let session_id = id.clone();
     let zmodem_state = zmodem.inner().clone();
+    let event_hub = state.hub.clone();
     zmodem_state.reset_session(&id);
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -160,6 +175,10 @@ pub async fn start_serial_session(
         while !stop_flag.load(Ordering::Relaxed) {
             match reader.read(&mut buffer) {
                 Ok(size) if size > 0 => {
+                    event_hub.publish(
+                        &session_id,
+                        &crate::terminal_event_hub::TerminalEvent::Output(buffer[..size].to_vec()),
+                    );
                     let (_, response) = crate::util::pump_stream_chunk(
                         &app_handle,
                         &session_id,
@@ -184,6 +203,10 @@ pub async fn start_serial_session(
                             format!("Serial read error: {}", error),
                         );
                     }
+                    event_hub.publish(
+                        &session_id,
+                        &crate::terminal_event_hub::TerminalEvent::Exit(error.to_string()),
+                    );
                     break;
                 }
             }
@@ -219,7 +242,9 @@ pub async fn write_serial_bytes(
     data: Vec<u8>,
 ) -> Result<(), String> {
     let guard = state.sessions.lock().await;
-    let session = guard.get(&id).ok_or_else(|| "Serial session not found".to_string())?;
+    let session = guard
+        .get(&id)
+        .ok_or_else(|| "Serial session not found".to_string())?;
     let mut writer = session.writer.lock().map_err(|e| e.to_string())?;
     writer.write_all(&data).map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())

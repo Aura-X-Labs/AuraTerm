@@ -15,6 +15,15 @@ import CommandPalette from "./CommandPalette.vue";
 import CloudSyncDialog from "./CloudSyncDialog.vue";
 import AiAssistantPanel from "./AiAssistantPanel.vue";
 import { aiHasApiKey } from "./ai";
+import {
+  beginCloudBridgeEnrollment,
+  cloudBridgeStatus,
+  connectCloudBridge,
+  redeemCloudBridgeEnrollment,
+  shareSerialToCloud,
+  stopCloudShare,
+  type CloudBridgeStatus,
+} from "./cloudBridge";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useSshTunnels } from "./composables/useSshTunnels";
@@ -78,6 +87,8 @@ const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
 
 const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
+const bridgeStatus = ref<CloudBridgeStatus>({ enrolled: false, connected: false, shares: [] });
+const bridgeBusy = ref(false);
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
 
 // Apply the UI language and keep the native macOS menubar in sync with it.
@@ -387,6 +398,7 @@ function handleGlobalKeyDown(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  void refreshCloudBridgeStatus().catch(() => {});
   if (typeof ResizeObserver !== "undefined") {
     paneResizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -539,6 +551,50 @@ const activeSerialConnectionState = computed<SerialConnectionState | null>(() =>
   }
   return serialConnectionStates.value[activeTab.value.id] ?? "connecting";
 });
+
+const activeSerialShared = computed(() => Boolean(
+  activeTabId.value && bridgeStatus.value.shares.some((share) => share.localSessionId === activeTabId.value),
+));
+
+async function refreshCloudBridgeStatus() {
+  bridgeStatus.value = await cloudBridgeStatus();
+}
+
+async function ensureCloudBridgeConnected(): Promise<boolean> {
+  await refreshCloudBridgeStatus();
+  if (!bridgeStatus.value.enrolled) {
+    const baseUrl = window.prompt("AuraXLab URL", "https://auraxlab.com");
+    if (!baseUrl) return false;
+    const label = window.prompt("Device label", osType.value) || "AuraTerm";
+    const enrollment = await beginCloudBridgeEnrollment(baseUrl, label, osType.value);
+    const approved = window.confirm(
+      `Open ${baseUrl}/console, approve device code ${enrollment.userCode}, and verify fingerprint:\n${enrollment.fingerprint}\n\nPress OK after approval.`,
+    );
+    if (!approved) return false;
+    await redeemCloudBridgeEnrollment();
+  }
+  await connectCloudBridge();
+  await refreshCloudBridgeStatus();
+  return true;
+}
+
+async function toggleActiveSerialCloudShare() {
+  if (!activeTab.value || !activeSerialConfig.value || bridgeBusy.value) return;
+  bridgeBusy.value = true;
+  try {
+    if (activeSerialShared.value) {
+      await stopCloudShare(activeTab.value.id);
+    } else {
+      if (!(await ensureCloudBridgeConnected())) return;
+      await shareSerialToCloud(activeTab.value.id, activeSerialConfig.value.portName);
+    }
+    await refreshCloudBridgeStatus();
+  } catch (error) {
+    window.alert(String(error));
+  } finally {
+    bridgeBusy.value = false;
+  }
+}
 const primaryShortcutLabel = computed(() => (osType.value === "macos" ? "Cmd" : "Ctrl"));
 const activeTerminalSearchResults = computed(() => {
   if (!activeTabId.value) {
@@ -2232,6 +2288,14 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             <span class="terminal-status-pill">{{ activeSerialConnectionState }}</span>
           </div>
           <div class="terminal-statusbar-right">
+            <button
+              type="button"
+              class="terminal-status-cloud"
+              :disabled="bridgeBusy || activeSerialConnectionState !== 'connected'"
+              @click="toggleActiveSerialCloudShare"
+            >
+              {{ activeSerialShared ? 'Stop Cloud RX' : 'Share RX to Cloud' }}
+            </button>
             <span>{{ activeSerialConfig.baudRate }} baud</span>
             <span>{{ formatSerialFrame(activeSerialConfig) }}</span>
             <span>{{ activeSerialConfig.flowControl }}</span>

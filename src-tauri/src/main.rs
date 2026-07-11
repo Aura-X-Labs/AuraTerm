@@ -19,6 +19,7 @@ use tauri::{
 mod logging;
 mod ai;
 mod cloud_sync;
+mod cloud_bridge;
 mod connections;
 mod encryption;
 mod keychain;
@@ -933,7 +934,7 @@ fn main() {
 
     let event_hub = Arc::new(TerminalEventHub::new());
     let app_state = AppState {
-        broker: Arc::new(PtyBroker::new(Box::new(PortablePtyAdapter), event_hub)),
+        broker: Arc::new(PtyBroker::new(Box::new(PortablePtyAdapter), event_hub.clone())),
         window_bounds_save_state: Arc::new(Mutex::new(WindowBoundsSaveState {
             last_saved: None,
             last_save_at: None,
@@ -1059,7 +1060,8 @@ fn main() {
         .manage(ssh::SshState::default())
         .manage(ssh::ForwardingState::default())
         .manage(telnet::TelnetState::default())
-        .manage(serial::SerialState::default())
+        .manage(serial::SerialState::new(event_hub.clone()))
+        .manage(cloud_bridge::CloudBridgeState::new(event_hub.clone()))
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
         .manage(cloud_sync::SyncState::default())
@@ -1106,6 +1108,12 @@ fn main() {
             serial::write_serial_input,
             serial::write_serial_bytes,
             serial::close_serial_session,
+            cloud_bridge::cloud_bridge_begin_enrollment,
+            cloud_bridge::cloud_bridge_redeem_enrollment,
+            cloud_bridge::cloud_bridge_connect,
+            cloud_bridge::cloud_bridge_share_serial,
+            cloud_bridge::cloud_bridge_stop_share,
+            cloud_bridge::cloud_bridge_status,
             zmodem::zmodem_start_send,
             zmodem::zmodem_cancel,
             settings::get_settings,
