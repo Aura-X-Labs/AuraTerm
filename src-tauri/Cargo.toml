@@ -29,6 +29,9 @@ zmodem2 = "0.7.1"
 serialport = "4.8.1"
 aes-gcm = "0.10"
 p256 = { version = "0.13", features = ["ecdh"] }
+# Ed25519 device identity + capability verification for Cloud Console
+# (ADR #1). Pure-Rust, no C toolchain.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"
 sha2 = "0.10"
 argon2 = "0.5"
@@ -41,7 +44,10 @@ rand = "0.8"
 # added on any platform. "stream" exposes bytes_stream() for SSE consumption.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 # StreamExt for consuming reqwest byte streams (AI assistant SSE).
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# WebSocket transport for the Cloud Console bridge (standalone wss relay).
+# rustls reuses the same TLS stack as reqwest/russh; no native TLS added.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 # OS keychain for opt-in "remember master password" auto-unlock.
 # Scoped to macOS/Windows native backends so Linux does not pull in

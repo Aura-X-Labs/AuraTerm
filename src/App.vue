@@ -14,13 +14,14 @@ import MasterPasswordDialog from "./MasterPasswordDialog.vue";
 import TunnelManager from "./TunnelManager.vue";
 import CommandPalette from "./CommandPalette.vue";
 import CloudSyncDialog from "./CloudSyncDialog.vue";
+import AccountDialog from "./AccountDialog.vue";
+import ShareDialog from "./ShareDialog.vue";
 import AiAssistantPanel from "./AiAssistantPanel.vue";
 import { aiHasApiKey } from "./ai";
 import {
-  beginCloudBridgeEnrollment,
   cloudBridgeStatus,
   connectCloudBridge,
-  redeemCloudBridgeEnrollment,
+  restoreCloudBridge,
   shareSessionToCloud,
   stopCloudShare,
   type CloudBridgeStatus,
@@ -88,7 +89,7 @@ const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
 
 const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
-const bridgeStatus = ref<CloudBridgeStatus>({ enrolled: false, connected: false, shares: [] });
+const bridgeStatus = ref<CloudBridgeStatus>({ enrolled: false, connected: false, reconnecting: false, shares: [] });
 const bridgeBusy = ref(false);
 const remoteTxActivity = shallowRef<Record<string, { byteCount: number; at: number }>>({});
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
@@ -107,6 +108,8 @@ const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
 const settings = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const showSettings = ref(false);
 const showCloudSync = ref(false);
+const showAccount = ref(false);
+const shareDialogTab = ref<Tab | null>(null);
 const showAbout = ref(false);
 const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
@@ -284,6 +287,7 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleOpenAbout,
   handleOpenSettings,
   handleOpenCloudSync,
+  handleOpenAccount,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -399,8 +403,17 @@ function handleGlobalKeyDown(event: KeyboardEvent) {
   }
 }
 
+let bridgeStatusTimer: ReturnType<typeof setInterval> | null = null;
+
 onMounted(async () => {
-  void refreshCloudBridgeStatus().catch(() => {});
+  // Restore the persisted device identity, then keep the status pill fresh
+  // (the supervisor reconnects in the background; polling only reflects it).
+  void restoreCloudBridge()
+    .catch(() => false)
+    .finally(() => void refreshCloudBridgeStatus().catch(() => {}));
+  bridgeStatusTimer = setInterval(() => {
+    void refreshCloudBridgeStatus().catch(() => {});
+  }, 10_000);
   if (typeof ResizeObserver !== "undefined") {
     paneResizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -537,6 +550,10 @@ onBeforeUnmount(() => {
   }
 
   clearScheduledWorkspacePersistence();
+  if (bridgeStatusTimer !== null) {
+    clearInterval(bridgeStatusTimer);
+    bridgeStatusTimer = null;
+  }
   if (pendingFitFrame !== null) {
     window.cancelAnimationFrame(pendingFitFrame);
     pendingFitFrame = null;
@@ -582,46 +599,60 @@ async function refreshCloudBridgeStatus() {
 async function ensureCloudBridgeConnected(): Promise<boolean> {
   await refreshCloudBridgeStatus();
   if (!bridgeStatus.value.enrolled) {
-    const baseUrl = window.prompt("AuraXLab URL", "https://auraxlab.com");
-    if (!baseUrl) return false;
-    const label = window.prompt("Device label", osType.value) || "AuraTerm";
-    const enrollment = await beginCloudBridgeEnrollment(baseUrl, label, osType.value);
-    const approved = window.confirm(
-      `Open ${baseUrl}/console, approve device code ${enrollment.userCode}, and verify fingerprint:\n${enrollment.fingerprint}\n\nPress OK after approval.`,
-    );
-    if (!approved) return false;
-    await redeemCloudBridgeEnrollment();
+    // Binding lives in the account center; sharing resumes once bound.
+    showAccount.value = true;
+    return false;
   }
-  await connectCloudBridge();
-  await refreshCloudBridgeStatus();
-  return true;
+  if (!bridgeStatus.value.connected) {
+    await connectCloudBridge();
+    await refreshCloudBridgeStatus();
+  }
+  return bridgeStatus.value.connected;
 }
 
 async function toggleActiveCloudShare() {
   if (!activeTab.value || bridgeBusy.value) return;
+  if (activeCloudShared.value) {
+    bridgeBusy.value = true;
+    try {
+      await stopCloudShare(activeTab.value.id);
+      await refreshCloudBridgeStatus();
+    } catch (error) {
+      window.alert(String(error));
+    } finally {
+      bridgeBusy.value = false;
+    }
+    return;
+  }
+  // Open the share dialog for TX-policy selection; the actual share happens
+  // in confirmShareDialog once the user chooses.
   bridgeBusy.value = true;
   try {
-    if (activeCloudShared.value) {
-      await stopCloudShare(activeTab.value.id);
-    } else {
-      if (!(await ensureCloudBridgeConnected())) return;
-      const selected = window.prompt(
-        "Cloud TX policy: read_only, read_write, or temporary (15 minutes)",
-        "read_only",
-      );
-      if (selected === null) return;
-      const txPolicy = (["read_only", "read_write", "temporary"] as const).find(
-        (value) => value === selected.trim().toLowerCase(),
-      );
-      if (!txPolicy) throw new Error("Invalid Cloud TX policy");
-      await shareSessionToCloud(
-        activeTab.value.id,
-        activeTab.value.session.protocol,
-        activeTab.value.title,
-        txPolicy,
-        txPolicy === "temporary" ? 15 * 60 : undefined,
-      );
-    }
+    if (!(await ensureCloudBridgeConnected())) return;
+    shareDialogTab.value = activeTab.value;
+  } catch (error) {
+    window.alert(String(error));
+  } finally {
+    bridgeBusy.value = false;
+  }
+}
+
+async function confirmShareDialog(payload: {
+  policy: "read_only" | "read_write" | "temporary";
+  minutes: number;
+}) {
+  const tab = shareDialogTab.value;
+  shareDialogTab.value = null;
+  if (!tab) return;
+  bridgeBusy.value = true;
+  try {
+    await shareSessionToCloud(
+      tab.id,
+      tab.session.protocol,
+      tab.title,
+      payload.policy,
+      payload.policy === "temporary" ? payload.minutes * 60 : undefined,
+    );
     await refreshCloudBridgeStatus();
   } catch (error) {
     window.alert(String(error));
@@ -1318,6 +1349,11 @@ function handleOpenCloudSync() {
   showCloudSync.value = true;
 }
 
+function handleOpenAccount() {
+  closeOpenMenus();
+  showAccount.value = true;
+}
+
 function toggleRemoteFileManager() {
   if (!activeSshConfig.value) {
     return;
@@ -1612,6 +1648,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "fullscreen", title: t("palette.cmd.fullscreen"), group: t("palette.groups.view"), run: () => { void handleToggleFullScreen(); } },
     { id: "settings", title: t("palette.cmd.settings"), group: t("palette.groups.app"), keywords: "preferences config", run: () => handleOpenSettings() },
     { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
+    { id: "account", title: t("palette.cmd.account"), group: t("palette.groups.app"), keywords: "account login bind device cloud console auraxlab enroll", run: () => { showAccount.value = true; } },
+    { id: "cloud-share", title: activeCloudShared.value ? t("cloudShare.stopButton") : t("cloudShare.shareButton"), group: t("palette.groups.app"), keywords: "cloud console share session rx tx remote view", enabled: hasTab, run: () => { void toggleActiveCloudShare(); } },
     { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
   ];
@@ -2328,13 +2366,13 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               :disabled="bridgeBusy || activeSerialConnectionState === 'connecting'"
               @click="toggleActiveCloudShare"
             >
-              {{ activeCloudShared ? 'Stop Cloud Share' : 'Share to Cloud' }}
+              {{ activeCloudShared ? t('cloudShare.stopButton') : t('cloudShare.shareButton') }}
             </button>
             <span v-if="activeCloudShare" class="terminal-status-pill">
-              {{ activeCloudShare.txAllowed ? `Cloud RX/TX (${activeCloudShare.txPolicy})` : 'Cloud RX only' }}
+              {{ activeCloudShare.txAllowed ? t('cloudShare.rxTx', { policy: activeCloudShare.txPolicy }) : t('cloudShare.rxOnly') }}
             </span>
             <span v-if="activeRemoteTx" class="terminal-status-pill">
-              Remote TX: {{ activeRemoteTx.byteCount }} bytes
+              {{ t('cloudShare.remoteTx', { count: activeRemoteTx.byteCount }) }}
             </span>
             <span v-if="activeSerialConfig">{{ activeSerialConfig.baudRate }} baud</span>
             <span v-if="activeSerialConfig">{{ formatSerialFrame(activeSerialConfig) }}</span>
@@ -2395,6 +2433,18 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
 
     <SettingsDialog v-if="showSettings" :initial="settings" @save="handleSaveSettings" @cancel="showSettings = false" />
     <CloudSyncDialog v-if="showCloudSync" @close="showCloudSync = false" />
+    <AccountDialog
+      v-if="showAccount"
+      :platform="osType"
+      @close="showAccount = false; void refreshCloudBridgeStatus()"
+      @open-cloud-sync="showAccount = false; showCloudSync = true"
+    />
+    <ShareDialog
+      v-if="shareDialogTab"
+      :session-label="shareDialogTab.title"
+      @cancel="shareDialogTab = null"
+      @share="confirmShareDialog"
+    />
     <AboutDialog v-if="showAbout" @close="showAbout = false" />
 
     <div v-if="showNewTabMenu" class="newtab-overlay" @click="showNewTabMenu = false">

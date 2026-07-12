@@ -9,6 +9,7 @@ interface UseAppEventListenersOptions {
   handleOpenAbout: () => void;
   handleOpenSettings: () => void;
   handleOpenCloudSync: () => void;
+  handleOpenAccount: () => void;
   handleNewLocalSessionFromMenu: () => void;
   handleOpenConnectionFromMenu: (protocol: ConnectionProtocol) => void;
   handleCloseActiveTab: () => void;
@@ -30,6 +31,7 @@ export function useAppEventListeners({
   handleOpenAbout,
   handleOpenSettings,
   handleOpenCloudSync,
+  handleOpenAccount,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -79,6 +81,9 @@ export function useAppEventListeners({
         }),
         listen("menu-open-cloud-sync", () => {
           handleOpenCloudSync();
+        }),
+        listen("menu-open-account", () => {
+          handleOpenAccount();
         }),
         listen("menu-new-local", () => {
           handleNewLocalSessionFromMenu();

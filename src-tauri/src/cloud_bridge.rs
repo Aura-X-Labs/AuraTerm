@@ -1,10 +1,13 @@
-//! Phase-1 Cloud Console bridge for existing Serial sessions.
+//! Cloud Console bridge: device identity, relay admission and the explicit
+//! local-session -> shared-session mapping.
 //!
-//! The agent owns device enrollment, relay admission and the explicit
-//! local-session -> shared-session mapping. RX frames are sent directly from
-//! a bounded process-local channel to the relay HTTP adapter. No terminal
-//! bytes are written to disk, application settings, or logs.
+//! RX frames are sent directly from a bounded process-local channel to the
+//! relay HTTP adapter. No terminal bytes are written to disk, application
+//! settings, or logs. The device credential itself *is* persisted — encrypted
+//! under the device-local key like `sync_config.enc` — so a restart does not
+//! force re-enrollment.
 
+use crate::encryption;
 use crate::shared_session::{SessionPolicy, SessionProtocol, SharedSessionPort, TxPolicy};
 use crate::terminal_event_hub::{SubscriptionToken, TerminalEvent};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -17,27 +20,56 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
+use zeroize::Zeroizing;
+
+const DEVICE_CONFIG_FILE: &str = "console_device.enc";
 
 #[derive(Clone)]
 struct DeviceConfig {
     base_url: String,
+    /// URL-safe base64 of the Ed25519 private seed (32 bytes). Signs every
+    /// proof-of-possession; never leaves the device after enrollment.
     identity_key: String,
+    /// URL-safe base64 of the Ed25519 public key uploaded at enrollment.
+    identity_public: String,
     credential: String,
     device_id: String,
     key_version: u32,
+    label: String,
     boot_id: String,
     relay_connection: String,
+    /// kid -> Ed25519 public key bytes (authority verification material).
     authority_keys: HashMap<String, Vec<u8>>,
+}
+
+/// On-disk form of the device identity (encrypted with the device-local
+/// key). `boot_id` and `relay_connection` are runtime-only and never stored.
+#[derive(Serialize, Deserialize)]
+struct PersistedDevice {
+    base_url: String,
+    identity_key: String,
+    #[serde(default)]
+    identity_public: String,
+    credential: String,
+    device_id: String,
+    key_version: u32,
+    #[serde(default)]
+    label: String,
+    /// kid -> URL-safe base64 verification key, as served at enrollment.
+    authority_keys: HashMap<String, String>,
 }
 
 #[derive(Clone)]
 struct PendingEnrollment {
     base_url: String,
     identity_key: String,
+    identity_public: String,
     pkce_verifier: String,
     device_code: String,
+    user_code: String,
+    label: String,
 }
 
 const DEFAULT_RX_RING_BYTES: usize = 256 * 1024;
@@ -123,11 +155,27 @@ struct PeerCounters {
     received: u64,
 }
 
+/// How agent frames reach the relay right now. Hot-swapped on reconnect so
+/// long-lived pumps always send through the *current* connection.
+#[derive(Clone)]
+enum AgentTransport {
+    /// Development HTTP polling adapter (`/console-relay/v1`).
+    Http { base_url: String, connection: String },
+    /// Standalone wss relay: frames go through the writer task's channel.
+    Ws { outbound: tokio::sync::mpsc::Sender<serde_json::Value> },
+}
+
 #[derive(Default)]
 struct BridgeInner {
     device: Option<DeviceConfig>,
     pending: Option<PendingEnrollment>,
     shares: HashMap<String, SharedSession>,
+    transport: Option<AgentTransport>,
+    /// The supervisor keeps the agent online while this is true; unbind and
+    /// explicit disconnect clear it.
+    want_online: bool,
+    supervisor_running: bool,
+    connecting: bool,
 }
 
 pub struct CloudBridgeState {
@@ -156,10 +204,22 @@ pub struct EnrollmentView {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedeemOutcome {
+    /// "ok" | "pending" | "denied" | "expired"
+    status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeStatus {
     enrolled: bool,
     connected: bool,
+    reconnecting: bool,
     pending_user_code: Option<String>,
+    device_id: Option<String>,
+    device_label: Option<String>,
+    base_url: Option<String>,
+    fingerprint: Option<String>,
     shares: Vec<ShareView>,
 }
 
@@ -194,8 +254,15 @@ struct ChallengeResponse {
     nonce: String,
 }
 #[derive(Deserialize)]
+struct RotateResponse {
+    credential: String,
+    key_version: u32,
+}
+#[derive(Deserialize)]
 struct GrantResponse {
     relay_grant: String,
+    #[serde(default)]
+    relay_url: Option<String>,
 }
 #[derive(Deserialize)]
 struct RelayConnectResponse {
@@ -229,6 +296,92 @@ struct RemoteTxEvent {
     fence: u64,
 }
 
+fn device_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    Ok(dir.join(DEVICE_CONFIG_FILE))
+}
+
+fn save_device_config(app: &AppHandle, device: &DeviceConfig) -> Result<(), String> {
+    let persisted = PersistedDevice {
+        base_url: device.base_url.clone(),
+        identity_key: device.identity_key.clone(),
+        identity_public: device.identity_public.clone(),
+        credential: device.credential.clone(),
+        device_id: device.device_id.clone(),
+        key_version: device.key_version,
+        label: device.label.clone(),
+        authority_keys: device
+            .authority_keys
+            .iter()
+            .map(|(kid, key)| (kid.clone(), URL_SAFE_NO_PAD.encode(key)))
+            .collect(),
+    };
+    let path = device_config_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let key = encryption::load_or_create_local_key(app)?;
+    let plaintext = Zeroizing::new(
+        serde_json::to_vec(&persisted).map_err(|e| format!("serialize device config: {e}"))?,
+    );
+    let encrypted = encryption::encrypt_data(&plaintext, &key)?;
+    std::fs::write(&path, &encrypted).map_err(|e| format!("write device config: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn load_device_config(app: &AppHandle) -> Result<Option<DeviceConfig>, String> {
+    let path = device_config_path(app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let encrypted = std::fs::read(&path).map_err(|e| format!("read device config: {e}"))?;
+    let key = encryption::load_or_create_local_key(app)?;
+    let plaintext = Zeroizing::new(
+        encryption::decrypt_data(&encrypted, &key)
+            .map_err(|_| "device config is corrupt or from another machine".to_string())?,
+    );
+    let persisted: PersistedDevice = serde_json::from_slice(&plaintext)
+        .map_err(|e| format!("parse device config: {e}"))?;
+    let authority_keys = persisted
+        .authority_keys
+        .into_iter()
+        .map(|(kid, encoded)| {
+            URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map(|key| (kid, key))
+                .map_err(|e| format!("invalid stored authority key: {e}"))
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    Ok(Some(DeviceConfig {
+        base_url: persisted.base_url,
+        identity_key: persisted.identity_key,
+        identity_public: persisted.identity_public,
+        credential: persisted.credential,
+        device_id: persisted.device_id,
+        key_version: persisted.key_version,
+        label: persisted.label,
+        boot_id: Uuid::new_v4().to_string(),
+        relay_connection: String::new(),
+        authority_keys,
+    }))
+}
+
+fn delete_device_config(app: &AppHandle) -> Result<(), String> {
+    let path = device_config_path(app)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("remove device config: {e}"))?;
+    }
+    Ok(())
+}
+
 fn normalize_base_url(value: &str) -> Result<String, String> {
     let value = value.trim().trim_end_matches('/');
     if !(value.starts_with("https://")
@@ -254,51 +407,45 @@ fn sha256_hex(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
-fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
-    const BLOCK: usize = 64;
-    let mut normalized = [0_u8; BLOCK];
-    if key.len() > BLOCK {
-        normalized[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        normalized[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36_u8; BLOCK];
-    let mut outer_pad = [0x5c_u8; BLOCK];
-    for index in 0..BLOCK {
-        inner_pad[index] ^= normalized[index];
-        outer_pad[index] ^= normalized[index];
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let inner_digest = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner_digest);
-    format!("{:x}", outer.finalize())
+/// Generate a fresh Ed25519 device identity: (private seed b64, public b64).
+fn ed25519_keypair() -> (String, String) {
+    let signing = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    (
+        URL_SAFE_NO_PAD.encode(signing.to_bytes()),
+        URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes()),
+    )
 }
 
-fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
-    const BLOCK: usize = 64;
-    let mut normalized = [0_u8; BLOCK];
-    if key.len() > BLOCK {
-        normalized[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        normalized[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36_u8; BLOCK];
-    let mut outer_pad = [0x5c_u8; BLOCK];
-    for index in 0..BLOCK {
-        inner_pad[index] ^= normalized[index];
-        outer_pad[index] ^= normalized[index];
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner.finalize());
-    outer.finalize().to_vec()
+/// Sign a domain-separated context with the device's Ed25519 private seed;
+/// returns a URL-safe base64 signature matching the server's `_unb64` proof
+/// format.
+fn ed25519_sign_b64(seed_b64: &str, message: &str) -> Result<String, String> {
+    use ed25519_dalek::Signer;
+    let seed: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|_| "invalid identity key".to_string())?
+        .try_into()
+        .map_err(|_| "invalid identity key length".to_string())?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    Ok(URL_SAFE_NO_PAD.encode(signing.sign(message.as_bytes()).to_bytes()))
+}
+
+/// Verify an Ed25519 signature (e.g. a `cav1` lease grant) with a 32-byte
+/// public key. Any malformed input fails closed.
+fn ed25519_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    use ed25519_dalek::Verifier;
+    let Ok(public_bytes) = <[u8; 32]>::try_from(public_key) else {
+        return false;
+    };
+    let Ok(verifying) = ed25519_dalek::VerifyingKey::from_bytes(&public_bytes) else {
+        return false;
+    };
+    let Ok(sig_bytes) = <[u8; 64]>::try_from(signature) else {
+        return false;
+    };
+    verifying
+        .verify(message, &ed25519_dalek::Signature::from_bytes(&sig_bytes))
+        .is_ok()
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
@@ -338,7 +485,7 @@ fn verify_input_frame(
         .decode(parts[3])
         .map_err(|_| "malformed TX lease signature".to_string())?;
     let signed = format!("lease-grant.{}", parts[2]);
-    if hmac_sha256(key, signed.as_bytes()) != signature {
+    if !ed25519_verify(key, signed.as_bytes(), &signature) {
         return Err("invalid TX lease signature".into());
     }
     let claims: LeaseClaims = serde_json::from_slice(
@@ -408,13 +555,13 @@ pub async fn cloud_bridge_begin_enrollment(
     platform: String,
 ) -> Result<EnrollmentView, String> {
     let base_url = normalize_base_url(&base_url)?;
-    let identity_key = random_secret(48);
+    let (identity_key, identity_public) = ed25519_keypair();
     let pkce_verifier = random_secret(48);
     let response = state
         .client
         .post(format!("{base_url}/api/v1/auraterm/console/enrollments"))
         .json(&json!({
-            "device_public_key": identity_key,
+            "device_public_key": identity_public,
             "pkce_challenge": sha256_hex(&pkce_verifier),
             "label": label,
             "platform": platform,
@@ -427,8 +574,11 @@ pub async fn cloud_bridge_begin_enrollment(
     state.inner.lock().map_err(|e| e.to_string())?.pending = Some(PendingEnrollment {
         base_url,
         identity_key,
+        identity_public,
         pkce_verifier,
         device_code: result.device_code,
+        user_code: result.user_code.clone(),
+        label,
     });
     Ok(EnrollmentView {
         user_code: result.user_code,
@@ -437,10 +587,44 @@ pub async fn cloud_bridge_begin_enrollment(
     })
 }
 
+/// Authorize the pending enrollment with the account password (the
+/// login-and-bind fast path). The password is used for this one request and
+/// never stored; on success the enrollment is approved server-side and
+/// `cloud_bridge_redeem_enrollment` completes without the browser step.
+#[tauri::command]
+pub async fn cloud_bridge_authorize_enrollment(
+    state: State<'_, CloudBridgeState>,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    let pending = state
+        .inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .pending
+        .clone()
+        .ok_or_else(|| "No Cloud Console enrollment is pending.".to_string())?;
+    let fingerprint = sha256_hex(&pending.identity_public);
+    let response = state
+        .client
+        .post(format!(
+            "{}/api/v1/auraterm/console/enrollments/authorize",
+            pending.base_url
+        ))
+        .basic_auth(&email, Some(&password))
+        .json(&json!({"user_code": pending.user_code, "fingerprint": fingerprint}))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let _: serde_json::Value = json_response(response).await?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn cloud_bridge_redeem_enrollment(
+    app: AppHandle,
     state: State<'_, CloudBridgeState>,
-) -> Result<(), String> {
+) -> Result<RedeemOutcome, String> {
     let pending = state
         .inner
         .lock()
@@ -458,6 +642,18 @@ pub async fn cloud_bridge_redeem_enrollment(
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    match response.status().as_u16() {
+        428 => return Ok(RedeemOutcome { status: "pending".into() }),
+        403 => {
+            state.inner.lock().map_err(|e| e.to_string())?.pending = None;
+            return Ok(RedeemOutcome { status: "denied".into() });
+        }
+        410 => {
+            state.inner.lock().map_err(|e| e.to_string())?.pending = None;
+            return Ok(RedeemOutcome { status: "expired".into() });
+        }
+        _ => {}
+    }
     let result: RedeemResponse = json_response(response).await?;
     let authority_keys = result
         .authority_keys
@@ -472,17 +668,20 @@ pub async fn cloud_bridge_redeem_enrollment(
     let device = DeviceConfig {
         base_url: pending.base_url,
         identity_key: pending.identity_key,
+        identity_public: pending.identity_public,
         credential: result.credential,
         device_id: result.device_id,
         key_version: result.key_version,
+        label: pending.label,
         boot_id: Uuid::new_v4().to_string(),
         relay_connection: String::new(),
         authority_keys,
     };
+    save_device_config(&app, &device)?;
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     inner.device = Some(device);
     inner.pending = None;
-    Ok(())
+    Ok(RedeemOutcome { status: "ok".into() })
 }
 
 #[tauri::command]
@@ -490,13 +689,110 @@ pub async fn cloud_bridge_connect(
     app: AppHandle,
     state: State<'_, CloudBridgeState>,
 ) -> Result<(), String> {
-    let mut device = state
+    {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        if inner.device.is_none() {
+            return Err("Enroll this AuraTerm device first.".to_string());
+        }
+        inner.want_online = true;
+    }
+    connect_inner(
+        state.client.clone(),
+        Arc::clone(&state.inner),
+        Arc::clone(&state.port),
+        app.clone(),
+    )
+    .await?;
+    ensure_supervisor(
+        state.client.clone(),
+        Arc::clone(&state.inner),
+        Arc::clone(&state.port),
+        app,
+    );
+    Ok(())
+}
+
+/// Restore the persisted device identity at startup and bring the bridge
+/// online in the background. Missing/undecryptable config is not an error:
+/// the bridge simply stays unenrolled.
+#[tauri::command]
+pub async fn cloud_bridge_restore(
+    app: AppHandle,
+    state: State<'_, CloudBridgeState>,
+) -> Result<bool, String> {
+    let Some(device) = load_device_config(&app).unwrap_or(None) else {
+        return Ok(false);
+    };
+    {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        if inner.device.is_some() {
+            return Ok(true); // already restored
+        }
+        inner.device = Some(device);
+        inner.want_online = true;
+    }
+    ensure_supervisor(
+        state.client.clone(),
+        Arc::clone(&state.inner),
+        Arc::clone(&state.port),
+        app,
+    );
+    Ok(true)
+}
+
+/// Unbind this device: best-effort server-side self-revocation, then drop
+/// all shares, forget the credential and delete the encrypted config file.
+#[tauri::command]
+pub async fn cloud_bridge_unbind(
+    app: AppHandle,
+    state: State<'_, CloudBridgeState>,
+) -> Result<(), String> {
+    let device = {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        inner.want_online = false;
+        inner.pending = None;
+        inner.device.clone()
+    };
+    if let Some(device) = &device {
+        let _ = state
+            .client
+            .delete(format!(
+                "{}/api/v1/auraterm/console/device",
+                device.base_url
+            ))
+            .header("Authorization", format!("Bearer {}", device.credential))
+            .send()
+            .await;
+    }
+    let removed: Vec<SharedSession> = {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        inner.device = None;
+        inner.transport = None;
+        inner.shares.drain().map(|(_, share)| share).collect()
+    };
+    for share in removed {
+        state.port.unsubscribe_rx(&share.subscription);
+    }
+    delete_device_config(&app)?;
+    Ok(())
+}
+
+/// Rotate the device credential and identity key. The *old* Ed25519 key
+/// signs the rotation, so a leaked credential alone cannot rotate; the server
+/// advances key_version and auth_epoch atomically, invalidating the old
+/// material. The new encrypted config is written before returning.
+#[tauri::command]
+pub async fn cloud_bridge_rotate_credential(
+    app: AppHandle,
+    state: State<'_, CloudBridgeState>,
+) -> Result<(), String> {
+    let device = state
         .inner
         .lock()
         .map_err(|e| e.to_string())?
         .device
         .clone()
-        .ok_or_else(|| "Enroll this AuraTerm device first.".to_string())?;
+        .ok_or_else(|| "This AuraTerm device is not bound.".to_string())?;
     let bearer = format!("Bearer {}", device.credential);
     let challenge: ChallengeResponse = json_response(
         state
@@ -512,14 +808,101 @@ pub async fn cloud_bridge_connect(
             .map_err(|e| e.to_string())?,
     )
     .await?;
+    let (new_seed, new_public) = ed25519_keypair();
+    let context = format!(
+        "auraxlab-console|rotate|{}|{}|{}",
+        device.device_id,
+        sha256_hex(&new_public),
+        challenge.nonce
+    );
+    let proof = ed25519_sign_b64(&device.identity_key, &context)?;
+    let result: RotateResponse = json_response(
+        state
+            .client
+            .post(format!("{}/api/v1/auraterm/console/rotate", device.base_url))
+            .header("Authorization", &bearer)
+            .json(&json!({
+                "nonce": challenge.nonce,
+                "new_identity_public_key": new_public,
+                "proof": proof,
+            }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+    .await?;
+    let mut rotated = device.clone();
+    rotated.identity_key = new_seed;
+    rotated.identity_public = new_public;
+    rotated.credential = result.credential;
+    rotated.key_version = result.key_version;
+    save_device_config(&app, &rotated)?;
+    state.inner.lock().map_err(|e| e.to_string())?.device = Some(rotated);
+    Ok(())
+}
+
+async fn connect_inner(
+    client: reqwest::Client,
+    inner: Arc<Mutex<BridgeInner>>,
+    port: Arc<dyn SharedSessionPort>,
+    app: AppHandle,
+) -> Result<(), String> {
+    // Single-flight: a second caller while a connect is in progress is a
+    // no-op instead of racing for the relay connection.
+    {
+        let mut guard = inner.lock().map_err(|e| e.to_string())?;
+        if guard.connecting {
+            return Ok(());
+        }
+        if guard
+            .device
+            .as_ref()
+            .is_some_and(|device| !device.relay_connection.is_empty())
+        {
+            return Ok(());
+        }
+        guard.connecting = true;
+    }
+    let result = connect_attempt(&client, &inner, &port, &app).await;
+    if let Ok(mut guard) = inner.lock() {
+        guard.connecting = false;
+    }
+    result
+}
+
+async fn connect_attempt(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+    port: &Arc<dyn SharedSessionPort>,
+    app: &AppHandle,
+) -> Result<(), String> {
+    let mut device = inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .device
+        .clone()
+        .ok_or_else(|| "Enroll this AuraTerm device first.".to_string())?;
+    let bearer = format!("Bearer {}", device.credential);
+    let challenge: ChallengeResponse = json_response(
+        client
+            .post(format!(
+                "{}/api/v1/auraterm/console/connect-challenge",
+                device.base_url
+            ))
+            .header("Authorization", &bearer)
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+    .await?;
     let context = format!(
         "auraxlab-console|connect-grant|{}|{}|{}|{}|relay:inmemory",
         device.device_id, device.boot_id, device.key_version, challenge.nonce
     );
-    let proof = hmac_sha256_hex(device.identity_key.as_bytes(), context.as_bytes());
+    let proof = ed25519_sign_b64(&device.identity_key, &context)?;
     let grant: GrantResponse = json_response(
-        state
-            .client
+        client
             .post(format!(
                 "{}/api/v1/auraterm/console/connect-grant",
                 device.base_url
@@ -534,35 +917,309 @@ pub async fn cloud_bridge_connect(
             .map_err(|e| e.to_string())?,
     )
     .await?;
-    let relay: RelayConnectResponse = json_response(
-        state
-            .client
-            .post(format!(
-                "{}/console-relay/v1/agent/connect",
-                device.base_url
-            ))
-            .json(&json!({"relay_grant": grant.relay_grant, "boot_id": device.boot_id}))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?,
-    )
-    .await?;
-    device.relay_connection = relay.connection_id;
-    state.inner.lock().map_err(|e| e.to_string())?.device = Some(device.clone());
-    spawn_control_pump(
-        state.client.clone(),
-        Arc::clone(&state.inner),
-        Arc::clone(&state.port),
-        app,
-        device.clone(),
-    );
-    recover_shares(
-        state.client.clone(),
-        Arc::clone(&state.inner),
-        device.clone(),
-    )
-    .await;
+    let relay_url = grant.relay_url.clone().unwrap_or_default();
+    if relay_url.starts_with("ws://") || relay_url.starts_with("wss://") {
+        connect_websocket(client, inner, port, app, device, &grant, &relay_url).await?;
+    } else {
+        let relay: RelayConnectResponse = json_response(
+            client
+                .post(format!(
+                    "{}/console-relay/v1/agent/connect",
+                    device.base_url
+                ))
+                .json(&json!({"relay_grant": grant.relay_grant, "boot_id": device.boot_id}))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .await?;
+        device.relay_connection = relay.connection_id;
+        {
+            let mut guard = inner.lock().map_err(|e| e.to_string())?;
+            guard.device = Some(device.clone());
+            guard.transport = Some(AgentTransport::Http {
+                base_url: device.base_url.clone(),
+                connection: device.relay_connection.clone(),
+            });
+        }
+        spawn_control_pump(
+            client.clone(),
+            Arc::clone(inner),
+            Arc::clone(port),
+            app.clone(),
+            device.clone(),
+        );
+    }
+    recover_shares(client.clone(), Arc::clone(inner)).await;
+    let _ = app.emit("cloud-bridge-connected", ());
     Ok(())
+}
+
+async fn connect_websocket(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+    port: &Arc<dyn SharedSessionPort>,
+    app: &AppHandle,
+    mut device: DeviceConfig,
+    grant: &GrantResponse,
+    relay_url: &str,
+) -> Result<(), String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
+        .map_err(|e| format!("relay websocket connect failed: {e}"))?;
+    socket
+        .send(Message::Text(
+            json!({"kind": "AUTH", "relay_grant": grant.relay_grant,
+                   "boot_id": device.boot_id})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(|e| format!("relay AUTH send failed: {e}"))?;
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+        .await
+        .map_err(|_| "relay AUTH timed out".to_string())?
+        .ok_or_else(|| "relay closed during AUTH".to_string())?
+        .map_err(|e| format!("relay AUTH failed: {e}"))?;
+    let Message::Text(text) = reply else {
+        return Err("unexpected relay AUTH reply".into());
+    };
+    let reply: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if reply.get("kind").and_then(|v| v.as_str()) != Some("AUTH_OK") {
+        return Err(format!(
+            "relay refused the agent: {}",
+            reply.get("error").and_then(|v| v.as_str()).unwrap_or("AUTH_FAILED")
+        ));
+    }
+    device.relay_connection = reply
+        .get("connection_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ws")
+        .to_string();
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(64);
+    {
+        let mut guard = inner.lock().map_err(|e| e.to_string())?;
+        guard.device = Some(device.clone());
+        guard.transport = Some(AgentTransport::Ws { outbound: outbound_tx });
+    }
+    spawn_ws_pumps(
+        client.clone(),
+        Arc::clone(inner),
+        Arc::clone(port),
+        app.clone(),
+        device,
+        socket,
+        outbound_rx,
+    );
+    Ok(())
+}
+
+/// Keep the agent online: whenever the bridge should be connected but the
+/// relay connection is gone (heartbeat failure, network change, server
+/// restart), reconnect with exponential backoff. One supervisor per app.
+fn ensure_supervisor(
+    client: reqwest::Client,
+    inner: Arc<Mutex<BridgeInner>>,
+    port: Arc<dyn SharedSessionPort>,
+    app: AppHandle,
+) {
+    {
+        let Ok(mut guard) = inner.lock() else { return };
+        if guard.supervisor_running {
+            return;
+        }
+        guard.supervisor_running = true;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut failures: u32 = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let should_connect = inner
+                .lock()
+                .ok()
+                .map(|guard| {
+                    guard.want_online
+                        && guard
+                            .device
+                            .as_ref()
+                            .is_some_and(|device| device.relay_connection.is_empty())
+                })
+                .unwrap_or(false);
+            if !should_connect {
+                failures = 0;
+                continue;
+            }
+            match connect_inner(
+                client.clone(),
+                Arc::clone(&inner),
+                Arc::clone(&port),
+                app.clone(),
+            )
+            .await
+            {
+                Ok(()) => failures = 0,
+                Err(_) => {
+                    failures = failures.saturating_add(1);
+                    let backoff = 2_u64.saturating_pow(failures.min(5)).min(60);
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                }
+            }
+        }
+    });
+}
+
+/// Handle one relay->agent frame. Shared by the HTTP polling pump and the
+/// websocket reader so both transports keep identical semantics.
+async fn process_inbound_frame(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+    port: &Arc<dyn SharedSessionPort>,
+    app: &AppHandle,
+    device: &DeviceConfig,
+    mut frame: serde_json::Value,
+) {
+    let kind = frame.get("kind").and_then(|value| value.as_str());
+    if kind == Some("E2EE_INIT") {
+        let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()) else { return; };
+        let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) else { return; };
+        let Some(peer_public) = frame.get("peer_public_key").and_then(|v| v.as_str()) else { return; };
+        let Ok((peer, agent_public)) = derive_peer_cipher(
+            cloud_id, connection_id, peer_public) else { return; };
+        let ring = if let Ok(mut guard) = inner.lock() {
+            guard.shares.values_mut().find_map(|share| {
+                if share.cloud_session_id != cloud_id { return None; }
+                share.peers.insert(connection_id.to_string(), peer.clone());
+                Some(Arc::clone(&share.ring))
+            })
+        } else { None };
+        let Some(ring) = ring else { return; };
+        let Ok(proof) = ed25519_sign_b64(&device.identity_key,
+            &e2ee_context(&device.device_id, cloud_id, connection_id,
+                peer_public, &agent_public)) else { return; };
+        if send_frame(client, inner, cloud_id, json!({
+            "kind": "E2EE_READY", "connection_id": connection_id,
+            "agent_public_key": agent_public, "proof": proof,
+        })).await.is_err() { return; }
+        let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
+        let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
+            "snapshot_seq": seq, "cols": 80, "rows": 24,
+            "data_hex": encode_hex(&bytes)});
+        let _ = send_e2ee_frame(client, inner, cloud_id,
+            connection_id, &peer, &snapshot).await;
+        return;
+    }
+    if kind == Some("E2EE_CLOSE") {
+        if let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) {
+            if let Ok(mut guard) = inner.lock() {
+                for share in guard.shares.values_mut() { share.peers.remove(connection_id); }
+            }
+        }
+        return;
+    }
+    let mut e2ee_reply = None;
+    if kind == Some("E2EE_FRAME") {
+        let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()).map(str::to_string) else { return; };
+        let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()).map(str::to_string) else { return; };
+        let peer = inner.lock().ok().and_then(|guard| guard.shares.values()
+            .find(|share| share.cloud_session_id == cloud_id)
+            .and_then(|share| share.peers.get(&connection_id).cloned()));
+        let Some(peer) = peer else { return; };
+        let Ok(decrypted) = decrypt_e2ee_frame(
+            &cloud_id, &connection_id, &peer, &frame) else { return; };
+        frame = decrypted;
+        e2ee_reply = Some((connection_id, peer));
+    }
+    let kind = frame.get("kind").and_then(|value| value.as_str());
+    if kind == Some("INPUT") {
+        let cloud_id = match frame.get("session_id").and_then(|value| value.as_str()) {
+            Some(value) => value.to_string(),
+            None => return,
+        };
+        let validated = if let Ok(mut guard) = inner.lock() {
+            guard.shares.iter_mut().find_map(|(local_id, share)| {
+                if share.cloud_session_id != cloud_id {
+                    return None;
+                }
+                Some(verify_input_frame(share, device, &frame).map(
+                    |(bytes, fence, input_seq)| {
+                        (local_id.clone(), bytes, fence, input_seq)
+                    },
+                ))
+            })
+        } else {
+            None
+        };
+        if let Some(Ok((local_id, bytes, fence, input_seq))) = validated {
+            let byte_count = bytes.len();
+            let protocol = inner
+                .lock()
+                .ok()
+                .and_then(|guard| guard.shares.get(&local_id).map(|s| s.protocol));
+            if let Some(protocol) = protocol {
+                if port.write_tx(protocol, &local_id, &bytes).await.is_err() {
+                    return;
+                }
+                let _ = app.emit(
+                    "cloud-bridge-remote-tx",
+                    RemoteTxEvent {
+                        local_session_id: local_id,
+                        byte_count,
+                        fence,
+                    },
+                );
+                let ack = json!({
+                        "kind": "INPUT_ACK", "input_seq": input_seq,
+                        "fence": fence, "byte_count": byte_count
+                    });
+                if let Some((connection_id, peer)) = &e2ee_reply {
+                    let _ = send_e2ee_frame(client, inner,
+                        &cloud_id, connection_id, peer, &ack).await;
+                } else {
+                    let _ = send_frame(client, inner, &cloud_id, ack).await;
+                }
+            }
+        }
+        return;
+    }
+    if kind != Some("SESSION_UNSHARE") {
+        return;
+    }
+    let Some(cloud_id) = frame.get("session_id").and_then(|value| value.as_str())
+    else {
+        return;
+    };
+    let removed = if let Ok(mut guard) = inner.lock() {
+        let local_id = guard.shares.iter().find_map(|(local_id, share)| {
+            (share.cloud_session_id == cloud_id).then(|| local_id.clone())
+        });
+        local_id.and_then(|local_id| guard.shares.remove(&local_id))
+    } else {
+        None
+    };
+    if let Some(share) = removed {
+        port.unsubscribe_rx(&share.subscription);
+    }
+}
+
+/// Clear the connection-level state when a transport ends, so the status
+/// pill flips to reconnecting and the supervisor dials again.
+fn mark_disconnected(inner: &Arc<Mutex<BridgeInner>>, relay_connection: &str) {
+    if let Ok(mut guard) = inner.lock() {
+        if guard
+            .device
+            .as_ref()
+            .is_some_and(|configured| configured.relay_connection == relay_connection)
+        {
+            if let Some(configured) = guard.device.as_mut() {
+                configured.relay_connection.clear();
+            }
+            guard.transport = None;
+        }
+    }
 }
 
 fn spawn_control_pump(
@@ -591,129 +1248,8 @@ fn spawn_control_pump(
                 Ok(frames) => frames,
                 Err(_) => break,
             };
-            for mut frame in frames.frames {
-                let kind = frame.get("kind").and_then(|value| value.as_str());
-                if kind == Some("E2EE_INIT") {
-                    let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()) else { continue; };
-                    let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) else { continue; };
-                    let Some(peer_public) = frame.get("peer_public_key").and_then(|v| v.as_str()) else { continue; };
-                    let Ok((peer, agent_public)) = derive_peer_cipher(
-                        cloud_id, connection_id, peer_public) else { continue; };
-                    let ring = if let Ok(mut guard) = inner.lock() {
-                        guard.shares.values_mut().find_map(|share| {
-                            if share.cloud_session_id != cloud_id { return None; }
-                            share.peers.insert(connection_id.to_string(), peer.clone());
-                            Some(Arc::clone(&share.ring))
-                        })
-                    } else { None };
-                    let Some(ring) = ring else { continue; };
-                    let proof = hmac_sha256_hex(device.identity_key.as_bytes(),
-                        e2ee_context(&device.device_id, cloud_id, connection_id,
-                            peer_public, &agent_public).as_bytes());
-                    if send_frame(&client, &device, cloud_id, json!({
-                        "kind": "E2EE_READY", "connection_id": connection_id,
-                        "agent_public_key": agent_public, "proof": proof,
-                    })).await.is_err() { continue; }
-                    let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
-                    let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
-                        "snapshot_seq": seq, "cols": 80, "rows": 24,
-                        "data_hex": encode_hex(&bytes)});
-                    let _ = send_e2ee_frame(&client, &device, cloud_id,
-                        connection_id, &peer, &snapshot).await;
-                    continue;
-                }
-                if kind == Some("E2EE_CLOSE") {
-                    if let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) {
-                        if let Ok(mut guard) = inner.lock() {
-                            for share in guard.shares.values_mut() { share.peers.remove(connection_id); }
-                        }
-                    }
-                    continue;
-                }
-                let mut e2ee_reply = None;
-                if kind == Some("E2EE_FRAME") {
-                    let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()).map(str::to_string) else { continue; };
-                    let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()).map(str::to_string) else { continue; };
-                    let peer = inner.lock().ok().and_then(|guard| guard.shares.values()
-                        .find(|share| share.cloud_session_id == cloud_id)
-                        .and_then(|share| share.peers.get(&connection_id).cloned()));
-                    let Some(peer) = peer else { continue; };
-                    let Ok(decrypted) = decrypt_e2ee_frame(
-                        &cloud_id, &connection_id, &peer, &frame) else { continue; };
-                    frame = decrypted;
-                    e2ee_reply = Some((connection_id, peer));
-                }
-                let kind = frame.get("kind").and_then(|value| value.as_str());
-                if kind == Some("INPUT") {
-                    let cloud_id = match frame.get("session_id").and_then(|value| value.as_str()) {
-                        Some(value) => value.to_string(),
-                        None => continue,
-                    };
-                    let validated = if let Ok(mut guard) = inner.lock() {
-                        guard.shares.iter_mut().find_map(|(local_id, share)| {
-                            if share.cloud_session_id != cloud_id {
-                                return None;
-                            }
-                            Some(verify_input_frame(share, &device, &frame).map(
-                                |(bytes, fence, input_seq)| {
-                                    (local_id.clone(), bytes, fence, input_seq)
-                                },
-                            ))
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some(Ok((local_id, bytes, fence, input_seq))) = validated {
-                        let byte_count = bytes.len();
-                        let protocol = inner
-                            .lock()
-                            .ok()
-                            .and_then(|guard| guard.shares.get(&local_id).map(|s| s.protocol));
-                        if let Some(protocol) = protocol {
-                            if port.write_tx(protocol, &local_id, &bytes).await.is_err() {
-                                continue;
-                            }
-                            let _ = app.emit(
-                                "cloud-bridge-remote-tx",
-                                RemoteTxEvent {
-                                    local_session_id: local_id,
-                                    byte_count,
-                                    fence,
-                                },
-                            );
-                            let ack = json!({
-                                    "kind": "INPUT_ACK", "input_seq": input_seq,
-                                    "fence": fence, "byte_count": byte_count
-                                });
-                            if let Some((connection_id, peer)) = &e2ee_reply {
-                                let _ = send_e2ee_frame(&client, &device,
-                                    &cloud_id, connection_id, peer, &ack).await;
-                            } else {
-                                let _ = send_frame(&client, &device,
-                                    &cloud_id, ack).await;
-                            }
-                        }
-                    }
-                    continue;
-                }
-                if kind != Some("SESSION_UNSHARE") {
-                    continue;
-                }
-                let Some(cloud_id) = frame.get("session_id").and_then(|value| value.as_str())
-                else {
-                    continue;
-                };
-                let removed = if let Ok(mut guard) = inner.lock() {
-                    let local_id = guard.shares.iter().find_map(|(local_id, share)| {
-                        (share.cloud_session_id == cloud_id).then(|| local_id.clone())
-                    });
-                    local_id.and_then(|local_id| guard.shares.remove(&local_id))
-                } else {
-                    None
-                };
-                if let Some(share) = removed {
-                    port.unsubscribe_rx(&share.subscription);
-                }
+            for frame in frames.frames {
+                process_inbound_frame(&client, &inner, &port, &app, &device, frame).await;
             }
             ticks = ticks.wrapping_add(1);
             if ticks % 30 == 0 {
@@ -730,17 +1266,62 @@ fn spawn_control_pump(
                 }
             }
         }
-        if let Ok(mut guard) = inner.lock() {
-            if guard
-                .device
-                .as_ref()
-                .is_some_and(|configured| configured.relay_connection == device.relay_connection)
-            {
-                if let Some(configured) = guard.device.as_mut() {
-                    configured.relay_connection.clear();
+        mark_disconnected(&inner, &device.relay_connection);
+    });
+}
+
+/// Websocket transport: one writer task (channel -> sink, plus heartbeats)
+/// and one reader task feeding `process_inbound_frame`.
+fn spawn_ws_pumps(
+    client: reqwest::Client,
+    inner: Arc<Mutex<BridgeInner>>,
+    port: Arc<dyn SharedSessionPort>,
+    app: AppHandle,
+    device: DeviceConfig,
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    mut outbound_rx: tokio::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut sink, mut stream) = socket.split();
+    let writer_connection = device.relay_connection.clone();
+    let writer_inner = Arc::clone(&inner);
+    tauri::async_runtime::spawn(async move {
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            tokio::select! {
+                envelope = outbound_rx.recv() => {
+                    let Some(envelope) = envelope else { break };
+                    let Ok(text) = serde_json::to_string(&envelope) else { continue };
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    let ping = serde_json::json!({"kind": "HEARTBEAT"}).to_string();
+                    if sink.send(Message::Text(ping.into())).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
+        let _ = sink.close().await;
+        mark_disconnected(&writer_inner, &writer_connection);
+    });
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(message) = stream.next().await {
+            let Ok(message) = message else { break };
+            let Message::Text(text) = message else { continue };
+            let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            if frame.get("kind").and_then(|v| v.as_str()) == Some("HEARTBEAT_ACK") {
+                continue;
+            }
+            process_inbound_frame(&client, &inner, &port, &app, &device, frame).await;
+        }
+        mark_disconnected(&inner, &device.relay_connection);
     });
 }
 
@@ -864,7 +1445,6 @@ pub async fn cloud_bridge_share_session(
         state.client.clone(),
         Arc::clone(&state.inner),
         local_session_id,
-        device,
     );
     Ok(view)
 }
@@ -962,21 +1542,21 @@ fn decrypt_e2ee_frame(session_id: &str, connection_id: &str,
     Ok(decoded)
 }
 
-async fn send_e2ee_frame(client: &reqwest::Client, device: &DeviceConfig,
+async fn send_e2ee_frame(client: &reqwest::Client,
+                         inner: &Arc<Mutex<BridgeInner>>,
                          session_id: &str, connection_id: &str,
                          peer: &PeerCipher, frame: &serde_json::Value
                          ) -> Result<(), String> {
     let _guard = peer.send_lock.lock().await;
     let envelope = encrypt_e2ee_frame(
         session_id, connection_id, "agent", peer, frame)?;
-    send_frame(client, device, session_id, envelope).await
+    send_frame(client, inner, session_id, envelope).await
 }
 
 fn spawn_output_pump(
     client: reqwest::Client,
     inner: Arc<Mutex<BridgeInner>>,
     local_session_id: String,
-    device: DeviceConfig,
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -1016,13 +1596,13 @@ fn spawn_output_pump(
                         "snapshot_seq": snapshot_seq, "cols": 80, "rows": 24,
                         "data_hex": encode_hex(&snapshot_bytes)});
                     for (connection_id, peer) in &peers {
-                        let _ = send_e2ee_frame(&client, &device, &cloud_id,
+                        let _ = send_e2ee_frame(&client, &inner, &cloud_id,
                             connection_id, peer, &snapshot).await;
                     }
                     if let Ok(mut ring) = ring.lock() { ring.delivered_seq = snapshot_seq; };
                     continue;
                 }
-                if send_ring_snapshot(&client, &device, &cloud_id, &ring)
+                if send_ring_snapshot(&client, &inner, &cloud_id, &ring)
                     .await
                     .is_err()
                 {
@@ -1034,10 +1614,10 @@ fn spawn_output_pump(
                 "data_hex": encode_hex(&bytes)});
             if e2ee {
                 for (connection_id, peer) in &peers {
-                    let _ = send_e2ee_frame(&client, &device, &cloud_id,
+                    let _ = send_e2ee_frame(&client, &inner, &cloud_id,
                         connection_id, peer, &output).await;
                 }
-            } else if send_frame(&client, &device, &cloud_id, output)
+            } else if send_frame(&client, &inner, &cloud_id, output)
                 .await.is_err() {
                     break;
             }
@@ -1050,14 +1630,14 @@ fn spawn_output_pump(
 
 async fn send_ring_snapshot(
     client: &reqwest::Client,
-    device: &DeviceConfig,
+    inner: &Arc<Mutex<BridgeInner>>,
     cloud_id: &str,
     ring: &Arc<Mutex<RxRing>>,
 ) -> Result<(), String> {
     let (seq, bytes) = ring.lock().map_err(|e| e.to_string())?.snapshot();
     send_frame(
         client,
-        device,
+        inner,
         cloud_id,
         json!({
             "kind": "TERMINAL_SNAPSHOT", "snapshot_seq": seq,
@@ -1074,7 +1654,6 @@ async fn send_ring_snapshot(
 async fn recover_shares(
     client: reqwest::Client,
     inner: Arc<Mutex<BridgeInner>>,
-    device: DeviceConfig,
 ) {
     let shares = inner
         .lock()
@@ -1102,38 +1681,51 @@ async fn recover_shares(
                 "data_hex": encode_hex(&bytes)});
             let mut ok = true;
             for (connection_id, peer) in &peers {
-                ok &= send_e2ee_frame(&client, &device, &cloud,
+                ok &= send_e2ee_frame(&client, &inner, &cloud,
                     connection_id, peer, &snapshot).await.is_ok();
             }
             ok
         } else {
-            send_ring_snapshot(&client, &device, &cloud, &ring).await.is_ok()
+            send_ring_snapshot(&client, &inner, &cloud, &ring).await.is_ok()
         };
         if recovered {
-            spawn_output_pump(client.clone(), Arc::clone(&inner), local, device.clone());
+            spawn_output_pump(client.clone(), Arc::clone(&inner), local);
         }
     }
 }
 
 async fn send_frame(
     client: &reqwest::Client,
-    device: &DeviceConfig,
+    inner: &Arc<Mutex<BridgeInner>>,
     session_id: &str,
     frame: serde_json::Value,
 ) -> Result<(), String> {
-    let response = client
-        .post(format!(
-            "{}/console-relay/v1/agent/{}/frames",
-            device.base_url, device.relay_connection
-        ))
-        .json(&json!({"session_id": session_id, "frame": frame}))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!("Relay rejected RX frame: {}", response.status()))
+    let transport = inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .transport
+        .clone()
+        .ok_or_else(|| "relay is not connected".to_string())?;
+    match transport {
+        AgentTransport::Http { base_url, connection } => {
+            let response = client
+                .post(format!(
+                    "{base_url}/console-relay/v1/agent/{connection}/frames"
+                ))
+                .json(&json!({"session_id": session_id, "frame": frame}))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                Err(format!("Relay rejected RX frame: {}", response.status()))
+            }
+        }
+        AgentTransport::Ws { outbound } => outbound
+            .send(json!({"session_id": session_id, "frame": frame}))
+            .await
+            .map_err(|_| "relay websocket writer is closed".to_string()),
     }
 }
 
@@ -1189,13 +1781,25 @@ pub fn cloud_bridge_status(state: State<'_, CloudBridgeState>) -> Result<BridgeS
         })
         .collect::<Vec<_>>();
     shares.sort_by(|a, b| a.local_session_id.cmp(&b.local_session_id));
+    let connected = inner
+        .device
+        .as_ref()
+        .is_some_and(|d| !d.relay_connection.is_empty());
     Ok(BridgeStatus {
         enrolled: inner.device.is_some(),
-        connected: inner
+        connected,
+        reconnecting: inner.want_online && !connected && inner.device.is_some(),
+        pending_user_code: inner
+            .pending
+            .as_ref()
+            .map(|pending| pending.user_code.clone()),
+        device_id: inner.device.as_ref().map(|d| d.device_id.clone()),
+        device_label: inner.device.as_ref().map(|d| d.label.clone()),
+        base_url: inner.device.as_ref().map(|d| d.base_url.clone()),
+        fingerprint: inner
             .device
             .as_ref()
-            .is_some_and(|d| !d.relay_connection.is_empty()),
-        pending_user_code: None,
+            .map(|d| sha256_hex(&d.identity_public)),
         shares,
     })
 }
@@ -1204,17 +1808,24 @@ pub fn cloud_bridge_status(state: State<'_, CloudBridgeState>) -> Result<BridgeS
 mod tests {
     use super::*;
 
+    fn authority_signing_key() -> ed25519_dalek::SigningKey {
+        // Deterministic test authority key (fixed seed).
+        ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32])
+    }
+
     fn fixture() -> (DeviceConfig, SharedSession) {
-        let key = b"phase-2-test-authority-key".to_vec();
+        let public = authority_signing_key().verifying_key().to_bytes().to_vec();
         let device = DeviceConfig {
             base_url: String::new(),
             identity_key: String::new(),
+            identity_public: String::new(),
             credential: String::new(),
             device_id: "device-1".into(),
             key_version: 1,
+            label: String::new(),
             boot_id: String::new(),
             relay_connection: String::new(),
-            authority_keys: HashMap::from([("k1".into(), key)]),
+            authority_keys: HashMap::from([("k1".into(), public)]),
         };
         let hub = crate::terminal_event_hub::TerminalEventHub::new();
         let share = SharedSession {
@@ -1237,7 +1848,8 @@ mod tests {
         (device, share)
     }
 
-    fn lease(device: &DeviceConfig, fence: u64, exp: i64) -> String {
+    fn lease(_device: &DeviceConfig, fence: u64, exp: i64) -> String {
+        use ed25519_dalek::Signer;
         let claims = json!({
             "session_id": "session-1", "device_id": "device-1",
             "lease_id": format!("lease-{fence}"), "fence": fence,
@@ -1245,11 +1857,10 @@ mod tests {
             "exp": exp
         });
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let mac = hmac_sha256(
-            &device.authority_keys["k1"],
-            format!("lease-grant.{payload}").as_bytes(),
-        );
-        format!("cav1.k1.{payload}.{}", URL_SAFE_NO_PAD.encode(mac))
+        let signature = authority_signing_key()
+            .sign(format!("lease-grant.{payload}").as_bytes());
+        format!("cav1.k1.{payload}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes()))
     }
 
     fn input(device: &DeviceConfig, fence: u64, seq: u64, exp: i64) -> serde_json::Value {
