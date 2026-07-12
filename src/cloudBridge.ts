@@ -4,6 +4,10 @@ export interface CloudBridgeShare {
   localSessionId: string;
   cloudSessionId: string;
   label: string;
+  protocol: "serial" | "ssh" | "telnet" | "local";
+  txPolicy: "read_only" | "read_write" | "temporary";
+  txExpiresAt?: number | null;
+  txAllowed: boolean;
 }
 
 export interface CloudBridgeStatus {
@@ -37,8 +41,17 @@ export function connectCloudBridge(): Promise<void> {
   return invoke("cloud_bridge_connect");
 }
 
-export function shareSerialToCloud(localSessionId: string, label: string): Promise<CloudBridgeShare> {
-  return invoke("cloud_bridge_share_serial", { localSessionId, label });
+export function shareSessionToCloud(
+  localSessionId: string,
+  protocol: "serial" | "ssh" | "telnet" | "local",
+  label: string,
+  txPolicy: "read_only" | "read_write" | "temporary",
+  txExpiresInSeconds?: number,
+  rxRingBytes = 256 * 1024,
+): Promise<CloudBridgeShare> {
+  return invoke("cloud_bridge_share_session", {
+    localSessionId, protocol, label, txPolicy, txExpiresInSeconds, rxRingBytes,
+  });
 }
 
 export function stopCloudShare(localSessionId: string): Promise<void> {

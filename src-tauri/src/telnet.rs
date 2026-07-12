@@ -18,9 +18,26 @@ struct TelnetSession {
     iac: Arc<Mutex<crate::util::TelnetIacFilter>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TelnetState {
     sessions: Arc<Mutex<HashMap<String, TelnetSession>>>,
+    hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
+}
+
+impl TelnetState {
+    pub fn new(hub: Arc<crate::terminal_event_hub::TerminalEventHub>) -> Self {
+        Self { sessions: Arc::new(Mutex::new(HashMap::new())), hub }
+    }
+
+    pub async fn contains(&self, id: &str) -> bool {
+        self.sessions.lock().await.contains_key(id)
+    }
+
+    pub async fn write_bytes(&self, id: &str, data: &[u8]) -> Result<(), String> {
+        let guard = self.sessions.lock().await;
+        let session = guard.get(id).ok_or_else(|| "Telnet session not found".to_string())?;
+        session.writer.send(data.to_vec()).map_err(|_| "Failed to send Telnet bytes".to_string())
+    }
 }
 
 #[tauri::command]
@@ -45,6 +62,7 @@ pub async fn start_telnet_session(
     let read_id = id.clone();
     let response_tx = tx.clone();
     let reader_iac = iac.clone();
+    let event_hub = state.hub.clone();
     let zmodem_state = zmodem.inner().clone();
     zmodem_state.reset_session(&id);
     let reader_task = tokio::spawn(async move {
@@ -53,6 +71,8 @@ pub async fn start_telnet_session(
         loop {
             match reader.read(&mut buffer).await {
                 Ok(0) => {
+                    event_hub.publish(&read_id, &crate::terminal_event_hub::TerminalEvent::Exit(
+                        "Telnet connection closed".into()));
                     crate::util::emit_pty_exit(&read_app, &read_id, "Telnet connection closed");
                     break;
                 }
@@ -61,6 +81,10 @@ pub async fn start_telnet_session(
                     // never corrupt the terminal; reply to negotiations via the
                     // writer channel.
                     let filtered = reader_iac.lock().await.push(&buffer[..size]);
+                    if !filtered.data.is_empty() {
+                        event_hub.publish(&read_id, &crate::terminal_event_hub::TerminalEvent::Output(
+                            filtered.data.clone()));
+                    }
                     if !filtered.response.is_empty() {
                         let _ = response_tx.send(filtered.response);
                     }
@@ -76,6 +100,8 @@ pub async fn start_telnet_session(
                     }
                 }
                 Err(error) => {
+                    event_hub.publish(&read_id, &crate::terminal_event_hub::TerminalEvent::Exit(
+                        error.to_string()));
                     crate::util::emit_pty_exit(
                         &read_app,
                         &read_id,
@@ -140,9 +166,7 @@ pub async fn write_telnet_bytes(
     id: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    let guard = state.sessions.lock().await;
-    let session = guard.get(&id).ok_or_else(|| "Telnet session not found".to_string())?;
-    session.writer.send(data).map_err(|_| "Failed to send Telnet bytes".to_string())
+    state.write_bytes(&id, &data).await
 }
 
 #[tauri::command]

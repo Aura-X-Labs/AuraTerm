@@ -173,6 +173,7 @@ pub struct SshState {
     /// Single source of truth for every live SSH session, keyed by the
     /// frontend-assigned connection id.
     sessions: Arc<RwLock<HashMap<String, SshSessionState>>>,
+    hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
 }
 
 #[derive(Clone)]
@@ -209,15 +210,25 @@ pub enum ReconnectType {
 
 impl Default for SshState {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(crate::terminal_event_hub::TerminalEventHub::new()))
     }
 }
 
 impl SshState {
-    pub fn new() -> Self {
+    pub fn new(hub: Arc<crate::terminal_event_hub::TerminalEventHub>) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            hub,
         }
+    }
+
+    pub async fn contains(&self, id: &str) -> bool {
+        self.input_sender(id).await.is_some()
+    }
+
+    pub async fn write_bytes(&self, id: &str, data: &[u8]) -> Result<(), String> {
+        let tx = self.input_sender(id).await.ok_or_else(|| "Connection not found".to_string())?;
+        tx.send(data.to_vec()).await.map_err(|_| "SSH connection lost; bytes were not sent".to_string())
     }
 
     /// Return a snapshot clone of `T` extracted from the session at `id`,
@@ -1764,6 +1775,7 @@ async fn run_channel_io_loop(
     auto_login_rules: Vec<AutoLoginRule>,
     post_connect_commands: Vec<String>,
 ) {
+    state.hub.publish(&id, &crate::terminal_event_hub::TerminalEvent::Reconnected);
     let mut last_write_error_notice_at: Option<std::time::Instant> = None;
     let final_exit_message;
     let loop_started_at = std::time::Instant::now();
@@ -1787,6 +1799,7 @@ async fn run_channel_io_loop(
             msg = channel.wait() => {
                 match msg {
                     Some(ChannelMsg::Data { ref data }) => {
+                        state.hub.publish(&id, &crate::terminal_event_hub::TerminalEvent::Output(data.to_vec()));
                         data_msg_count += 1;
                         data_bytes_total += data.len() as u64;
                         let (output, response) = crate::util::pump_stream_chunk(
@@ -1806,6 +1819,7 @@ async fn run_channel_io_loop(
                         }
                     }
                     Some(ChannelMsg::ExtendedData { ref data, ext }) => {
+                        state.hub.publish(&id, &crate::terminal_event_hub::TerminalEvent::Output(data.to_vec()));
                         data_msg_count += 1;
                         data_bytes_total += data.len() as u64;
                         crate::debug_log!(
@@ -1967,6 +1981,8 @@ async fn run_channel_io_loop(
         }
     };
     if !has_reconnect {
+        let message = final_exit_message.clone().unwrap_or_else(|| "SSH connection closed".to_string());
+        state.hub.publish(&id, &crate::terminal_event_hub::TerminalEvent::Exit(message));
         let _ = app.emit(
             &crate::util::session_event("pty-exit", &id),
             PtyExitPayload {
@@ -1974,6 +1990,9 @@ async fn run_channel_io_loop(
                 message: final_exit_message.unwrap_or_else(|| "SSH connection closed".to_string()),
             },
         );
+    } else {
+        state.hub.publish(&id, &crate::terminal_event_hub::TerminalEvent::Disconnected(
+            final_exit_message.unwrap_or_else(|| "SSH connection interrupted".to_string())));
     }
 }
 

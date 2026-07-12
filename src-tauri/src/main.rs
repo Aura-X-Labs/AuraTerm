@@ -29,6 +29,7 @@ mod settings;
 mod ssh;
 mod telnet;
 mod terminal_event_hub;
+mod shared_session;
 mod util;
 mod zmodem;
 
@@ -364,6 +365,7 @@ fn attach_tauri_ui_adapter(
         TerminalEvent::Exit(message) => {
             util::emit_pty_exit(&app_handle, &pty_id, message.clone());
         }
+        TerminalEvent::Disconnected(_) | TerminalEvent::Reconnected => {}
     });
 }
 
@@ -933,6 +935,9 @@ fn main() {
         .filter(|arg| !arg.starts_with('-') && std::path::Path::new(arg).is_dir());
 
     let event_hub = Arc::new(TerminalEventHub::new());
+    let serial_state = serial::SerialState::new(event_hub.clone());
+    let ssh_state = ssh::SshState::new(event_hub.clone());
+    let telnet_state = telnet::TelnetState::new(event_hub.clone());
     let app_state = AppState {
         broker: Arc::new(PtyBroker::new(Box::new(PortablePtyAdapter), event_hub.clone())),
         window_bounds_save_state: Arc::new(Mutex::new(WindowBoundsSaveState {
@@ -941,6 +946,12 @@ fn main() {
         })),
         startup_dir: Arc::new(Mutex::new(startup_dir)),
     };
+    let shared_port: Arc<dyn shared_session::SharedSessionPort> = Arc::new(
+        shared_session::UnifiedSharedSessionPort::new(
+            event_hub.clone(), serial_state.clone(), ssh_state.clone(),
+            telnet_state.clone(), app_state.broker.clone(),
+        ),
+    );
 
     tauri::Builder::default()
         .setup(|_app| {
@@ -1057,11 +1068,11 @@ fn main() {
             }
         })
         .manage(app_state)
-        .manage(ssh::SshState::default())
+        .manage(ssh_state)
         .manage(ssh::ForwardingState::default())
-        .manage(telnet::TelnetState::default())
-        .manage(serial::SerialState::new(event_hub.clone()))
-        .manage(cloud_bridge::CloudBridgeState::new(event_hub.clone()))
+        .manage(telnet_state)
+        .manage(serial_state)
+        .manage(cloud_bridge::CloudBridgeState::new(shared_port))
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
         .manage(cloud_sync::SyncState::default())
@@ -1111,7 +1122,7 @@ fn main() {
             cloud_bridge::cloud_bridge_begin_enrollment,
             cloud_bridge::cloud_bridge_redeem_enrollment,
             cloud_bridge::cloud_bridge_connect,
-            cloud_bridge::cloud_bridge_share_serial,
+            cloud_bridge::cloud_bridge_share_session,
             cloud_bridge::cloud_bridge_stop_share,
             cloud_bridge::cloud_bridge_status,
             zmodem::zmodem_start_send,
