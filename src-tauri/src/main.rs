@@ -834,6 +834,7 @@ fn build_app_menu(
     let close_tab_item = MenuItem::with_id(app, "menu-close-tab", l("Close Tab", "关闭标签页"), true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "menu-open-settings", l("Settings", "设置"), true, None::<&str>)?;
     let cloud_sync_item = MenuItem::with_id(app, "menu-open-cloud-sync", l("Cloud Sync…", "云同步…"), true, None::<&str>)?;
+    let account_item = MenuItem::with_id(app, "menu-open-account", l("AuraXLab Account…", "AuraXLab 账户…"), true, None::<&str>)?;
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
     let command_palette_item = MenuItem::with_id(app, "menu-open-command-palette", l("Command Palette", "命令面板"), true, Some("Cmd+Shift+P"))?;
     let toggle_remote_files_item = MenuItem::with_id(app, "menu-toggle-remote-files", l("Toggle Remote Files", "切换远程文件"), true, None::<&str>)?;
@@ -865,6 +866,7 @@ fn build_app_menu(
         .separator()
         .item(&settings_item)
         .item(&cloud_sync_item)
+        .item(&account_item)
         .separator()
         .item(&exit_item)
         .build()?;
@@ -1120,8 +1122,12 @@ fn main() {
             serial::write_serial_bytes,
             serial::close_serial_session,
             cloud_bridge::cloud_bridge_begin_enrollment,
+            cloud_bridge::cloud_bridge_authorize_enrollment,
             cloud_bridge::cloud_bridge_redeem_enrollment,
             cloud_bridge::cloud_bridge_connect,
+            cloud_bridge::cloud_bridge_restore,
+            cloud_bridge::cloud_bridge_unbind,
+            cloud_bridge::cloud_bridge_rotate_credential,
             cloud_bridge::cloud_bridge_share_session,
             cloud_bridge::cloud_bridge_stop_share,
             cloud_bridge::cloud_bridge_status,
