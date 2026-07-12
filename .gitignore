@@ -35,6 +35,7 @@ git.diff
 *.dmg
 *.exe
 docs
+*.docx
 
 AGENTS.md
 .codefactory/*
