@@ -8,6 +8,9 @@
 use crate::shared_session::{SessionPolicy, SessionProtocol, SharedSessionPort, TxPolicy};
 use crate::terminal_event_hub::{SubscriptionToken, TerminalEvent};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use aes_gcm::{aead::{Aead, KeyInit, Payload}, Aes256Gcm, Nonce};
+use hkdf::Hkdf;
+use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKey};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,6 +42,8 @@ struct PendingEnrollment {
 
 const DEFAULT_RX_RING_BYTES: usize = 256 * 1024;
 const MAX_RX_RING_BYTES: usize = 4 * 1024 * 1024;
+const MAX_E2EE_SNAPSHOT_BYTES: usize = 20 * 1024;
+const MAX_TX_BYTES: usize = 16 * 1024;
 
 struct RxRing {
     chunks: VecDeque<(u64, Vec<u8>)>,
@@ -63,13 +68,15 @@ impl RxRing {
         if bytes.is_empty() {
             return;
         }
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.bytes += bytes.len();
-        self.chunks.push_back((seq, bytes));
-        while self.bytes > self.capacity && self.chunks.len() > 1 {
-            if let Some((_, removed)) = self.chunks.pop_front() {
-                self.bytes -= removed.len();
+        for chunk in bytes.chunks(MAX_TX_BYTES) {
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            self.bytes += chunk.len();
+            self.chunks.push_back((seq, chunk.to_vec()));
+            while self.bytes > self.capacity && self.chunks.len() > 1 {
+                if let Some((_, removed)) = self.chunks.pop_front() {
+                    self.bytes -= removed.len();
+                }
             }
         }
     }
@@ -81,6 +88,12 @@ impl RxRing {
         }
         (self.next_seq.saturating_sub(1), bytes)
     }
+
+    fn e2ee_snapshot(&self) -> (u64, Vec<u8>) {
+        let (seq, bytes) = self.snapshot();
+        let start = bytes.len().saturating_sub(MAX_E2EE_SNAPSHOT_BYTES);
+        (seq, bytes[start..].to_vec())
+    }
 }
 
 struct SharedSession {
@@ -91,8 +104,23 @@ struct SharedSession {
     policy: SessionPolicy,
     ring: Arc<Mutex<RxRing>>,
     output_notify: Arc<tokio::sync::Notify>,
+    e2ee_enabled: bool,
+    peers: HashMap<String, PeerCipher>,
     last_fence: u64,
     last_input_seq: u64,
+}
+
+#[derive(Clone)]
+struct PeerCipher {
+    key: [u8; 32],
+    counters: Arc<Mutex<PeerCounters>>,
+    send_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Default)]
+struct PeerCounters {
+    sent: u64,
+    received: u64,
 }
 
 #[derive(Default)]
@@ -274,7 +302,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.is_empty() || value.len() % 2 != 0 || value.len() > 128 * 1024 {
+    if value.is_empty() || value.len() % 2 != 0 || value.len() > MAX_TX_BYTES * 2 {
         return Err("invalid TX byte length".into());
     }
     (0..value.len())
@@ -563,7 +591,58 @@ fn spawn_control_pump(
                 Ok(frames) => frames,
                 Err(_) => break,
             };
-            for frame in frames.frames {
+            for mut frame in frames.frames {
+                let kind = frame.get("kind").and_then(|value| value.as_str());
+                if kind == Some("E2EE_INIT") {
+                    let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()) else { continue; };
+                    let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) else { continue; };
+                    let Some(peer_public) = frame.get("peer_public_key").and_then(|v| v.as_str()) else { continue; };
+                    let Ok((peer, agent_public)) = derive_peer_cipher(
+                        cloud_id, connection_id, peer_public) else { continue; };
+                    let ring = if let Ok(mut guard) = inner.lock() {
+                        guard.shares.values_mut().find_map(|share| {
+                            if share.cloud_session_id != cloud_id { return None; }
+                            share.peers.insert(connection_id.to_string(), peer.clone());
+                            Some(Arc::clone(&share.ring))
+                        })
+                    } else { None };
+                    let Some(ring) = ring else { continue; };
+                    let proof = hmac_sha256_hex(device.identity_key.as_bytes(),
+                        e2ee_context(&device.device_id, cloud_id, connection_id,
+                            peer_public, &agent_public).as_bytes());
+                    if send_frame(&client, &device, cloud_id, json!({
+                        "kind": "E2EE_READY", "connection_id": connection_id,
+                        "agent_public_key": agent_public, "proof": proof,
+                    })).await.is_err() { continue; }
+                    let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
+                    let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
+                        "snapshot_seq": seq, "cols": 80, "rows": 24,
+                        "data_hex": encode_hex(&bytes)});
+                    let _ = send_e2ee_frame(&client, &device, cloud_id,
+                        connection_id, &peer, &snapshot).await;
+                    continue;
+                }
+                if kind == Some("E2EE_CLOSE") {
+                    if let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) {
+                        if let Ok(mut guard) = inner.lock() {
+                            for share in guard.shares.values_mut() { share.peers.remove(connection_id); }
+                        }
+                    }
+                    continue;
+                }
+                let mut e2ee_reply = None;
+                if kind == Some("E2EE_FRAME") {
+                    let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()).map(str::to_string) else { continue; };
+                    let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()).map(str::to_string) else { continue; };
+                    let peer = inner.lock().ok().and_then(|guard| guard.shares.values()
+                        .find(|share| share.cloud_session_id == cloud_id)
+                        .and_then(|share| share.peers.get(&connection_id).cloned()));
+                    let Some(peer) = peer else { continue; };
+                    let Ok(decrypted) = decrypt_e2ee_frame(
+                        &cloud_id, &connection_id, &peer, &frame) else { continue; };
+                    frame = decrypted;
+                    e2ee_reply = Some((connection_id, peer));
+                }
                 let kind = frame.get("kind").and_then(|value| value.as_str());
                 if kind == Some("INPUT") {
                     let cloud_id = match frame.get("session_id").and_then(|value| value.as_str()) {
@@ -602,16 +681,17 @@ fn spawn_control_pump(
                                     fence,
                                 },
                             );
-                            let _ = send_frame(
-                                &client,
-                                &device,
-                                &cloud_id,
-                                json!({
+                            let ack = json!({
                                     "kind": "INPUT_ACK", "input_seq": input_seq,
                                     "fence": fence, "byte_count": byte_count
-                                }),
-                            )
-                            .await;
+                                });
+                            if let Some((connection_id, peer)) = &e2ee_reply {
+                                let _ = send_e2ee_frame(&client, &device,
+                                    &cloud_id, connection_id, peer, &ack).await;
+                            } else {
+                                let _ = send_frame(&client, &device,
+                                    &cloud_id, ack).await;
+                            }
                         }
                     }
                     continue;
@@ -721,9 +801,9 @@ pub async fn cloud_bridge_share_session(
         .json(&json!({
             "protocol_version": 1,
             "capabilities": if allow_tx {
-                vec!["snapshot_v1", "tx_v1"]
+                vec!["snapshot_v1", "tx_v1", "e2ee_v1", "multi_viewer_v1"]
             } else {
-                vec!["snapshot_v1"]
+                vec!["snapshot_v1", "e2ee_v1", "multi_viewer_v1"]
             },
             "tx_allowed": allow_tx,
             "source_protocol": protocol,
@@ -735,9 +815,6 @@ pub async fn cloud_bridge_share_session(
         .await
         .map_err(|e| e.to_string())?;
     let shared: ShareResponse = json_response(response).await?;
-    send_frame(&state.client, &device, &shared.session_id,
-        json!({"kind": "TERMINAL_SNAPSHOT", "snapshot_seq": 0, "cols": 80, "rows": 24, "data_hex": ""})).await?;
-
     let ring = Arc::new(Mutex::new(RxRing::new(policy.rx_ring_bytes)));
     let output_notify = Arc::new(tokio::sync::Notify::new());
     let callback_ring = Arc::clone(&ring);
@@ -777,6 +854,8 @@ pub async fn cloud_bridge_share_session(
                 policy,
                 ring,
                 output_notify,
+                e2ee_enabled: true,
+                peers: HashMap::new(),
                 last_fence: 0,
                 last_input_seq: 0,
             },
@@ -802,6 +881,97 @@ fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn e2ee_context(device_id: &str, session_id: &str, connection_id: &str,
+                peer_public_key: &str, agent_public_key: &str) -> String {
+    format!("auraxlab-console|e2ee-v1|{device_id}|{session_id}|{connection_id}|{}|{}",
+        sha256_hex(peer_public_key), sha256_hex(agent_public_key))
+}
+
+fn derive_peer_cipher(session_id: &str, connection_id: &str,
+                      peer_public_key: &str) -> Result<(PeerCipher, String), String> {
+    let peer_bytes = URL_SAFE_NO_PAD.decode(peer_public_key)
+        .map_err(|_| "invalid browser E2EE public key".to_string())?;
+    let peer = PublicKey::from_sec1_bytes(&peer_bytes)
+        .map_err(|_| "invalid browser E2EE public key".to_string())?;
+    let secret = EphemeralSecret::random(&mut rand::rngs::OsRng);
+    let agent_public = secret.public_key();
+    let shared = secret.diffie_hellman(&peer);
+    let mut key = [0_u8; 32];
+    let info = format!("auraxlab-console|e2ee-v1|{session_id}|{connection_id}");
+    Hkdf::<Sha256>::new(Some(&[0_u8; 32]), shared.raw_secret_bytes().as_slice())
+        .expand(info.as_bytes(), &mut key)
+        .map_err(|_| "could not derive E2EE key".to_string())?;
+    Ok((PeerCipher { key,
+        counters: Arc::new(Mutex::new(PeerCounters::default())),
+        send_lock: Arc::new(tokio::sync::Mutex::new(())) }, URL_SAFE_NO_PAD.encode(
+        agent_public.to_encoded_point(false).as_bytes())))
+}
+
+fn encrypt_e2ee_frame(session_id: &str, connection_id: &str,
+                      direction: &str, peer: &PeerCipher,
+                      frame: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let cipher = Aes256Gcm::new_from_slice(&peer.key)
+        .map_err(|_| "invalid E2EE key".to_string())?;
+    let mut nonce = [0_u8; 12];
+    rand::thread_rng().fill(&mut nonce);
+    let counter = {
+        let mut counters = peer.counters.lock().map_err(|e| e.to_string())?;
+        counters.sent += 1;
+        counters.sent
+    };
+    let aad = format!("{session_id}|{connection_id}|{direction}|{counter}");
+    let plaintext = serde_json::to_vec(frame).map_err(|e| e.to_string())?;
+    let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), Payload {
+        msg: &plaintext, aad: aad.as_bytes(),
+    }).map_err(|_| "E2EE encryption failed".to_string())?;
+    Ok(json!({
+        "kind": "E2EE_FRAME", "connection_id": connection_id,
+        "counter": counter,
+        "nonce": URL_SAFE_NO_PAD.encode(nonce),
+        "ciphertext": URL_SAFE_NO_PAD.encode(ciphertext),
+    }))
+}
+
+fn decrypt_e2ee_frame(session_id: &str, connection_id: &str,
+                      peer: &PeerCipher, envelope: &serde_json::Value
+                      ) -> Result<serde_json::Value, String> {
+    let nonce = URL_SAFE_NO_PAD.decode(envelope.get("nonce")
+        .and_then(|v| v.as_str()).ok_or_else(|| "missing E2EE nonce".to_string())?)
+        .map_err(|_| "invalid E2EE nonce".to_string())?;
+    if nonce.len() != 12 { return Err("invalid E2EE nonce length".into()); }
+    let ciphertext = URL_SAFE_NO_PAD.decode(envelope.get("ciphertext")
+        .and_then(|v| v.as_str()).ok_or_else(|| "missing E2EE ciphertext".to_string())?)
+        .map_err(|_| "invalid E2EE ciphertext".to_string())?;
+    let cipher = Aes256Gcm::new_from_slice(&peer.key)
+        .map_err(|_| "invalid E2EE key".to_string())?;
+    let counter = envelope.get("counter").and_then(|v| v.as_u64())
+        .ok_or_else(|| "missing E2EE counter".to_string())?;
+    {
+        let counters = peer.counters.lock().map_err(|e| e.to_string())?;
+        if counter != counters.received + 1 {
+            return Err("replayed or out-of-order E2EE frame".into());
+        }
+    }
+    let aad = format!("{session_id}|{connection_id}|browser|{counter}");
+    let plaintext = cipher.decrypt(Nonce::from_slice(&nonce), Payload {
+        msg: &ciphertext, aad: aad.as_bytes(),
+    }).map_err(|_| "E2EE authentication failed".to_string())?;
+    let decoded = serde_json::from_slice(&plaintext)
+        .map_err(|_| "invalid E2EE payload".to_string())?;
+    peer.counters.lock().map_err(|e| e.to_string())?.received = counter;
+    Ok(decoded)
+}
+
+async fn send_e2ee_frame(client: &reqwest::Client, device: &DeviceConfig,
+                         session_id: &str, connection_id: &str,
+                         peer: &PeerCipher, frame: &serde_json::Value
+                         ) -> Result<(), String> {
+    let _guard = peer.send_lock.lock().await;
+    let envelope = encrypt_e2ee_frame(
+        session_id, connection_id, "agent", peer, frame)?;
+    send_frame(client, device, session_id, envelope).await
+}
+
 fn spawn_output_pump(
     client: reqwest::Client,
     inner: Arc<Mutex<BridgeInner>>,
@@ -810,12 +980,14 @@ fn spawn_output_pump(
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let (cloud_id, ring, notify) = match inner.lock().ok().and_then(|guard| {
+            let (cloud_id, ring, notify, e2ee, peers) = match inner.lock().ok().and_then(|guard| {
                 guard.shares.get(&local_session_id).map(|share| {
                     (
                         share.cloud_session_id.clone(),
                         Arc::clone(&share.ring),
                         Arc::clone(&share.output_notify),
+                        share.e2ee_enabled,
+                        share.peers.clone(),
                     )
                 })
             }) {
@@ -837,6 +1009,19 @@ fn spawn_output_pump(
                 .map(|ring| ring.delivered_seq + 1)
                 .unwrap_or(seq);
             if seq != expected {
+                if e2ee {
+                    let (snapshot_seq, snapshot_bytes) = ring.lock()
+                        .map(|r| r.e2ee_snapshot()).unwrap_or_default();
+                    let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
+                        "snapshot_seq": snapshot_seq, "cols": 80, "rows": 24,
+                        "data_hex": encode_hex(&snapshot_bytes)});
+                    for (connection_id, peer) in &peers {
+                        let _ = send_e2ee_frame(&client, &device, &cloud_id,
+                            connection_id, peer, &snapshot).await;
+                    }
+                    if let Ok(mut ring) = ring.lock() { ring.delivered_seq = snapshot_seq; };
+                    continue;
+                }
                 if send_ring_snapshot(&client, &device, &cloud_id, &ring)
                     .await
                     .is_err()
@@ -845,16 +1030,16 @@ fn spawn_output_pump(
                 }
                 continue;
             }
-            if send_frame(
-                &client,
-                &device,
-                &cloud_id,
-                json!({"kind": "OUTPUT", "output_seq": seq, "data_hex": encode_hex(&bytes)}),
-            )
-            .await
-            .is_err()
-            {
-                break;
+            let output = json!({"kind": "OUTPUT", "output_seq": seq,
+                "data_hex": encode_hex(&bytes)});
+            if e2ee {
+                for (connection_id, peer) in &peers {
+                    let _ = send_e2ee_frame(&client, &device, &cloud_id,
+                        connection_id, peer, &output).await;
+                }
+            } else if send_frame(&client, &device, &cloud_id, output)
+                .await.is_err() {
+                    break;
             }
             if let Ok(mut ring) = ring.lock() {
                 ring.delivered_seq = ring.delivered_seq.max(seq);
@@ -902,16 +1087,29 @@ async fn recover_shares(
                         local.clone(),
                         share.cloud_session_id.clone(),
                         Arc::clone(&share.ring),
+                        share.e2ee_enabled,
+                        share.peers.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    for (local, cloud, ring) in shares {
-        if send_ring_snapshot(&client, &device, &cloud, &ring)
-            .await
-            .is_ok()
-        {
+    for (local, cloud, ring, e2ee, peers) in shares {
+        let recovered = if e2ee {
+            let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
+            let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
+                "snapshot_seq": seq, "cols": 80, "rows": 24,
+                "data_hex": encode_hex(&bytes)});
+            let mut ok = true;
+            for (connection_id, peer) in &peers {
+                ok &= send_e2ee_frame(&client, &device, &cloud,
+                    connection_id, peer, &snapshot).await.is_ok();
+            }
+            ok
+        } else {
+            send_ring_snapshot(&client, &device, &cloud, &ring).await.is_ok()
+        };
+        if recovered {
             spawn_output_pump(client.clone(), Arc::clone(&inner), local, device.clone());
         }
     }
@@ -1031,6 +1229,8 @@ mod tests {
             },
             ring: Arc::new(Mutex::new(RxRing::new(DEFAULT_RX_RING_BYTES))),
             output_notify: Arc::new(tokio::sync::Notify::new()),
+            e2ee_enabled: true,
+            peers: HashMap::new(),
             last_fence: 0,
             last_input_seq: 0,
         };
@@ -1091,5 +1291,38 @@ mod tests {
         ring.push(b"def".to_vec());
         assert_eq!(ring.chunks.front().unwrap().0, 2);
         assert_eq!(ring.snapshot(), (2, b"def".to_vec()));
+    }
+
+    #[test]
+    fn e2ee_envelope_round_trips_and_authenticates_direction() {
+        let browser_secret = EphemeralSecret::random(&mut rand::rngs::OsRng);
+        let browser_public = URL_SAFE_NO_PAD.encode(
+            browser_secret.public_key().to_encoded_point(false).as_bytes());
+        let (agent_peer, agent_public) = derive_peer_cipher(
+            "session-1", "connection-1", &browser_public).unwrap();
+        let agent_public = PublicKey::from_sec1_bytes(
+            &URL_SAFE_NO_PAD.decode(agent_public).unwrap()).unwrap();
+        let shared = browser_secret.diffie_hellman(&agent_public);
+        let mut browser_key = [0_u8; 32];
+        Hkdf::<Sha256>::new(Some(&[0_u8; 32]),
+            shared.raw_secret_bytes().as_slice())
+            .expand(b"auraxlab-console|e2ee-v1|session-1|connection-1",
+                &mut browser_key).unwrap();
+        assert_eq!(agent_peer.key, browser_key);
+
+        let input = json!({"kind": "INPUT", "data_hex": "410d0a"});
+        let envelope = encrypt_e2ee_frame(
+            "session-1", "connection-1", "browser",
+            &PeerCipher { key: browser_key,
+                counters: Arc::new(Mutex::new(PeerCounters::default())),
+                send_lock: Arc::new(tokio::sync::Mutex::new(())) },
+            &input).unwrap();
+        assert_eq!(decrypt_e2ee_frame(
+            "session-1", "connection-1", &agent_peer, &envelope).unwrap(),
+            input);
+        assert!(decrypt_e2ee_frame(
+            "session-1", "connection-1", &agent_peer, &envelope).is_err());
+        assert!(decrypt_e2ee_frame(
+            "session-1", "other-connection", &agent_peer, &envelope).is_err());
     }
 }

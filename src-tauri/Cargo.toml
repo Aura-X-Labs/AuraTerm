@@ -28,6 +28,8 @@ ssh-key = "0.6.7"
 zmodem2 = "0.7.1"
 serialport = "4.8.1"
 aes-gcm = "0.10"
+p256 = { version = "0.13", features = ["ecdh"] }
+hkdf = "0.12"
 sha2 = "0.10"
 argon2 = "0.5"
 zeroize = { version = "1.6", features = ["derive"] }
