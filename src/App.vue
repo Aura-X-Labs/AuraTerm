@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import TerminalComponent from "./TerminalComponent.vue";
 import ConnectDialog from "./ConnectDialog.vue";
@@ -20,7 +21,7 @@ import {
   cloudBridgeStatus,
   connectCloudBridge,
   redeemCloudBridgeEnrollment,
-  shareSerialToCloud,
+  shareSessionToCloud,
   stopCloudShare,
   type CloudBridgeStatus,
 } from "./cloudBridge";
@@ -89,6 +90,7 @@ const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
 const bridgeStatus = ref<CloudBridgeStatus>({ enrolled: false, connected: false, shares: [] });
 const bridgeBusy = ref(false);
+const remoteTxActivity = shallowRef<Record<string, { byteCount: number; at: number }>>({});
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
 
 // Apply the UI language and keep the native macOS menubar in sync with it.
@@ -501,6 +503,15 @@ onMounted(async () => {
   }
 
   cleanupFns.push(await registerAppEventListeners());
+  cleanupFns.push(await listen<{ localSessionId: string; byteCount: number }>(
+    "cloud-bridge-remote-tx",
+    ({ payload }) => {
+      remoteTxActivity.value = {
+        ...remoteTxActivity.value,
+        [payload.localSessionId]: { byteCount: payload.byteCount, at: Date.now() },
+      };
+    },
+  ));
 
   await tunnels.registerTunnelListener();
   cleanupFns.push(() => {
@@ -552,8 +563,16 @@ const activeSerialConnectionState = computed<SerialConnectionState | null>(() =>
   return serialConnectionStates.value[activeTab.value.id] ?? "connecting";
 });
 
-const activeSerialShared = computed(() => Boolean(
+const activeCloudShared = computed(() => Boolean(
   activeTabId.value && bridgeStatus.value.shares.some((share) => share.localSessionId === activeTabId.value),
+));
+const activeCloudShare = computed(() => (
+  activeTabId.value
+    ? bridgeStatus.value.shares.find((share) => share.localSessionId === activeTabId.value) ?? null
+    : null
+));
+const activeRemoteTx = computed(() => (
+  activeTabId.value ? remoteTxActivity.value[activeTabId.value] : undefined
 ));
 
 async function refreshCloudBridgeStatus() {
@@ -578,15 +597,30 @@ async function ensureCloudBridgeConnected(): Promise<boolean> {
   return true;
 }
 
-async function toggleActiveSerialCloudShare() {
-  if (!activeTab.value || !activeSerialConfig.value || bridgeBusy.value) return;
+async function toggleActiveCloudShare() {
+  if (!activeTab.value || bridgeBusy.value) return;
   bridgeBusy.value = true;
   try {
-    if (activeSerialShared.value) {
+    if (activeCloudShared.value) {
       await stopCloudShare(activeTab.value.id);
     } else {
       if (!(await ensureCloudBridgeConnected())) return;
-      await shareSerialToCloud(activeTab.value.id, activeSerialConfig.value.portName);
+      const selected = window.prompt(
+        "Cloud TX policy: read_only, read_write, or temporary (15 minutes)",
+        "read_only",
+      );
+      if (selected === null) return;
+      const txPolicy = (["read_only", "read_write", "temporary"] as const).find(
+        (value) => value === selected.trim().toLowerCase(),
+      );
+      if (!txPolicy) throw new Error("Invalid Cloud TX policy");
+      await shareSessionToCloud(
+        activeTab.value.id,
+        activeTab.value.session.protocol,
+        activeTab.value.title,
+        txPolicy,
+        txPolicy === "temporary" ? 15 * 60 : undefined,
+      );
     }
     await refreshCloudBridgeStatus();
   } catch (error) {
@@ -2281,24 +2315,30 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           @resize="fitActiveTerminal"
         />
 
-        <div v-if="activeTab && activeSerialConfig && activeSerialConnectionState" class="terminal-statusbar">
+        <div v-if="activeTab" class="terminal-statusbar">
           <div class="terminal-statusbar-left">
-            <span class="terminal-status-indicator" :class="activeSerialConnectionState" />
-            <span>{{ activeSerialConfig.portName }}</span>
-            <span class="terminal-status-pill">{{ activeSerialConnectionState }}</span>
+            <span class="terminal-status-indicator" :class="activeSerialConnectionState ?? 'connected'" />
+            <span>{{ activeSerialConfig?.portName ?? activeTab.title }}</span>
+            <span class="terminal-status-pill">{{ activeSerialConnectionState ?? activeTab.session.protocol }}</span>
           </div>
           <div class="terminal-statusbar-right">
             <button
               type="button"
               class="terminal-status-cloud"
-              :disabled="bridgeBusy || activeSerialConnectionState !== 'connected'"
-              @click="toggleActiveSerialCloudShare"
+              :disabled="bridgeBusy || activeSerialConnectionState === 'connecting'"
+              @click="toggleActiveCloudShare"
             >
-              {{ activeSerialShared ? 'Stop Cloud RX' : 'Share RX to Cloud' }}
+              {{ activeCloudShared ? 'Stop Cloud Share' : 'Share to Cloud' }}
             </button>
-            <span>{{ activeSerialConfig.baudRate }} baud</span>
-            <span>{{ formatSerialFrame(activeSerialConfig) }}</span>
-            <span>{{ activeSerialConfig.flowControl }}</span>
+            <span v-if="activeCloudShare" class="terminal-status-pill">
+              {{ activeCloudShare.txAllowed ? `Cloud RX/TX (${activeCloudShare.txPolicy})` : 'Cloud RX only' }}
+            </span>
+            <span v-if="activeRemoteTx" class="terminal-status-pill">
+              Remote TX: {{ activeRemoteTx.byteCount }} bytes
+            </span>
+            <span v-if="activeSerialConfig">{{ activeSerialConfig.baudRate }} baud</span>
+            <span v-if="activeSerialConfig">{{ formatSerialFrame(activeSerialConfig) }}</span>
+            <span v-if="activeSerialConfig">{{ activeSerialConfig.flowControl }}</span>
           </div>
         </div>
       </div>

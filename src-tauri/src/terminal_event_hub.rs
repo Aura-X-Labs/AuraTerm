@@ -26,6 +26,10 @@ use std::sync::{Arc, Mutex};
 pub enum TerminalEvent {
     /// Raw bytes read from the transport (pre-Zmodem, pre-UTF-8-decode).
     Output(Vec<u8>),
+    /// A recoverable transport interruption (currently SSH auto-reconnect).
+    Disconnected(String),
+    /// The same logical session resumed after a transport interruption.
+    Reconnected,
     /// The session's read loop ended (clean close, read error, or kill).
     Exit(String),
 }

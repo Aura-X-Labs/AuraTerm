@@ -34,6 +34,16 @@ impl SerialState {
     pub async fn contains(&self, id: &str) -> bool {
         self.sessions.lock().await.contains_key(id)
     }
+
+    pub async fn write_bytes(&self, id: &str, data: &[u8]) -> Result<(), String> {
+        let guard = self.sessions.lock().await;
+        let session = guard
+            .get(id)
+            .ok_or_else(|| "Serial session not found".to_string())?;
+        let mut writer = session.writer.lock().map_err(|e| e.to_string())?;
+        writer.write_all(data).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -241,13 +251,7 @@ pub async fn write_serial_bytes(
     id: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    let guard = state.sessions.lock().await;
-    let session = guard
-        .get(&id)
-        .ok_or_else(|| "Serial session not found".to_string())?;
-    let mut writer = session.writer.lock().map_err(|e| e.to_string())?;
-    writer.write_all(&data).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+    state.write_bytes(&id, &data).await
 }
 
 #[tauri::command]
