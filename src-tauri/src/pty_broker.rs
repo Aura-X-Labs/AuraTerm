@@ -691,6 +691,7 @@ mod tests {
                     }
                 }
                 Ok(TerminalEvent::Exit(_)) => break,
+                Ok(_) => continue,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
