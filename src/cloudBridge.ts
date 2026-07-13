@@ -14,6 +14,8 @@ export interface CloudBridgeStatus {
   enrolled: boolean;
   connected: boolean;
   reconnecting: boolean;
+  /** Enrolled and online via presence pings, holding no relay connection. */
+  standby: boolean;
   pendingUserCode?: string | null;
   deviceId?: string | null;
   deviceLabel?: string | null;

@@ -835,6 +835,7 @@ fn build_app_menu(
     let settings_item = MenuItem::with_id(app, "menu-open-settings", l("Settings", "设置"), true, None::<&str>)?;
     let cloud_sync_item = MenuItem::with_id(app, "menu-open-cloud-sync", l("Cloud Sync…", "云同步…"), true, None::<&str>)?;
     let account_item = MenuItem::with_id(app, "menu-open-account", l("AuraXLab Account…", "AuraXLab 账户…"), true, None::<&str>)?;
+    let auto_share_item = MenuItem::with_id(app, "menu-toggle-auto-share", l("Auto-share Active Session", "自动共享当前会话"), true, None::<&str>)?;
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
     let command_palette_item = MenuItem::with_id(app, "menu-open-command-palette", l("Command Palette", "命令面板"), true, Some("Cmd+Shift+P"))?;
     let toggle_remote_files_item = MenuItem::with_id(app, "menu-toggle-remote-files", l("Toggle Remote Files", "切换远程文件"), true, None::<&str>)?;
@@ -867,6 +868,7 @@ fn build_app_menu(
         .item(&settings_item)
         .item(&cloud_sync_item)
         .item(&account_item)
+        .item(&auto_share_item)
         .separator()
         .item(&exit_item)
         .build()?;
@@ -1026,6 +1028,9 @@ fn main() {
                 }
                 "menu-open-cloud-sync" => {
                     let _ = app.emit("menu-open-cloud-sync", ());
+                }
+                "menu-toggle-auto-share" => {
+                    let _ = app.emit("menu-toggle-auto-share", ());
                 }
                 "menu-new-local" => {
                     let _ = app.emit("menu-new-local", ());

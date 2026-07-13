@@ -89,7 +89,7 @@ const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
 
 const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
-const bridgeStatus = ref<CloudBridgeStatus>({ enrolled: false, connected: false, reconnecting: false, shares: [] });
+const bridgeStatus = ref<CloudBridgeStatus>({ enrolled: false, connected: false, reconnecting: false, standby: false, shares: [] });
 const bridgeBusy = ref(false);
 const remoteTxActivity = shallowRef<Record<string, { byteCount: number; at: number }>>({});
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
@@ -288,6 +288,7 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleOpenSettings,
   handleOpenCloudSync,
   handleOpenAccount,
+  handleToggleAutoShare,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -412,7 +413,15 @@ onMounted(async () => {
     .catch(() => false)
     .finally(() => void refreshCloudBridgeStatus().catch(() => {}));
   bridgeStatusTimer = setInterval(() => {
-    void refreshCloudBridgeStatus().catch(() => {});
+    void refreshCloudBridgeStatus()
+      .then(() => {
+        // Self-healing: re-align the auto share slot if a share attempt was
+        // dropped (e.g. the PTY was not live yet) or a stale share remains.
+        if (settings.value.autoShareToCloud && !autoShareConverged.value) {
+          scheduleAutoShareSync();
+        }
+      })
+      .catch(() => {});
   }, 10_000);
   if (typeof ResizeObserver !== "undefined") {
     paneResizeObserver = new ResizeObserver((entries) => {
@@ -615,6 +624,11 @@ async function toggleActiveCloudShare() {
   if (activeCloudShared.value) {
     bridgeBusy.value = true;
     try {
+      // A manual stop is an explicit "stop sharing": it also turns the
+      // auto-share switch off so the watcher does not re-share the tab.
+      if (settings.value.autoShareToCloud) {
+        persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: false });
+      }
       await stopCloudShare(activeTab.value.id);
       await refreshCloudBridgeStatus();
     } catch (error) {
@@ -660,6 +674,88 @@ async function confirmShareDialog(payload: {
     bridgeBusy.value = false;
   }
 }
+
+// ── Auto-share: one switch, the cloud share slot follows the active tab ─────
+// The device holds a single shared-session slot server-side, so auto mode
+// means: keep that slot on whichever tab is active, read-only, no per-session
+// confirmation, until the user turns the switch off.
+let autoShareTimer: ReturnType<typeof setTimeout> | null = null;
+let autoShareBusy = false;
+
+function scheduleAutoShareSync(delayMs = 400) {
+  // The share slot follows the MAIN window's active tab; child windows must
+  // not fight over the device's single slot.
+  if (!isMainWindow || !settings.value.autoShareToCloud) return;
+  if (autoShareTimer) clearTimeout(autoShareTimer);
+  autoShareTimer = setTimeout(() => {
+    autoShareTimer = null;
+    void syncAutoShare();
+  }, delayMs);
+}
+
+async function syncAutoShare() {
+  if (!settings.value.autoShareToCloud || autoShareBusy) return;
+  if (!bridgeStatus.value.enrolled) return;
+  autoShareBusy = true;
+  try {
+    await refreshCloudBridgeStatus().catch(() => {});
+    const target = activeTab.value ?? null;
+    for (const share of bridgeStatus.value.shares) {
+      if (share.localSessionId !== target?.id) {
+        await stopCloudShare(share.localSessionId).catch(() => {});
+      }
+    }
+    if (target && !bridgeStatus.value.shares.some((share) => share.localSessionId === target.id)) {
+      // A freshly opened tab may not have a live PTY yet; a failed attempt
+      // is dropped silently and the next status poll converges.
+      await shareSessionToCloud(target.id, target.session.protocol, target.title, "read_only")
+        .catch(() => {});
+    }
+    await refreshCloudBridgeStatus();
+  } finally {
+    autoShareBusy = false;
+  }
+}
+
+const autoShareConverged = computed(() => {
+  const target = activeTab.value?.id ?? null;
+  const shares = bridgeStatus.value.shares;
+  return target
+    ? shares.length === 1 && shares[0].localSessionId === target
+    : shares.length === 0;
+});
+
+function handleToggleAutoShare() {
+  if (!isMainWindow) return; // the menu event broadcasts to every window
+  const next = !settings.value.autoShareToCloud;
+  persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: next });
+  if (next && !bridgeStatus.value.enrolled) {
+    // Binding lives in the account center; auto-share starts once bound.
+    showAccount.value = true;
+  }
+}
+
+// Side effects live on the setting itself so the menu, palette and settings
+// dialog all behave identically. Runs on startup too (persisted switch),
+// where an unenrolled bridge just waits for restore + the status poll.
+watch(() => settings.value.autoShareToCloud, (on, was) => {
+  if (!isMainWindow || on === was) return;
+  if (on) {
+    scheduleAutoShareSync(0);
+    return;
+  }
+  if (autoShareTimer) {
+    clearTimeout(autoShareTimer);
+    autoShareTimer = null;
+  }
+  void (async () => {
+    for (const share of bridgeStatus.value.shares) {
+      await stopCloudShare(share.localSessionId).catch(() => {});
+    }
+    await refreshCloudBridgeStatus();
+  })();
+});
+
 const primaryShortcutLabel = computed(() => (osType.value === "macos" ? "Cmd" : "Ctrl"));
 const activeTerminalSearchResults = computed(() => {
   if (!activeTabId.value) {
@@ -1253,6 +1349,12 @@ watch(activeSshConfig, (value) => {
   }
 });
 
+// Follow the active session: debounced so rapid tab switching settles on the
+// final tab before the share slot is moved.
+watch(activeTabId, () => {
+  scheduleAutoShareSync();
+});
+
 function handleTabClick(tabId: string) {
   if (suppressTabClick.value) {
     suppressTabClick.value = false;
@@ -1414,6 +1516,13 @@ function openConnect(protocol: ConnectionProtocol) {
 function handleCloseTab(id: string) {
   const previousTabs = tabs.value;
   const nextTabs = previousTabs.filter((tab) => tab.id !== id);
+
+  // A share must not outlive its local session.
+  if (bridgeStatus.value.shares.some((share) => share.localSessionId === id)) {
+    void stopCloudShare(id)
+      .then(() => refreshCloudBridgeStatus())
+      .catch(() => {});
+  }
 
   if (tabContextMenu.value?.tabId === id) {
     tabContextMenu.value = null;
@@ -1650,6 +1759,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
     { id: "account", title: t("palette.cmd.account"), group: t("palette.groups.app"), keywords: "account login bind device cloud console auraxlab enroll", run: () => { showAccount.value = true; } },
     { id: "cloud-share", title: activeCloudShared.value ? t("cloudShare.stopButton") : t("cloudShare.shareButton"), group: t("palette.groups.app"), keywords: "cloud console share session rx tx remote view", enabled: hasTab, run: () => { void toggleActiveCloudShare(); } },
+    { id: "auto-share-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.autoShareOff") : t("cloudShare.autoShareOn"), group: t("palette.groups.app"), keywords: "cloud console auto share follow active session", run: () => { void handleToggleAutoShare(); } },
     { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
   ];
@@ -2368,6 +2478,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             >
               {{ activeCloudShared ? t('cloudShare.stopButton') : t('cloudShare.shareButton') }}
             </button>
+            <span v-if="settings.autoShareToCloud" class="terminal-status-pill">
+              {{ t('cloudShare.autoShareBadge') }}
+            </span>
             <span v-if="activeCloudShare" class="terminal-status-pill">
               {{ activeCloudShare.txAllowed ? t('cloudShare.rxTx', { policy: activeCloudShare.txPolicy }) : t('cloudShare.rxOnly') }}
             </span>

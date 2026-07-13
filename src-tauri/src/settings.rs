@@ -253,6 +253,10 @@ pub struct Settings {
     /// Automatically open the SFTP browser for the active SSH session.
     #[serde(default)]
     pub auto_open_sftp: bool,
+    /// Keep the Cloud Console share slot on the active session (read-only)
+    /// without per-session confirmation, until switched off.
+    #[serde(default)]
+    pub auto_share_to_cloud: bool,
     /// Destination directory for files received through inline Zmodem.
     #[serde(default = "default_zmodem_download_path")]
     pub zmodem_download_path: String,
@@ -321,6 +325,7 @@ impl Default for Settings {
             quick_buttons: vec![],
             output_rules: vec![],
             auto_open_sftp: false,
+            auto_share_to_cloud: false,
             zmodem_download_path: default_zmodem_download_path(),
             last_serial_config: None,
             recent_serial_configs: vec![],

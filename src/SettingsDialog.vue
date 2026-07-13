@@ -904,6 +904,19 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               @change="update('restoreTabsOnStartup', inputChecked($event))"
             >
           </label>
+
+          <label class="settings-field settings-field--toggle">
+            <span>
+              <strong>{{ $t('settings.autoShareToCloud') }}</strong>
+              <small>{{ $t('settings.autoShareToCloudHint') }}</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :checked="settings.autoShareToCloud"
+              @change="update('autoShareToCloud', inputChecked($event))"
+            >
+          </label>
         </div>
 
         <!-- Keyboard & Mouse Tab -->

@@ -76,6 +76,11 @@ const DEFAULT_RX_RING_BYTES: usize = 256 * 1024;
 const MAX_RX_RING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_E2EE_SNAPSHOT_BYTES: usize = 20 * 1024;
 const MAX_TX_BYTES: usize = 16 * 1024;
+/// Idle mode (no shares): presence ping cadence and how long a share-less
+/// relay connection is kept before downgrading, so a quick unshare/re-share
+/// does not flap the connection.
+const IDLE_PING_INTERVAL_SECS: u64 = 30;
+const IDLE_DOWNGRADE_GRACE_SECS: u64 = 60;
 
 struct RxRing {
     chunks: VecDeque<(u64, Vec<u8>)>,
@@ -136,7 +141,6 @@ struct SharedSession {
     policy: SessionPolicy,
     ring: Arc<Mutex<RxRing>>,
     output_notify: Arc<tokio::sync::Notify>,
-    e2ee_enabled: bool,
     peers: HashMap<String, PeerCipher>,
     last_fence: u64,
     last_input_seq: u64,
@@ -215,6 +219,8 @@ pub struct BridgeStatus {
     enrolled: bool,
     connected: bool,
     reconnecting: bool,
+    /// Enrolled and online-by-ping, holding no relay connection (no shares).
+    standby: bool,
     pending_user_code: Option<String>,
     device_id: Option<String>,
     device_label: Option<String>,
@@ -1018,9 +1024,71 @@ async fn connect_websocket(
     Ok(())
 }
 
-/// Keep the agent online: whenever the bridge should be connected but the
-/// relay connection is gone (heartbeat failure, network change, server
-/// restart), reconnect with exponential backoff. One supervisor per app.
+/// Deliberately drop the relay connection for idle mode. Clearing the
+/// transport closes the websocket writer channel (the writer then closes
+/// the socket) and makes the HTTP pump exit at its next tick; an HTTP relay
+/// connection is also deleted server-side so presence drops immediately.
+async fn disconnect_transport(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+) {
+    let transport = {
+        let Ok(mut guard) = inner.lock() else { return };
+        if let Some(device) = guard.device.as_mut() {
+            device.relay_connection.clear();
+        }
+        guard.transport.take()
+    };
+    if let Some(AgentTransport::Http { base_url, connection }) = transport {
+        let _ = client
+            .delete(format!("{base_url}/console-relay/v1/agent/{connection}"))
+            .send()
+            .await;
+    }
+}
+
+#[derive(Deserialize)]
+struct PresencePingResponse {
+    #[serde(default)]
+    ping_interval: Option<u64>,
+}
+
+/// Idle-mode liveness: one authenticated POST carrying no payload. The
+/// server stages it in Redis with a short TTL; no relay connection exists.
+async fn idle_presence_ping(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+) -> Result<Option<u64>, String> {
+    let device = inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .device
+        .clone()
+        .ok_or_else(|| "device is not enrolled".to_string())?;
+    let response = client
+        .post(format!(
+            "{}/api/v1/auraterm/console/presence",
+            device.base_url
+        ))
+        .header("Authorization", format!("Bearer {}", device.credential))
+        .json(&json!({}))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("presence ping rejected: {}", response.status()));
+    }
+    let body: PresencePingResponse = response
+        .json()
+        .await
+        .unwrap_or(PresencePingResponse { ping_interval: None });
+    Ok(body.ping_interval)
+}
+
+/// Keep the agent reachable. With at least one share the relay connection
+/// is held up (exponential backoff on failures); with none it is dropped
+/// after a grace period and the agent downgrades to lightweight presence
+/// pings — no data plane, just liveness. One supervisor per app.
 fn ensure_supervisor(
     client: reqwest::Client,
     inner: Arc<Mutex<BridgeInner>>,
@@ -1036,36 +1104,70 @@ fn ensure_supervisor(
     }
     tauri::async_runtime::spawn(async move {
         let mut failures: u32 = 0;
+        let mut ping_interval = IDLE_PING_INTERVAL_SECS;
+        let mut next_ping = std::time::Instant::now();
+        let mut idle_connected_since: Option<std::time::Instant> = None;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let should_connect = inner
-                .lock()
-                .ok()
-                .map(|guard| {
-                    guard.want_online
-                        && guard
-                            .device
-                            .as_ref()
-                            .is_some_and(|device| device.relay_connection.is_empty())
+            let Some((want_online, has_shares, connected)) =
+                inner.lock().ok().map(|guard| {
+                    (
+                        guard.want_online && guard.device.is_some(),
+                        !guard.shares.is_empty(),
+                        guard.device.as_ref().is_some_and(
+                            |device| !device.relay_connection.is_empty()),
+                    )
                 })
-                .unwrap_or(false);
-            if !should_connect {
+            else {
+                continue;
+            };
+            if !want_online {
                 failures = 0;
+                idle_connected_since = None;
                 continue;
             }
-            match connect_inner(
-                client.clone(),
-                Arc::clone(&inner),
-                Arc::clone(&port),
-                app.clone(),
-            )
-            .await
-            {
-                Ok(()) => failures = 0,
-                Err(_) => {
-                    failures = failures.saturating_add(1);
-                    let backoff = 2_u64.saturating_pow(failures.min(5)).min(60);
-                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+            if has_shares {
+                idle_connected_since = None;
+                if connected {
+                    failures = 0;
+                    continue;
+                }
+                match connect_inner(
+                    client.clone(),
+                    Arc::clone(&inner),
+                    Arc::clone(&port),
+                    app.clone(),
+                )
+                .await
+                {
+                    Ok(()) => failures = 0,
+                    Err(_) => {
+                        failures = failures.saturating_add(1);
+                        let backoff = 2_u64.saturating_pow(failures.min(5)).min(60);
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    }
+                }
+                continue;
+            }
+            failures = 0;
+            if connected {
+                let since = *idle_connected_since
+                    .get_or_insert_with(std::time::Instant::now);
+                if since.elapsed().as_secs() >= IDLE_DOWNGRADE_GRACE_SECS {
+                    disconnect_transport(&client, &inner).await;
+                    idle_connected_since = None;
+                    next_ping = std::time::Instant::now();
+                }
+                continue;
+            }
+            idle_connected_since = None;
+            if std::time::Instant::now() >= next_ping {
+                next_ping = std::time::Instant::now()
+                    + std::time::Duration::from_secs(ping_interval);
+                if let Ok(Some(interval)) =
+                    idle_presence_ping(&client, &inner).await
+                {
+                    ping_interval = interval.clamp(10, 300);
                 }
             }
         }
@@ -1135,6 +1237,11 @@ async fn process_inbound_frame(
     }
     let kind = frame.get("kind").and_then(|value| value.as_str());
     if kind == Some("INPUT") {
+        // TX is accepted only from inside a viewer's E2EE envelope; a
+        // plaintext INPUT would expose keystrokes to the relay.
+        let Some((reply_connection, reply_peer)) = e2ee_reply.as_ref() else {
+            return;
+        };
         let cloud_id = match frame.get("session_id").and_then(|value| value.as_str()) {
             Some(value) => value.to_string(),
             None => return,
@@ -1175,12 +1282,8 @@ async fn process_inbound_frame(
                         "kind": "INPUT_ACK", "input_seq": input_seq,
                         "fence": fence, "byte_count": byte_count
                     });
-                if let Some((connection_id, peer)) = &e2ee_reply {
-                    let _ = send_e2ee_frame(client, inner,
-                        &cloud_id, connection_id, peer, &ack).await;
-                } else {
-                    let _ = send_frame(client, inner, &cloud_id, ack).await;
-                }
+                let _ = send_e2ee_frame(client, inner, &cloud_id,
+                    reply_connection, reply_peer, &ack).await;
             }
         }
         return;
@@ -1233,6 +1336,12 @@ fn spawn_control_pump(
         let mut ticks = 0_u8;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let current = inner.lock().ok().and_then(|guard| {
+                guard.device.as_ref().map(|d| d.relay_connection.clone())
+            });
+            if current.as_deref() != Some(device.relay_connection.as_str()) {
+                break; // deliberately downgraded to idle, or replaced
+            }
             let response = match client
                 .get(format!(
                     "{}/console-relay/v1/agent/{}/frames",
@@ -1327,6 +1436,7 @@ fn spawn_ws_pumps(
 
 #[tauri::command]
 pub async fn cloud_bridge_share_session(
+    app: AppHandle,
     state: State<'_, CloudBridgeState>,
     local_session_id: String,
     protocol: SessionProtocol,
@@ -1353,15 +1463,40 @@ pub async fn cloud_bridge_share_session(
             .clamp(4096, MAX_RX_RING_BYTES),
     };
     let allow_tx = policy.allows_tx(std::time::SystemTime::now());
-    let device = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .device
-        .clone()
-        .ok_or_else(|| "Enroll this AuraTerm device first.".to_string())?;
+    let device = {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let device = inner
+            .device
+            .clone()
+            .ok_or_else(|| "Enroll this AuraTerm device first.".to_string())?;
+        inner.want_online = true;
+        device
+    };
+    // Idle mode holds no relay connection; sharing dials on demand.
     if device.relay_connection.is_empty() {
-        return Err("Connect Cloud Console before sharing.".into());
+        connect_inner(
+            state.client.clone(),
+            Arc::clone(&state.inner),
+            Arc::clone(&state.port),
+            app.clone(),
+        )
+        .await?;
+        ensure_supervisor(
+            state.client.clone(),
+            Arc::clone(&state.inner),
+            Arc::clone(&state.port),
+            app,
+        );
+        let connected = state
+            .inner
+            .lock()
+            .map_err(|e| e.to_string())?
+            .device
+            .as_ref()
+            .is_some_and(|d| !d.relay_connection.is_empty());
+        if !connected {
+            return Err("Cloud Console connection failed.".into());
+        }
     }
     if state
         .inner
@@ -1435,7 +1570,6 @@ pub async fn cloud_bridge_share_session(
                 policy,
                 ring,
                 output_notify,
-                e2ee_enabled: true,
                 peers: HashMap::new(),
                 last_fence: 0,
                 last_input_seq: 0,
@@ -1560,13 +1694,12 @@ fn spawn_output_pump(
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let (cloud_id, ring, notify, e2ee, peers) = match inner.lock().ok().and_then(|guard| {
+            let (cloud_id, ring, notify, peers) = match inner.lock().ok().and_then(|guard| {
                 guard.shares.get(&local_session_id).map(|share| {
                     (
                         share.cloud_session_id.clone(),
                         Arc::clone(&share.ring),
                         Arc::clone(&share.output_notify),
-                        share.e2ee_enabled,
                         share.peers.clone(),
                     )
                 })
@@ -1589,66 +1722,31 @@ fn spawn_output_pump(
                 .map(|ring| ring.delivered_seq + 1)
                 .unwrap_or(seq);
             if seq != expected {
-                if e2ee {
-                    let (snapshot_seq, snapshot_bytes) = ring.lock()
-                        .map(|r| r.e2ee_snapshot()).unwrap_or_default();
-                    let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
-                        "snapshot_seq": snapshot_seq, "cols": 80, "rows": 24,
-                        "data_hex": encode_hex(&snapshot_bytes)});
-                    for (connection_id, peer) in &peers {
-                        let _ = send_e2ee_frame(&client, &inner, &cloud_id,
-                            connection_id, peer, &snapshot).await;
-                    }
-                    if let Ok(mut ring) = ring.lock() { ring.delivered_seq = snapshot_seq; };
-                    continue;
-                }
-                if send_ring_snapshot(&client, &inner, &cloud_id, &ring)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                continue;
-            }
-            let output = json!({"kind": "OUTPUT", "output_seq": seq,
-                "data_hex": encode_hex(&bytes)});
-            if e2ee {
+                let (snapshot_seq, snapshot_bytes) = ring.lock()
+                    .map(|r| r.e2ee_snapshot()).unwrap_or_default();
+                let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
+                    "snapshot_seq": snapshot_seq, "cols": 80, "rows": 24,
+                    "data_hex": encode_hex(&snapshot_bytes)});
                 for (connection_id, peer) in &peers {
                     let _ = send_e2ee_frame(&client, &inner, &cloud_id,
-                        connection_id, peer, &output).await;
+                        connection_id, peer, &snapshot).await;
                 }
-            } else if send_frame(&client, &inner, &cloud_id, output)
-                .await.is_err() {
-                    break;
+                if let Ok(mut ring) = ring.lock() { ring.delivered_seq = snapshot_seq; };
+                continue;
+            }
+            // Terminal bytes leave the device only inside per-viewer E2EE
+            // envelopes: with no attached peer this loop sends nothing.
+            let output = json!({"kind": "OUTPUT", "output_seq": seq,
+                "data_hex": encode_hex(&bytes)});
+            for (connection_id, peer) in &peers {
+                let _ = send_e2ee_frame(&client, &inner, &cloud_id,
+                    connection_id, peer, &output).await;
             }
             if let Ok(mut ring) = ring.lock() {
                 ring.delivered_seq = ring.delivered_seq.max(seq);
             };
         }
     });
-}
-
-async fn send_ring_snapshot(
-    client: &reqwest::Client,
-    inner: &Arc<Mutex<BridgeInner>>,
-    cloud_id: &str,
-    ring: &Arc<Mutex<RxRing>>,
-) -> Result<(), String> {
-    let (seq, bytes) = ring.lock().map_err(|e| e.to_string())?.snapshot();
-    send_frame(
-        client,
-        inner,
-        cloud_id,
-        json!({
-            "kind": "TERMINAL_SNAPSHOT", "snapshot_seq": seq,
-            "cols": 80, "rows": 24, "data_hex": encode_hex(&bytes),
-        }),
-    )
-    .await?;
-    if let Ok(mut ring) = ring.lock() {
-        ring.delivered_seq = seq;
-    }
-    Ok(())
 }
 
 async fn recover_shares(
@@ -1666,28 +1764,22 @@ async fn recover_shares(
                         local.clone(),
                         share.cloud_session_id.clone(),
                         Arc::clone(&share.ring),
-                        share.e2ee_enabled,
                         share.peers.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    for (local, cloud, ring, e2ee, peers) in shares {
-        let recovered = if e2ee {
-            let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
-            let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
-                "snapshot_seq": seq, "cols": 80, "rows": 24,
-                "data_hex": encode_hex(&bytes)});
-            let mut ok = true;
-            for (connection_id, peer) in &peers {
-                ok &= send_e2ee_frame(&client, &inner, &cloud,
-                    connection_id, peer, &snapshot).await.is_ok();
-            }
-            ok
-        } else {
-            send_ring_snapshot(&client, &inner, &cloud, &ring).await.is_ok()
-        };
+    for (local, cloud, ring, peers) in shares {
+        let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
+        let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
+            "snapshot_seq": seq, "cols": 80, "rows": 24,
+            "data_hex": encode_hex(&bytes)});
+        let mut recovered = true;
+        for (connection_id, peer) in &peers {
+            recovered &= send_e2ee_frame(&client, &inner, &cloud,
+                connection_id, peer, &snapshot).await.is_ok();
+        }
         if recovered {
             spawn_output_pump(client.clone(), Arc::clone(&inner), local);
         }
@@ -1785,10 +1877,14 @@ pub fn cloud_bridge_status(state: State<'_, CloudBridgeState>) -> Result<BridgeS
         .device
         .as_ref()
         .is_some_and(|d| !d.relay_connection.is_empty());
+    let has_shares = !inner.shares.is_empty();
     Ok(BridgeStatus {
         enrolled: inner.device.is_some(),
         connected,
-        reconnecting: inner.want_online && !connected && inner.device.is_some(),
+        reconnecting: inner.want_online && !connected && inner.device.is_some()
+            && has_shares,
+        standby: inner.want_online && !connected && inner.device.is_some()
+            && !has_shares,
         pending_user_code: inner
             .pending
             .as_ref()
@@ -1840,7 +1936,6 @@ mod tests {
             },
             ring: Arc::new(Mutex::new(RxRing::new(DEFAULT_RX_RING_BYTES))),
             output_notify: Arc::new(tokio::sync::Notify::new()),
-            e2ee_enabled: true,
             peers: HashMap::new(),
             last_fence: 0,
             last_input_seq: 0,
