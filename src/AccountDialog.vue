@@ -36,6 +36,7 @@ const bound = computed(() => status.value?.enrolled ?? false);
 const connectionText = computed(() => {
   if (!status.value) return "";
   if (status.value.connected) return t("account.connected");
+  if (status.value.standby) return t("account.standby");
   if (status.value.reconnecting) return t("account.reconnecting");
   return t("account.offline");
 });

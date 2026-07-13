@@ -139,6 +139,8 @@ const en = {
     openSftpAfterSshHint: "Automatically reveal Remote Files for the active SSH session",
     restoreTabs: "Restore Session Tabs On Startup",
     restoreTabsHint: "Restore all open tabs and pane layout after restarting AuraTerm",
+    autoShareToCloud: "Auto-share active session to Cloud Console",
+    autoShareToCloudHint: "One switch: the active session is shared read-only without per-session confirmation, following tab switches, until turned off",
     copyOnSelect: "Copy on select",
     copyOnSelectHint:
       "Auto-copy selected text to clipboard; Ctrl+C consumes key when selection exists (no ^C to PTY)",
@@ -457,6 +459,7 @@ const en = {
     server: "Server",
     connection: "Connection",
     connected: "Connected",
+    standby: "Online (standby)",
     reconnecting: "Reconnecting…",
     offline: "Offline",
     sharedSessions: "Shared sessions",
@@ -496,6 +499,9 @@ const en = {
     share: "Share",
     cancel: "Cancel",
     notConnected: "Bind this device first in the AuraXLab Account center.",
+    autoShareOn: "Enable Auto-share (Follow Active Session)",
+    autoShareOff: "Disable Auto-share",
+    autoShareBadge: "Auto-share",
   },
   bookmarks: {
     quickConnect: "🔖 Quick Connect",

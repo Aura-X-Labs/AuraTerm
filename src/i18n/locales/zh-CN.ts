@@ -136,6 +136,8 @@ const zhCN: Messages = {
     openSftpAfterSshHint: "为当前 SSH 会话自动显示远程文件面板",
     restoreTabs: "启动时恢复会话标签页",
     restoreTabsHint: "重启 AuraTerm 后恢复所有打开的标签页和窗格布局",
+    autoShareToCloud: "自动共享当前会话到 Cloud Console",
+    autoShareToCloudHint: "一次开启持续生效：当前 active 会话以只读方式共享，切换标签自动跟随，无需逐个确认，直到关闭开关",
     copyOnSelect: "选中即复制",
     copyOnSelectHint:
       "自动将选中文本复制到剪贴板；存在选区时 Ctrl+C 仅复制（不向 PTY 发送 ^C）",
@@ -451,6 +453,7 @@ const zhCN: Messages = {
     server: "服务器",
     connection: "连接状态",
     connected: "已连接",
+    standby: "在线（空闲）",
     reconnecting: "重连中…",
     offline: "离线",
     sharedSessions: "已共享会话",
@@ -488,6 +491,9 @@ const zhCN: Messages = {
     share: "共享",
     cancel: "取消",
     notConnected: "请先在 AuraXLab 账户中心绑定此设备。",
+    autoShareOn: "开启自动共享（跟随当前会话）",
+    autoShareOff: "关闭自动共享",
+    autoShareBadge: "自动共享",
   },
   bookmarks: {
     quickConnect: "🔖 快速连接",
