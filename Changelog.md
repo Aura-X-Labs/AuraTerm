@@ -9,6 +9,7 @@
   - 原生菜单账户/云同步/自动共享项从 File 菜单迁出；登录态与两个开关的勾选状态经 `sync_cloud_menu_state` 实时重建原生菜单；修复原生菜单「AuraXLab 账户…」点击无响应（`on_menu_event` 缺转发分支，现改为 `menu-*` 通配转发）
   - 自动共享策略跟随「允许远程发送」：允许时以 read_write 共享（浏览器仍需 recent-auth + TX 租约），关闭时 read_only；共享对话框在关闭时禁用可写策略选项
   - 登录/注册表单提取为 `AuraxlabAuthForm.vue`，云同步对话框与账户中心复用；命令面板新增「立即同步 / Cloud Console 开关 / 允许远程发送开关」，账户命令标题随登录态切换
+  - 云桥 HTTP 轮询改为自适应：仅当云端确实在观看（存在已完成 E2EE 握手的 viewer，或 30 秒内收到过入站帧）时以 1s 轮询，空闲降为 5s（决定新观看者的发现延迟；终端输出走推送不受影响）；心跳遵循服务端 connect-grant 下发的 `heartbeat_interval`（默认 60s，5–600s 钳制），HTTP 与 WebSocket 传输一致
 - **WebGL 加速渲染** —— 对当前可见/聚焦的终端启用 WebGL 渲染器，上下文丢失时自动回退 DOM 渲染
 - **端到端加密云同步（书签 / 设置 / known-hosts）** —— 对标 Electerm 的自托管思路，免自建后端
   - 四种存储后端可选：GitHub Gist、Gitee Gist、WebDAV、AuraXLab 账户（官方私有同步服务）
