@@ -4,7 +4,12 @@ import { t } from "./i18n";
 
 type TxPolicy = "read_only" | "read_write" | "temporary";
 
-const props = defineProps<{ sessionLabel: string }>();
+const props = defineProps<{
+  sessionLabel: string;
+  /** Global "Allow Remote Send" gate: when false only view-only is offered
+   * (the bridge would clamp a TX policy to read-only anyway). */
+  remoteSendAllowed: boolean;
+}>();
 const emit = defineEmits<{
   cancel: [];
   share: [payload: { policy: TxPolicy; minutes: number }];
@@ -13,14 +18,17 @@ const emit = defineEmits<{
 const policy = ref<TxPolicy>("read_only");
 const minutes = ref(15);
 
-const policies: Array<{ value: TxPolicy; label: string; hint: string }> = [
-  { value: "read_only", label: t("cloudShare.readOnly"), hint: t("cloudShare.readOnlyHint") },
-  { value: "read_write", label: t("cloudShare.readWrite"), hint: t("cloudShare.readWriteHint") },
-  { value: "temporary", label: t("cloudShare.temporary"), hint: t("cloudShare.temporaryHint") },
+const policies: Array<{ value: TxPolicy; label: string; hint: string; needsTx: boolean }> = [
+  { value: "read_only", label: t("cloudShare.readOnly"), hint: t("cloudShare.readOnlyHint"), needsTx: false },
+  { value: "read_write", label: t("cloudShare.readWrite"), hint: t("cloudShare.readWriteHint"), needsTx: true },
+  { value: "temporary", label: t("cloudShare.temporary"), hint: t("cloudShare.temporaryHint"), needsTx: true },
 ];
 
 function confirm() {
-  emit("share", { policy: policy.value, minutes: minutes.value });
+  emit("share", {
+    policy: props.remoteSendAllowed ? policy.value : "read_only",
+    minutes: minutes.value,
+  });
 }
 </script>
 
@@ -42,16 +50,28 @@ function confirm() {
             v-for="option in policies"
             :key="option.value"
             class="share-policy"
-            :class="{ active: policy === option.value }"
+            :class="{
+              active: policy === option.value,
+              disabled: option.needsTx && !props.remoteSendAllowed,
+            }"
           >
-            <input type="radio" name="tx-policy" :value="option.value" v-model="policy" />
+            <input
+              type="radio"
+              name="tx-policy"
+              :value="option.value"
+              :disabled="option.needsTx && !props.remoteSendAllowed"
+              v-model="policy"
+            />
             <span class="share-policy-text">
               <span class="share-policy-name">{{ option.label }}</span>
               <span class="share-policy-hint">{{ option.hint }}</span>
             </span>
           </label>
         </fieldset>
-        <div v-if="policy === 'temporary'" class="share-duration">
+        <p v-if="!props.remoteSendAllowed" class="share-remote-send-off">
+          {{ t('cloudShare.remoteSendDisabledHint') }}
+        </p>
+        <div v-if="policy === 'temporary' && props.remoteSendAllowed" class="share-duration">
           <label for="share-minutes">{{ t('cloudShare.durationLabel') }}</label>
           <select id="share-minutes" v-model.number="minutes">
             <option :value="5">{{ t('cloudShare.minutes', { n: 5 }) }}</option>
@@ -143,6 +163,15 @@ function confirm() {
 .share-policy.active {
   border-color: var(--ui-accent, #4d9fff);
   background: rgba(77, 159, 255, 0.08);
+}
+.share-policy.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.share-remote-send-off {
+  font-size: 12px;
+  margin: 10px 0 0;
+  color: var(--ui-warn, #e0a458);
 }
 .share-policy input {
   margin-top: 3px;

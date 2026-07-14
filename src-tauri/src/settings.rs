@@ -253,10 +253,16 @@ pub struct Settings {
     /// Automatically open the SFTP browser for the active SSH session.
     #[serde(default)]
     pub auto_open_sftp: bool,
-    /// Keep the Cloud Console share slot on the active session (read-only)
-    /// without per-session confirmation, until switched off.
+    /// Keep the Cloud Console share slot on the active session without
+    /// per-session confirmation, until switched off. The share policy follows
+    /// `allow_remote_send` (read-write when allowed, read-only otherwise).
     #[serde(default)]
     pub auto_share_to_cloud: bool,
+    /// Global Cloud Console TX gate. On (default): shares may grant remote
+    /// input per their TX policy. Off: the cloud can only observe — new
+    /// shares are clamped to read-only and remote INPUT frames are dropped.
+    #[serde(default = "default_true")]
+    pub allow_remote_send: bool,
     /// Destination directory for files received through inline Zmodem.
     #[serde(default = "default_zmodem_download_path")]
     pub zmodem_download_path: String,
@@ -326,6 +332,7 @@ impl Default for Settings {
             output_rules: vec![],
             auto_open_sftp: false,
             auto_share_to_cloud: false,
+            allow_remote_send: true,
             zmodem_download_path: default_zmodem_download_path(),
             last_serial_config: None,
             recent_serial_configs: vec![],

@@ -917,6 +917,19 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               @change="update('autoShareToCloud', inputChecked($event))"
             >
           </label>
+
+          <label class="settings-field settings-field--toggle">
+            <span>
+              <strong>{{ $t('settings.allowRemoteSend') }}</strong>
+              <small>{{ $t('settings.allowRemoteSendHint') }}</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :checked="settings.allowRemoteSend"
+              @change="update('allowRemoteSend', inputChecked($event))"
+            >
+          </label>
         </div>
 
         <!-- Keyboard & Mouse Tab -->

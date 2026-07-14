@@ -180,6 +180,10 @@ struct BridgeInner {
     want_online: bool,
     supervisor_running: bool,
     connecting: bool,
+    /// Global "Allow Remote Send" gate mirrored from the persisted frontend
+    /// setting (`allowRemoteSend`). Defaults to `false` so remote INPUT stays
+    /// blocked until the frontend pushes the real value — fail closed.
+    allow_remote_send: bool,
 }
 
 pub struct CloudBridgeState {
@@ -1247,16 +1251,22 @@ async fn process_inbound_frame(
             None => return,
         };
         let validated = if let Ok(mut guard) = inner.lock() {
-            guard.shares.iter_mut().find_map(|(local_id, share)| {
-                if share.cloud_session_id != cloud_id {
-                    return None;
-                }
-                Some(verify_input_frame(share, device, &frame).map(
-                    |(bytes, fence, input_seq)| {
-                        (local_id.clone(), bytes, fence, input_seq)
-                    },
-                ))
-            })
+            if !guard.allow_remote_send {
+                // Global "Allow Remote Send" is off: the cloud may observe but
+                // never inject input, regardless of the per-share TX policy.
+                None
+            } else {
+                guard.shares.iter_mut().find_map(|(local_id, share)| {
+                    if share.cloud_session_id != cloud_id {
+                        return None;
+                    }
+                    Some(verify_input_frame(share, device, &frame).map(
+                        |(bytes, fence, input_seq)| {
+                            (local_id.clone(), bytes, fence, input_seq)
+                        },
+                    ))
+                })
+            }
         } else {
             None
         };
@@ -1448,6 +1458,19 @@ pub async fn cloud_bridge_share_session(
     if !state.port.contains(protocol, &local_session_id).await {
         return Err(format!("{:?} session is not connected.", protocol));
     }
+    // Global "Allow Remote Send" gate: while it is off every new share is
+    // clamped to view-only, so the server and console UI reflect the same
+    // policy the INPUT path enforces locally.
+    let tx_policy = if state
+        .inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .allow_remote_send
+    {
+        tx_policy
+    } else {
+        TxPolicy::ReadOnly
+    };
     let tx_expires_at = match tx_policy {
         TxPolicy::Temporary => {
             let seconds = tx_expires_in_seconds.unwrap_or(900).clamp(1, 86_400);
@@ -1854,6 +1877,22 @@ pub async fn cloud_bridge_stop_share(
     } else {
         Err(format!("Could not stop cloud share: {}", response.status()))
     }
+}
+
+/// Mirror the persisted "Allow Remote Send" setting into the bridge. The
+/// frontend pushes it on startup and on every toggle; until the first push
+/// the bridge keeps its fail-closed default and drops all remote INPUT.
+#[tauri::command]
+pub fn cloud_bridge_set_allow_remote_send(
+    state: State<'_, CloudBridgeState>,
+    allowed: bool,
+) -> Result<(), String> {
+    state
+        .inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .allow_remote_send = allowed;
+    Ok(())
 }
 
 #[tauri::command]

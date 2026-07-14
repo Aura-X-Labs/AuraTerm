@@ -808,17 +808,33 @@ fn get_startup_dir(state: State<'_, AppState>) -> Option<String> {
     state.startup_dir.lock().ok().and_then(|guard| guard.clone())
 }
 
-/// Build the native macOS menubar with labels localized to `locale`
-/// (`"en"` or `"zh-CN"`; anything else falls back to English). Keep the item
-/// IDs and accelerators stable across languages — only the visible text changes.
+/// Everything the native menubar renders beyond static labels: the UI locale
+/// plus the Cloud menu's account / toggle state. The frontend keeps it fresh
+/// via `set_menu_language` and `sync_cloud_menu_state`; each update rebuilds
+/// the menu (macOS only), which is how checkmarks and the Sign In / My
+/// Account swap stay canonical.
+#[derive(Default)]
+struct MenuModel {
+    locale: String,
+    cloud_signed_in: bool,
+    cloud_console_on: bool,
+    cloud_remote_send_on: bool,
+}
+
+struct MenuModelState(Mutex<MenuModel>);
+
+/// Build the native macOS menubar from the menu model (`locale` is `"en"` or
+/// `"zh-CN"`; anything else falls back to English). Keep the item IDs and
+/// accelerators stable across languages — only visible text and check state
+/// change.
 #[cfg(target_os = "macos")]
 fn build_app_menu(
     app: &AppHandle,
-    locale: &str,
+    model: &MenuModel,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
+    use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 
-    let zh = locale == "zh-CN";
+    let zh = model.locale == "zh-CN";
     // Pick the Chinese label when the locale is zh-CN, otherwise English.
     let l = |en: &'static str, cn: &'static str| -> &'static str { if zh { cn } else { en } };
 
@@ -833,9 +849,35 @@ fn build_app_menu(
     let new_serial_item = MenuItem::with_id(app, "menu-new-serial", l("Serial", "串口"), true, None::<&str>)?;
     let close_tab_item = MenuItem::with_id(app, "menu-close-tab", l("Close Tab", "关闭标签页"), true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "menu-open-settings", l("Settings", "设置"), true, None::<&str>)?;
-    let cloud_sync_item = MenuItem::with_id(app, "menu-open-cloud-sync", l("Cloud Sync…", "云同步…"), true, None::<&str>)?;
-    let account_item = MenuItem::with_id(app, "menu-open-account", l("AuraXLab Account…", "AuraXLab 账户…"), true, None::<&str>)?;
-    let auto_share_item = MenuItem::with_id(app, "menu-toggle-auto-share", l("Auto-share Active Session", "自动共享当前会话"), true, None::<&str>)?;
+
+    // Cloud menu: account → sync → monitoring. One account entry whose label
+    // follows the sign-in state; the two toggles render as checkmarks.
+    let account_item = MenuItem::with_id(
+        app,
+        "menu-open-account",
+        if model.cloud_signed_in { l("My Account…", "我的账户…") } else { l("Sign In…", "登录…") },
+        true,
+        None::<&str>,
+    )?;
+    let sync_now_item = MenuItem::with_id(app, "menu-sync-now", l("Sync Now", "立即同步"), true, None::<&str>)?;
+    let sync_settings_item = MenuItem::with_id(app, "menu-open-cloud-sync", l("Sync Settings…", "同步设置…"), true, None::<&str>)?;
+    let cloud_console_item = CheckMenuItem::with_id(
+        app,
+        "menu-toggle-cloud-console",
+        "Cloud Console",
+        true,
+        model.cloud_console_on,
+        None::<&str>,
+    )?;
+    let remote_send_item = CheckMenuItem::with_id(
+        app,
+        "menu-toggle-remote-send",
+        l("Allow Remote Send", "允许远程发送"),
+        true,
+        model.cloud_remote_send_on,
+        None::<&str>,
+    )?;
+
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
     let command_palette_item = MenuItem::with_id(app, "menu-open-command-palette", l("Command Palette", "命令面板"), true, Some("Cmd+Shift+P"))?;
     let toggle_remote_files_item = MenuItem::with_id(app, "menu-toggle-remote-files", l("Toggle Remote Files", "切换远程文件"), true, None::<&str>)?;
@@ -866,9 +908,6 @@ fn build_app_menu(
         .item(&close_tab_item)
         .separator()
         .item(&settings_item)
-        .item(&cloud_sync_item)
-        .item(&account_item)
-        .item(&auto_share_item)
         .separator()
         .item(&exit_item)
         .build()?;
@@ -895,6 +934,15 @@ fn build_app_menu(
         .item(&toggle_remote_files_item)
         .item(&toggle_tunnels_item)
         .build()?;
+    let cloud_menu = SubmenuBuilder::new(app, l("Cloud", "云服务"))
+        .item(&account_item)
+        .separator()
+        .item(&sync_now_item)
+        .item(&sync_settings_item)
+        .separator()
+        .item(&cloud_console_item)
+        .item(&remote_send_item)
+        .build()?;
     let window_menu = SubmenuBuilder::new(app, l("Window", "窗口"))
         .item(&new_window_item)
         .item(&close_window_item)
@@ -910,26 +958,60 @@ fn build_app_menu(
         .item(&edit_menu)
         .item(&view_menu)
         .item(&tools_menu)
+        .item(&cloud_menu)
         .item(&window_menu)
         .item(&help_menu)
         .build()
 }
 
-/// Rebuild the native menubar in the given locale. Invoked by the frontend
-/// whenever the UI language changes (and on startup to resolve `System`).
-/// No-op on platforms without a native app menu.
-#[command]
-fn set_menu_language(app: AppHandle, locale: String) -> Result<(), String> {
+/// Rebuild the native menubar from the current menu model. No-op on
+/// platforms without a native app menu.
+fn rebuild_app_menu(app: &AppHandle, state: &MenuModelState) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let menu = build_app_menu(&app, &locale).map_err(|e| e.to_string())?;
+        let menu = {
+            let model = state.0.lock().map_err(|e| e.to_string())?;
+            build_app_menu(app, &model).map_err(|e| e.to_string())?
+        };
         app.set_menu(menu).map_err(|e| e.to_string())?;
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (&app, &locale);
+        let _ = (app, state);
     }
     Ok(())
+}
+
+/// Rebuild the native menubar in the given locale. Invoked by the frontend
+/// whenever the UI language changes (and on startup to resolve `System`).
+#[command]
+fn set_menu_language(
+    app: AppHandle,
+    state: State<'_, MenuModelState>,
+    locale: String,
+) -> Result<(), String> {
+    state.0.lock().map_err(|e| e.to_string())?.locale = locale;
+    rebuild_app_menu(&app, &state)
+}
+
+/// Keep the native Cloud menu in sync with the frontend: sign-in state picks
+/// the account item's label, the two booleans drive the checkmarks. Invoked
+/// on startup and after every auth change or toggle.
+#[command]
+fn sync_cloud_menu_state(
+    app: AppHandle,
+    state: State<'_, MenuModelState>,
+    signed_in: bool,
+    console_on: bool,
+    remote_send_on: bool,
+) -> Result<(), String> {
+    {
+        let mut model = state.0.lock().map_err(|e| e.to_string())?;
+        model.cloud_signed_in = signed_in;
+        model.cloud_console_on = console_on;
+        model.cloud_remote_send_on = remote_send_on;
+    }
+    rebuild_app_menu(&app, &state)
 }
 
 fn main() {
@@ -961,14 +1043,26 @@ fn main() {
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             {
-                // Build the native menubar in the persisted language. `System`
-                // resolves to English here; the frontend re-applies the actual
-                // locale via `set_menu_language` once it loads (see App.vue).
-                let locale = settings::get_settings(_app.handle().clone())
-                    .map(|settings| settings.language.to_locale().to_string())
-                    .unwrap_or_else(|_| "en".to_string());
-                let menu = build_app_menu(_app.handle(), &locale)?;
-                _app.set_menu(menu)?;
+                // Seed the menu model from persisted settings and build the
+                // native menubar. `System` resolves to English here; the
+                // frontend re-applies the actual locale via
+                // `set_menu_language` and pushes the sign-in state via
+                // `sync_cloud_menu_state` once it loads (see App.vue).
+                let saved = settings::get_settings(_app.handle().clone()).ok();
+                let state = _app.state::<MenuModelState>();
+                if let Ok(mut model) = state.0.lock() {
+                    model.locale = saved
+                        .as_ref()
+                        .map(|settings| settings.language.to_locale().to_string())
+                        .unwrap_or_else(|| "en".to_string());
+                    model.cloud_console_on = saved
+                        .as_ref()
+                        .is_some_and(|settings| settings.auto_share_to_cloud);
+                    model.cloud_remote_send_on = saved
+                        .as_ref()
+                        .is_none_or(|settings| settings.allow_remote_send);
+                }
+                rebuild_app_menu(_app.handle(), &state)?;
             }
 
             if let Err(error) = apply_saved_window_bounds(_app.handle()) {
@@ -1023,57 +1117,19 @@ fn main() {
                         let _ = window.close();
                     }
                 }
-                "menu-open-settings" => {
-                    let _ = app.emit("menu-open-settings", ());
-                }
-                "menu-open-cloud-sync" => {
-                    let _ = app.emit("menu-open-cloud-sync", ());
-                }
-                "menu-toggle-auto-share" => {
-                    let _ = app.emit("menu-toggle-auto-share", ());
-                }
-                "menu-new-local" => {
-                    let _ = app.emit("menu-new-local", ());
-                }
-                "menu-new-ssh" => {
-                    let _ = app.emit("menu-new-ssh", ());
-                }
-                "menu-new-telnet" => {
-                    let _ = app.emit("menu-new-telnet", ());
-                }
-                "menu-new-serial" => {
-                    let _ = app.emit("menu-new-serial", ());
-                }
-                "menu-close-tab" => {
-                    let _ = app.emit("menu-close-tab", ());
-                }
-                "menu-toggle-bookmarks" => {
-                    let _ = app.emit("menu-toggle-bookmarks", ());
-                }
-                "menu-toggle-remote-files" => {
-                    let _ = app.emit("menu-toggle-remote-files", ());
-                }
-                "menu-toggle-tunnels" => {
-                    let _ = app.emit("menu-toggle-tunnels", ());
-                }
-                "menu-open-command-palette" => {
-                    let _ = app.emit("menu-open-command-palette", ());
-                }
-                "menu-increase-font-size" => {
-                    let _ = app.emit("menu-increase-font-size", ());
-                }
-                "menu-decrease-font-size" => {
-                    let _ = app.emit("menu-decrease-font-size", ());
-                }
-                "menu-reset-font-size" => {
-                    let _ = app.emit("menu-reset-font-size", ());
-                }
                 "exit" => {
                     app.exit(0);
+                }
+                // Every other `menu-*` id is forwarded verbatim as an app
+                // event; `useAppEventListeners.ts` maps events to handlers.
+                // (A per-id list here silently dropped newly added items.)
+                id if id.starts_with("menu-") => {
+                    let _ = app.emit(id, ());
                 }
                 _ => {}
             }
         })
+        .manage(MenuModelState(Mutex::new(MenuModel::default())))
         .manage(app_state)
         .manage(ssh_state)
         .manage(ssh::ForwardingState::default())
@@ -1088,6 +1144,7 @@ fn main() {
             get_version_info,
             get_startup_dir,
             set_menu_language,
+            sync_cloud_menu_state,
             start_pty,
             write_pty_input,
             write_pty_bytes,
@@ -1136,6 +1193,7 @@ fn main() {
             cloud_bridge::cloud_bridge_share_session,
             cloud_bridge::cloud_bridge_stop_share,
             cloud_bridge::cloud_bridge_status,
+            cloud_bridge::cloud_bridge_set_allow_remote_send,
             zmodem::zmodem_start_send,
             zmodem::zmodem_cancel,
             settings::get_settings,
@@ -1170,6 +1228,7 @@ fn main() {
             cloud_sync::auraxlab_register,
             cloud_sync::auraxlab_login,
             cloud_sync::auraxlab_logout,
+            cloud_sync::auraxlab_account_overview,
             ai::ai_chat_start,
             ai::ai_chat_cancel,
             ai::ai_complete,

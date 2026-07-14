@@ -154,6 +154,27 @@ export function auraxlabLogout(): Promise<SyncConfigView> {
   return invoke<SyncConfigView>("auraxlab_logout");
 }
 
+/** Cloud Console traffic totals for the signed-in account (relay bytes,
+ * counted size-only server-side; `null` on servers without the field). */
+export interface AccountTraffic {
+  bytesUp: number;
+  bytesDown: number;
+  bytesTotal: number;
+  sessions: number;
+}
+
+export interface AccountOverview {
+  username: string;
+  email: string;
+  confirmed: boolean;
+  traffic: AccountTraffic | null;
+}
+
+/** Fetch profile + Cloud Console traffic for the "My Account" view. */
+export function auraxlabAccountOverview(): Promise<AccountOverview> {
+  return invoke<AccountOverview>("auraxlab_account_overview");
+}
+
 export const PROVIDER_LABELS: Record<Exclude<SyncProvider, "">, string> = {
   github: "GitHub Gist",
   gitee: "Gitee Gist",

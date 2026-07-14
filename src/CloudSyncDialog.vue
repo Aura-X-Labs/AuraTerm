@@ -9,21 +9,14 @@ import {
   cloudSyncPull,
   cloudSyncNow,
   cloudSyncTestConnection,
-  auraxlabLogin,
-  auraxlabRegister,
-  auraxlabRequestEmailCode,
-  auraxlabVerifyEmailCode,
   auraxlabLogout,
   inputFromView,
-  validateRegistration,
   PROVIDER_LABELS,
-  DEFAULT_AURAXLAB_URL,
-  SYNC_EMAIL_RE,
-  SYNC_MIN_PASSWORD_LENGTH,
   type SyncConfigView,
   type SyncProvider,
   type SyncResult,
 } from "./cloudSync";
+import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
 import { t } from "./i18n";
 
 const emit = defineEmits<{ close: [] }>();
@@ -52,27 +45,6 @@ const giteeGistId = ref("");
 const webdavUrl = ref("");
 const webdavUsername = ref("");
 const webdavPassword = ref("");
-
-// AuraXLab account flow (the server is always the official AuraXLab server).
-const axEmail = ref("");
-const axPassword = ref("");
-const axUsername = ref(""); // registration only
-const axMode = ref<"login" | "register">("login");
-// Sign-up is verify-first: email -> code -> account details.
-const axRegStep = ref<"email" | "code" | "details">("email");
-const axCode = ref("");
-
-function startRegister() {
-  axMode.value = "register";
-  axRegStep.value = "email";
-  axCode.value = "";
-}
-
-function startLogin() {
-  axMode.value = "login";
-  axRegStep.value = "email";
-  axCode.value = "";
-}
 
 // AuraXLab (the official account-based service) is featured first.
 const providers: Array<Exclude<SyncProvider, "">> = ["auraxlab", "github", "gitee", "webdav"];
@@ -108,7 +80,6 @@ function hydrate(next: SyncConfigView) {
   giteeGistId.value = next.gitee.gistId;
   webdavUrl.value = next.webdav.url;
   webdavUsername.value = next.webdav.username;
-  axEmail.value = next.auraxlab.username;
   // Secret inputs intentionally left blank.
   githubToken.value = "";
   giteeToken.value = "";
@@ -239,65 +210,9 @@ async function testConnection() {
   });
 }
 
-async function signIn() {
-  if (!axEmail.value.trim() || !axPassword.value) {
-    flash(t("cloudSync.enterEmailPassword"), true);
-    return;
-  }
-  await withBusy(async () => {
-    const updated = await auraxlabLogin(DEFAULT_AURAXLAB_URL, axEmail.value, axPassword.value);
-    hydrate(updated);
-    axPassword.value = "";
-    flash(t("cloudSync.signedIn"));
-  });
-}
-
-// Sign-up step 1: email -> request a verification code.
-async function sendCode() {
-  if (!SYNC_EMAIL_RE.test(axEmail.value.trim())) {
-    flash(t("cloudSync.validEmailRequired"), true);
-    return;
-  }
-  await withBusy(async () => {
-    const msg = await auraxlabRequestEmailCode(DEFAULT_AURAXLAB_URL, axEmail.value.trim());
-    axCode.value = "";
-    axRegStep.value = "code";
-    flash(msg);
-  });
-}
-
-// Sign-up step 2: verify the emailed code.
-async function verifyCode() {
-  if (!axCode.value.trim()) {
-    flash(t("cloudSync.enterCode"), true);
-    return;
-  }
-  await withBusy(async () => {
-    const msg = await auraxlabVerifyEmailCode(
-      DEFAULT_AURAXLAB_URL,
-      axEmail.value.trim(),
-      axCode.value.trim(),
-    );
-    axRegStep.value = "details";
-    flash(msg);
-  });
-}
-
-// Sign-up step 3: create the account (email already verified).
-async function register() {
-  // Validate locally with the same rules the server enforces (immediate
-  // feedback; the server still re-checks and owns duplicate detection).
-  const validationError = validateRegistration(axEmail.value, axUsername.value, axPassword.value);
-  if (validationError) {
-    flash(validationError, true);
-    return;
-  }
-  await withBusy(async () => {
-    const msg = await auraxlabRegister(DEFAULT_AURAXLAB_URL, axEmail.value, axUsername.value, axPassword.value);
-    axPassword.value = "";
-    startLogin();
-    flash(msg);
-  });
+function onSignedIn(updated: SyncConfigView) {
+  hydrate(updated);
+  flash(t("cloudSync.signedIn"));
 }
 
 async function signOut() {
@@ -395,55 +310,7 @@ async function signOut() {
               </p>
               <button class="sync-btn" type="button" :disabled="busy" @click="signOut">{{ $t('cloudSync.signOut') }}</button>
             </template>
-            <!-- Sign in -->
-            <template v-else-if="axMode === 'login'">
-              <p class="sync-hint">{{ $t('cloudSync.loginHint') }}</p>
-              <label>{{ $t('cloudSync.email') }}</label>
-              <input v-model="axEmail" class="sync-input" type="email" autocomplete="off" placeholder="you@example.com" />
-              <label>{{ $t('cloudSync.password') }}</label>
-              <input v-model="axPassword" class="sync-input" type="password" autocomplete="off" @keyup.enter="signIn" />
-              <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="signIn">{{ $t('cloudSync.signIn') }}</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="startRegister">{{ $t('cloudSync.needAccount') }}</button>
-              </div>
-            </template>
-
-            <!-- Sign up — step 1: email -->
-            <template v-else-if="axRegStep === 'email'">
-              <p class="sync-hint">{{ $t('cloudSync.registerHint') }}</p>
-              <label>{{ $t('cloudSync.email') }}</label>
-              <input v-model="axEmail" class="sync-input" type="email" autocomplete="off" placeholder="you@example.com" @keyup.enter="sendCode" />
-              <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="sendCode">{{ $t('cloudSync.sendCode') }}</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="startLogin">{{ $t('cloudSync.haveAccount') }}</button>
-              </div>
-            </template>
-
-            <!-- Sign up — step 2: verify code -->
-            <template v-else-if="axRegStep === 'code'">
-              <p class="sync-hint">{{ $t('cloudSync.codeHint', { email: axEmail }) }}</p>
-              <label>{{ $t('cloudSync.verificationCode') }}</label>
-              <input v-model="axCode" class="sync-input" type="text" inputmode="numeric" maxlength="6"
-                autocomplete="one-time-code" placeholder="••••••" @keyup.enter="verifyCode" />
-              <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="verifyCode">{{ $t('cloudSync.verify') }}</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="sendCode">{{ $t('cloudSync.resend') }}</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="axRegStep = 'email'">{{ $t('cloudSync.changeEmail') }}</button>
-              </div>
-            </template>
-
-            <!-- Sign up — step 3: account details -->
-            <template v-else>
-              <p class="sync-hint">{{ $t('cloudSync.verifiedHint', { email: axEmail }) }}</p>
-              <label>{{ $t('cloudSync.username') }}</label>
-              <input v-model="axUsername" class="sync-input" type="text" autocomplete="off" />
-              <label>{{ $t('cloudSync.password') }} <span class="sync-muted">{{ $t('cloudSync.passwordMinChars', { n: SYNC_MIN_PASSWORD_LENGTH }) }}</span></label>
-              <input v-model="axPassword" class="sync-input" type="password" autocomplete="new-password" @keyup.enter="register" />
-              <div class="sync-row">
-                <button class="sync-btn primary" type="button" :disabled="busy" @click="register">{{ $t('cloudSync.createAccount') }}</button>
-                <button class="sync-btn" type="button" :disabled="busy" @click="axRegStep = 'code'">{{ $t('cloudSync.back') }}</button>
-              </div>
-            </template>
+            <AuraxlabAuthForm v-else @signed-in="onSignedIn" />
           </div>
         </section>
 

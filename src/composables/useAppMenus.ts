@@ -1,6 +1,6 @@
 import { ref, watch, type Ref } from "vue";
 
-export type AppMenuId = "file" | "view" | "tools" | "help";
+export type AppMenuId = "file" | "view" | "tools" | "cloud" | "help";
 export type FileSubmenuId = "new-session" | "preferences";
 
 export interface TabContextMenuState {
