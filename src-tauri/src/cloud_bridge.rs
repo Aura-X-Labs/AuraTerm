@@ -142,6 +142,10 @@ struct SharedSession {
     ring: Arc<Mutex<RxRing>>,
     output_notify: Arc<tokio::sync::Notify>,
     peers: HashMap<String, PeerCipher>,
+    /// connection_id -> viewer role as reported by the relay in E2EE_INIT
+    /// ("controller", "shared_viewer", "observer"). Drives the local
+    /// Monitor/Control status pill; absent on servers that predate roles.
+    peer_roles: HashMap<String, String>,
     last_fence: u64,
     last_input_seq: u64,
 }
@@ -243,6 +247,10 @@ pub struct ShareView {
     tx_policy: TxPolicy,
     tx_expires_at: Option<u64>,
     tx_allowed: bool,
+    /// Attached E2EE peers (viewers and controllers alike).
+    viewer_count: usize,
+    /// At least one attached peer connected in the controller role.
+    controller_attached: bool,
 }
 
 #[derive(Deserialize)]
@@ -1206,15 +1214,25 @@ async fn process_inbound_frame(
         let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()) else { return; };
         let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) else { return; };
         let Some(peer_public) = frame.get("peer_public_key").and_then(|v| v.as_str()) else { return; };
+        let role = frame
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("shared_viewer")
+            .to_string();
         let Ok((peer, agent_public)) = derive_peer_cipher(
             cloud_id, connection_id, peer_public) else { return; };
-        let ring = if let Ok(mut guard) = inner.lock() {
-            guard.shares.values_mut().find_map(|share| {
-                if share.cloud_session_id != cloud_id { return None; }
-                share.peers.insert(connection_id.to_string(), peer.clone());
-                Some(Arc::clone(&share.ring))
+        // Resolve the ring WITHOUT registering the peer yet: the moment the
+        // peer is in `share.peers` the output pump starts encrypting live
+        // terminal output to it, racing the plaintext E2EE_READY below. On a
+        // busy session the encrypted frame wins, and the browser (which has
+        // no key until READY) treats it as a dead connection. Register the
+        // peer only after READY + snapshot are on the wire.
+        let ring = inner.lock().ok().and_then(|guard| {
+            guard.shares.values().find_map(|share| {
+                (share.cloud_session_id == cloud_id)
+                    .then(|| Arc::clone(&share.ring))
             })
-        } else { None };
+        });
         let Some(ring) = ring else { return; };
         let Ok(proof) = ed25519_sign_b64(&device.identity_key,
             &e2ee_context(&device.device_id, cloud_id, connection_id,
@@ -1227,14 +1245,29 @@ async fn process_inbound_frame(
         let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
             "snapshot_seq": seq, "cols": 80, "rows": 24,
             "data_hex": encode_hex(&bytes)});
-        let _ = send_e2ee_frame(client, inner, cloud_id,
-            connection_id, &peer, &snapshot).await;
+        if send_e2ee_frame(client, inner, cloud_id,
+            connection_id, &peer, &snapshot).await.is_err() { return; }
+        if let Ok(mut guard) = inner.lock() {
+            for share in guard.shares.values_mut() {
+                if share.cloud_session_id != cloud_id { continue; }
+                share.peers.insert(connection_id.to_string(), peer.clone());
+                share.peer_roles.insert(connection_id.to_string(), role.clone());
+            }
+        }
+        let _ = app.emit("cloud-bridge-peers-changed", ());
         return;
     }
     if kind == Some("E2EE_CLOSE") {
         if let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) {
+            let mut changed = false;
             if let Ok(mut guard) = inner.lock() {
-                for share in guard.shares.values_mut() { share.peers.remove(connection_id); }
+                for share in guard.shares.values_mut() {
+                    changed |= share.peers.remove(connection_id).is_some();
+                    share.peer_roles.remove(connection_id);
+                }
+            }
+            if changed {
+                let _ = app.emit("cloud-bridge-peers-changed", ());
             }
         }
         return;
@@ -1328,6 +1361,7 @@ async fn process_inbound_frame(
     };
     if let Some(share) = removed {
         port.unsubscribe_rx(&share.subscription);
+        let _ = app.emit("cloud-bridge-peers-changed", ());
     }
 }
 
@@ -1601,6 +1635,8 @@ pub async fn cloud_bridge_share_session(
         tx_policy: policy.tx.clone(),
         tx_expires_at: system_time_seconds(policy.tx_expires_at),
         tx_allowed: allow_tx,
+        viewer_count: 0,
+        controller_attached: false,
     };
     state
         .inner
@@ -1618,6 +1654,7 @@ pub async fn cloud_bridge_share_session(
                 ring,
                 output_notify,
                 peers: HashMap::new(),
+                peer_roles: HashMap::new(),
                 last_fence: 0,
                 last_input_seq: 0,
             },
@@ -1933,6 +1970,11 @@ pub fn cloud_bridge_status(state: State<'_, CloudBridgeState>) -> Result<BridgeS
             tx_policy: share.policy.tx.clone(),
             tx_expires_at: system_time_seconds(share.policy.tx_expires_at),
             tx_allowed: share.policy.allows_tx(std::time::SystemTime::now()),
+            viewer_count: share.peers.len(),
+            controller_attached: share
+                .peer_roles
+                .values()
+                .any(|role| role == "controller"),
         })
         .collect::<Vec<_>>();
     shares.sort_by(|a, b| a.local_session_id.cmp(&b.local_session_id));
@@ -2000,6 +2042,7 @@ mod tests {
             ring: Arc::new(Mutex::new(RxRing::new(DEFAULT_RX_RING_BYTES))),
             output_notify: Arc::new(tokio::sync::Notify::new()),
             peers: HashMap::new(),
+            peer_roles: HashMap::new(),
             last_fence: 0,
             last_input_seq: 0,
         };

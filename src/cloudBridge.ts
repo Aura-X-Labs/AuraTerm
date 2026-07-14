@@ -8,6 +8,10 @@ export interface CloudBridgeShare {
   txPolicy: "read_only" | "read_write" | "temporary";
   txExpiresAt?: number | null;
   txAllowed: boolean;
+  /** Attached E2EE peers (viewers and controllers alike). */
+  viewerCount: number;
+  /** At least one attached peer connected in the controller role. */
+  controllerAttached: boolean;
 }
 
 export interface CloudBridgeStatus {
