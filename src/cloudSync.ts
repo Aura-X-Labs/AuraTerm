@@ -12,8 +12,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type SyncProvider = "" | "github" | "gitee" | "webdav" | "auraxlab";
 
-/** The official AuraXLab server. Pre-filled for users; self-hosters can override it. */
-export const DEFAULT_AURAXLAB_URL = "https://auraxlab.com";
+/**
+ * The official AuraXLab server. Pre-filled for users; self-hosters can override it.
+ * `VITE_AURAXLAB_URL` overrides this at build time (set by `make run` for local dev).
+ */
+export const DEFAULT_AURAXLAB_URL = import.meta.env.VITE_AURAXLAB_URL || "https://auraxlab.com";
 
 export interface GistView {
   tokenSet: boolean;

@@ -29,7 +29,7 @@ build: clean
 	$(call run_timed,npm run tauri -- build --bundles $(BUNDLE))
 
 run:
-	npm run tauri -- dev
+	AURATERM_AURAXLAB_URL=http://127.0.0.1:8080 VITE_AURAXLAB_URL=http://127.0.0.1:8080 npm run tauri -- dev
 
 clean:
 	@python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('src-tauri/target', 'dist')]"
