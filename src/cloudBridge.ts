@@ -90,3 +90,9 @@ export function shareSessionToCloud(
 export function stopCloudShare(localSessionId: string): Promise<void> {
   return invoke("cloud_bridge_stop_share", { localSessionId });
 }
+
+/** Mirror the persisted "Allow Remote Send" setting into the bridge. Until
+ * the first push the bridge fails closed and drops all remote INPUT. */
+export function setCloudBridgeAllowRemoteSend(allowed: boolean): Promise<void> {
+  return invoke("cloud_bridge_set_allow_remote_send", { allowed });
+}

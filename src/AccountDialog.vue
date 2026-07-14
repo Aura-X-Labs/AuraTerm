@@ -12,12 +12,30 @@ import {
   type CloudBridgeEnrollment,
   type CloudBridgeStatus,
 } from "./cloudBridge";
-import { DEFAULT_AURAXLAB_URL } from "./cloudSync";
+import {
+  auraxlabAccountOverview,
+  auraxlabLogout,
+  getSyncConfig,
+  DEFAULT_AURAXLAB_URL,
+  type AccountOverview,
+  type SyncConfigView,
+} from "./cloudSync";
+import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
 import { t } from "./i18n";
 
 const props = defineProps<{ platform: string }>();
 const emit = defineEmits<{ close: []; openCloudSync: [] }>();
 
+// ── account (AuraXLab sign-in + Cloud Console traffic) ──────────────────────
+const syncView = ref<SyncConfigView | null>(null);
+const overview = ref<AccountOverview | null>(null);
+const overviewError = ref("");
+const overviewBusy = ref(false);
+
+const signedIn = computed(() => syncView.value?.auraxlab.tokenSet ?? false);
+const accountName = computed(() => syncView.value?.auraxlab.username ?? "");
+
+// ── device binding (Cloud Console enrollment) ───────────────────────────────
 const status = ref<CloudBridgeStatus | null>(null);
 const busy = ref(false);
 const message = ref("");
@@ -46,11 +64,67 @@ function note(text: string, error = false) {
   isError.value = error;
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = "B";
+  for (const next of units) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = next;
+  }
+  return `${value.toFixed(1)} ${unit}`;
+}
+
 async function refresh() {
   try {
     status.value = await cloudBridgeStatus();
   } catch {
     /* bridge state is best-effort in this dialog */
+  }
+}
+
+async function refreshOverview() {
+  if (!signedIn.value || overviewBusy.value) return;
+  overviewBusy.value = true;
+  overviewError.value = "";
+  try {
+    overview.value = await auraxlabAccountOverview();
+  } catch (error) {
+    overview.value = null;
+    overviewError.value = String(error);
+  } finally {
+    overviewBusy.value = false;
+  }
+}
+
+async function loadAccount() {
+  try {
+    syncView.value = await getSyncConfig();
+  } catch {
+    /* the account section falls back to the sign-in form */
+  }
+  await refreshOverview();
+}
+
+function onSignedIn(view: SyncConfigView) {
+  syncView.value = view;
+  overview.value = null;
+  void refreshOverview();
+}
+
+async function signOut() {
+  busy.value = true;
+  try {
+    syncView.value = await auraxlabLogout();
+    overview.value = null;
+    note(t("account.signedOut"));
+  } catch (error) {
+    note(String(error), true);
+  } finally {
+    busy.value = false;
   }
 }
 
@@ -175,6 +249,7 @@ async function openConsole() {
 onMounted(() => {
   deviceLabel.value = props.platform;
   void refresh();
+  void loadAccount();
 });
 onBeforeUnmount(stopPolling);
 </script>
@@ -191,6 +266,53 @@ onBeforeUnmount(stopPolling);
       </div>
 
       <div class="account-body">
+        <!-- My account: sign in / profile + Cloud Console traffic -->
+        <section class="account-section">
+          <h3>{{ t('account.accountSection') }}</h3>
+
+          <template v-if="!signedIn">
+            <p class="account-hint">{{ t('account.signInIntro') }}</p>
+            <AuraxlabAuthForm @signed-in="onSignedIn" />
+          </template>
+
+          <template v-else>
+            <dl class="account-facts">
+              <dt>{{ t('account.signedInAs') }}</dt>
+              <dd>{{ accountName }}</dd>
+              <dt>{{ t('account.server') }}</dt>
+              <dd>{{ syncView?.auraxlab.baseUrl || DEFAULT_AURAXLAB_URL }}</dd>
+            </dl>
+
+            <h4 class="account-subheading">{{ t('account.trafficSection') }}</h4>
+            <dl v-if="overview?.traffic" class="account-facts">
+              <dt>{{ t('account.trafficTotal') }}</dt>
+              <dd class="account-traffic-total">{{ formatBytes(overview.traffic.bytesTotal) }}</dd>
+              <dt>{{ t('account.trafficUp') }}</dt>
+              <dd>{{ formatBytes(overview.traffic.bytesUp) }}</dd>
+              <dt>{{ t('account.trafficDown') }}</dt>
+              <dd>{{ formatBytes(overview.traffic.bytesDown) }}</dd>
+              <dt>{{ t('account.trafficSessions') }}</dt>
+              <dd>{{ overview.traffic.sessions }}</dd>
+            </dl>
+            <p v-else class="account-hint">
+              {{ overviewBusy ? '…' : (overviewError || t('account.trafficUnavailable')) }}
+            </p>
+            <p class="account-hint">{{ t('account.trafficHint') }}</p>
+
+            <div class="account-actions">
+              <button class="account-btn" type="button" :disabled="overviewBusy" @click="refreshOverview">
+                {{ t('account.refresh') }}
+              </button>
+              <button class="account-btn" type="button" @click="emit('openCloudSync')">
+                {{ t('account.cloudSyncEntry') }}
+              </button>
+              <button class="account-btn danger" type="button" :disabled="busy" @click="signOut">
+                {{ t('account.signOut') }}
+              </button>
+            </div>
+          </template>
+        </section>
+
         <!-- Bound: device summary -->
         <section v-if="bound" class="account-section">
           <h3>{{ t('account.deviceSection') }}</h3>
@@ -247,10 +369,6 @@ onBeforeUnmount(stopPolling);
                 {{ t('account.browserApprove') }}
               </button>
             </div>
-            <p class="account-hint">
-              {{ t('account.registerHint') }}
-              <a href="#" @click.prevent="emit('openCloudSync')">{{ t('account.cloudSyncEntry') }}</a>
-            </p>
           </template>
 
           <template v-else>
@@ -328,12 +446,21 @@ onBeforeUnmount(stopPolling);
   padding: 14px 18px;
   overflow-y: auto;
 }
+.account-section {
+  margin-bottom: 18px;
+}
 .account-section h3 {
   margin: 0 0 8px;
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   opacity: 0.8;
+}
+.account-subheading {
+  margin: 14px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.75;
 }
 .account-hint {
   font-size: 12px;
@@ -375,6 +502,10 @@ onBeforeUnmount(stopPolling);
 .account-facts dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+.account-traffic-total {
+  font-weight: 600;
+  color: var(--ui-accent, #4d9fff);
 }
 .account-mono {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;

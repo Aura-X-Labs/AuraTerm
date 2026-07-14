@@ -1331,6 +1331,80 @@ pub async fn auraxlab_logout(
     Ok(SyncConfigView::from_config(&config, sync_state.is_unlocked()))
 }
 
+/// Cloud Console traffic totals for the signed-in account, as reported by
+/// `GET /api/v1/auraterm/account` (`traffic` object; absent on older servers).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTraffic {
+    bytes_up: u64,
+    bytes_down: u64,
+    bytes_total: u64,
+    sessions: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountOverview {
+    username: String,
+    email: String,
+    confirmed: bool,
+    traffic: Option<AccountTraffic>,
+}
+
+/// Fetch the signed-in account's profile and Cloud Console traffic totals
+/// for the "My Account" view. Requires an AuraXLab sign-in; the stored
+/// credential never leaves the backend.
+#[tauri::command]
+pub async fn auraxlab_account_overview(app: AppHandle) -> Result<AccountOverview, String> {
+    let config = load_config(&app)?;
+    if config.auraxlab.token.is_empty() {
+        return Err("Sign in to your AuraXLab account first.".to_string());
+    }
+    let client = http_client()?;
+    let url = format!(
+        "{}/api/v1/auraterm/account",
+        resolve_auraxlab_base(&config.auraxlab.base_url)
+    );
+    let resp = client
+        .get(url)
+        .basic_auth(&config.auraxlab.token, Some(""))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let body = parse_json(&bytes);
+    if !status.is_success() {
+        return Err(json_message(&body, status));
+    }
+    let traffic = body.get("traffic").filter(|v| v.is_object()).map(|v| {
+        let count = |key: &str| v.get(key).and_then(|n| n.as_u64()).unwrap_or(0);
+        AccountTraffic {
+            bytes_up: count("bytes_up"),
+            bytes_down: count("bytes_down"),
+            bytes_total: count("bytes_total"),
+            sessions: count("sessions"),
+        }
+    });
+    Ok(AccountOverview {
+        username: body
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&config.auraxlab.username)
+            .to_string(),
+        email: body
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        confirmed: body
+            .get("confirmed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        traffic,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

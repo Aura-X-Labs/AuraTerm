@@ -222,6 +222,20 @@
   padding-right: 8px;
 }
 
+/* Checkable menu items (Cloud menu toggles): the leading check column keeps
+ * labels aligned whether or not the checkmark is present. */
+.titlebar-menu-item--checkable {
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.titlebar-menu-item-check {
+  flex: 0 0 14px;
+  width: 14px;
+  text-align: left;
+  color: var(--app-accent, #4d9fff);
+}
+
 .titlebar-menu-item:hover {
   background: var(--app-menu-hover);
   color: var(--app-text);

@@ -22,10 +22,12 @@ import {
   cloudBridgeStatus,
   connectCloudBridge,
   restoreCloudBridge,
+  setCloudBridgeAllowRemoteSend,
   shareSessionToCloud,
   stopCloudShare,
   type CloudBridgeStatus,
 } from "./cloudBridge";
+import { cloudSyncNow, getSyncConfig, type SyncConfigView } from "./cloudSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useSshTunnels } from "./composables/useSshTunnels";
@@ -110,6 +112,14 @@ const showSettings = ref(false);
 const showCloudSync = ref(false);
 const showAccount = ref(false);
 const shareDialogTab = ref<Tab | null>(null);
+// AuraXLab sign-in state drives the Cloud menu (Sign In vs My Account).
+// Refreshed on startup and whenever the account / sync dialogs close.
+const syncView = shallowRef<SyncConfigView | null>(null);
+const auraxlabSignedIn = computed(() => syncView.value?.auraxlab.tokenSet ?? false);
+const syncNowBusy = ref(false);
+// Transient result banner for menu-triggered "Sync Now" (auto-dismisses).
+const cloudToast = ref<{ text: string; error: boolean } | null>(null);
+let cloudToastTimer: ReturnType<typeof setTimeout> | null = null;
 const showAbout = ref(false);
 const sidebarOpen = ref(false);
 const sidebarRefreshToken = ref(0);
@@ -288,7 +298,9 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleOpenSettings,
   handleOpenCloudSync,
   handleOpenAccount,
-  handleToggleAutoShare,
+  handleSyncNow,
+  handleToggleCloudConsole,
+  handleToggleRemoteSend,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -497,6 +509,15 @@ onMounted(async () => {
 
   hasLoadedSettings.value = true;
 
+  if (isMainWindow) {
+    // Mirror the persisted TX gate into the bridge (it fails closed until
+    // this arrives), then resolve the sign-in state for the Cloud menu.
+    void setCloudBridgeAllowRemoteSend(settings.value.allowRemoteSend).catch(() => {});
+    void refreshSyncView()
+      .catch(() => {})
+      .finally(() => syncCloudMenuState());
+  }
+
   void refreshAiKeyState();
 
   // 凭据保护状态:
@@ -700,16 +721,27 @@ async function syncAutoShare() {
   try {
     await refreshCloudBridgeStatus().catch(() => {});
     const target = activeTab.value ?? null;
+    // The slot's policy follows the global "Allow Remote Send" gate.
+    const allowTx = settings.value.allowRemoteSend;
     for (const share of bridgeStatus.value.shares) {
-      if (share.localSessionId !== target?.id) {
+      // Stop shares that no longer match: wrong tab, or a TX policy that
+      // disagrees with the gate (those get re-shared below).
+      if (share.localSessionId !== target?.id || share.txAllowed !== allowTx) {
         await stopCloudShare(share.localSessionId).catch(() => {});
       }
     }
-    if (target && !bridgeStatus.value.shares.some((share) => share.localSessionId === target.id)) {
+    const alreadyShared = bridgeStatus.value.shares.some(
+      (share) => share.localSessionId === target?.id && share.txAllowed === allowTx,
+    );
+    if (target && !alreadyShared) {
       // A freshly opened tab may not have a live PTY yet; a failed attempt
       // is dropped silently and the next status poll converges.
-      await shareSessionToCloud(target.id, target.session.protocol, target.title, "read_only")
-        .catch(() => {});
+      await shareSessionToCloud(
+        target.id,
+        target.session.protocol,
+        target.title,
+        allowTx ? "read_write" : "read_only",
+      ).catch(() => {});
     }
     await refreshCloudBridgeStatus();
   } finally {
@@ -721,19 +753,114 @@ const autoShareConverged = computed(() => {
   const target = activeTab.value?.id ?? null;
   const shares = bridgeStatus.value.shares;
   return target
-    ? shares.length === 1 && shares[0].localSessionId === target
+    ? shares.length === 1
+      && shares[0].localSessionId === target
+      && shares[0].txAllowed === settings.value.allowRemoteSend
     : shares.length === 0;
 });
 
-function handleToggleAutoShare() {
+// "Cloud Console" in the Cloud menu: one switch that keeps the active session
+// observable (and, if allowed, controllable) from the cloud. Backed by the
+// autoShareToCloud setting so the menu, palette and settings dialog agree.
+function handleToggleCloudConsole() {
   if (!isMainWindow) return; // the menu event broadcasts to every window
   const next = !settings.value.autoShareToCloud;
   persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: next });
   if (next && !bridgeStatus.value.enrolled) {
-    // Binding lives in the account center; auto-share starts once bound.
+    // Binding lives in the account center; monitoring starts once bound.
     showAccount.value = true;
   }
 }
+
+function handleToggleRemoteSend() {
+  if (!isMainWindow) return; // the menu event broadcasts to every window
+  const next = !settings.value.allowRemoteSend;
+  persistSettingsSilently({ ...settingsRef.value, allowRemoteSend: next });
+}
+
+// Enforce the global TX gate as soon as it changes: mirror it into the Rust
+// bridge (which drops remote INPUT while off) and re-shape active shares so
+// the server and console UI reflect the same policy.
+watch(() => settings.value.allowRemoteSend, (allowed, was) => {
+  if (!isMainWindow || allowed === was) return;
+  void (async () => {
+    await setCloudBridgeAllowRemoteSend(allowed).catch(() => {});
+    if (allowed) {
+      // The auto-share slot upgrades to read-write on its next pass; manual
+      // read-only shares stay read-only until re-shared deliberately.
+      scheduleAutoShareSync(0);
+      return;
+    }
+    await refreshCloudBridgeStatus().catch(() => {});
+    for (const share of bridgeStatus.value.shares) {
+      if (!share.txAllowed) continue;
+      // Downgrade in place: stop + re-share view-only.
+      await stopCloudShare(share.localSessionId).catch(() => {});
+      await shareSessionToCloud(share.localSessionId, share.protocol, share.label, "read_only")
+        .catch(() => {});
+    }
+    await refreshCloudBridgeStatus().catch(() => {});
+  })();
+});
+
+function showCloudToast(text: string, error = false) {
+  cloudToast.value = { text, error };
+  if (cloudToastTimer) clearTimeout(cloudToastTimer);
+  cloudToastTimer = setTimeout(() => {
+    cloudToast.value = null;
+  }, 5000);
+}
+
+async function refreshSyncView() {
+  syncView.value = await getSyncConfig();
+}
+
+function refreshSyncViewSilently() {
+  void refreshSyncView().catch(() => {});
+}
+
+// "Sync Now" from the Cloud menu: run a full sync with whatever provider is
+// configured; with none configured (or a locked passphrase) fall through to
+// the sync settings dialog instead of failing silently.
+function handleSyncNow() {
+  if (!isMainWindow || syncNowBusy.value) return;
+  void (async () => {
+    await refreshSyncView().catch(() => {});
+    if (!syncView.value?.provider) {
+      showCloudSync.value = true;
+      return;
+    }
+    syncNowBusy.value = true;
+    try {
+      const result = await cloudSyncNow();
+      showCloudToast(t("cloudShare.syncNowDone", { message: result.message }));
+      refreshSyncViewSilently();
+    } catch (error) {
+      const text = String(error);
+      showCloudToast(t("cloudShare.syncNowFailed", { message: text }), true);
+      if (/passphrase|locked/i.test(text)) {
+        showCloudSync.value = true;
+      }
+    } finally {
+      syncNowBusy.value = false;
+    }
+  })();
+}
+
+// Keep the native (macOS) Cloud menu's account label and checkmarks canonical.
+function syncCloudMenuState() {
+  if (!isMainWindow || osType.value !== "macos") return;
+  void invoke("sync_cloud_menu_state", {
+    signedIn: auraxlabSignedIn.value,
+    consoleOn: settings.value.autoShareToCloud,
+    remoteSendOn: settings.value.allowRemoteSend,
+  }).catch(() => {});
+}
+
+watch(
+  [auraxlabSignedIn, () => settings.value.autoShareToCloud, () => settings.value.allowRemoteSend],
+  () => syncCloudMenuState(),
+);
 
 // Side effects live on the setting itself so the menu, palette and settings
 // dialog all behave identically. Runs on startup too (persisted switch),
@@ -1756,10 +1883,12 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "font-reset", title: t("menu.resetFontSize"), group: t("palette.groups.view"), keywords: "zoom", run: () => handleResetTerminalFontSize() },
     { id: "fullscreen", title: t("palette.cmd.fullscreen"), group: t("palette.groups.view"), run: () => { void handleToggleFullScreen(); } },
     { id: "settings", title: t("palette.cmd.settings"), group: t("palette.groups.app"), keywords: "preferences config", run: () => handleOpenSettings() },
-    { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
-    { id: "account", title: t("palette.cmd.account"), group: t("palette.groups.app"), keywords: "account login bind device cloud console auraxlab enroll", run: () => { showAccount.value = true; } },
+    { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync settings backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
+    { id: "sync-now", title: t("palette.cmd.syncNow"), group: t("palette.groups.app"), keywords: "sync now cloud push pull bookmarks", run: () => handleSyncNow() },
+    { id: "account", title: auraxlabSignedIn.value ? t("menu.myAccount") : t("menu.signIn"), group: t("palette.groups.app"), keywords: "account login sign in my account traffic bind device cloud console auraxlab enroll", run: () => { showAccount.value = true; } },
     { id: "cloud-share", title: activeCloudShared.value ? t("cloudShare.stopButton") : t("cloudShare.shareButton"), group: t("palette.groups.app"), keywords: "cloud console share session rx tx remote view", enabled: hasTab, run: () => { void toggleActiveCloudShare(); } },
-    { id: "auto-share-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.autoShareOff") : t("cloudShare.autoShareOn"), group: t("palette.groups.app"), keywords: "cloud console auto share follow active session", run: () => { void handleToggleAutoShare(); } },
+    { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor auto share follow active session", run: () => handleToggleCloudConsole() },
+    { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
     { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
   ];
@@ -1866,9 +1995,6 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenSettings">
                     <span>{{ $t('menu.settings') }}</span>
                   </button>
-                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenCloudSync">
-                    <span>{{ $t('menu.cloudSync') }}</span>
-                  </button>
                 </div>
               </div>
               <div class="titlebar-menu-separator" />
@@ -1952,6 +2078,39 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               </button>
               <button class="titlebar-menu-item" type="button" @click="closeOpenMenus(); toggleAiPanel()">
                 <span>{{ showAiPanel ? $t('ai.hidePanel') : $t('ai.showPanel') }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="titlebar-menu-group" @mouseenter="openMenuId ? (openMenuId = 'cloud') : null">
+            <button
+              class="titlebar-menu-btn"
+              :class="{ open: openMenuId === 'cloud' }"
+              type="button"
+              @mousedown="stopDragPropagation"
+              @click="toggleMenu('cloud')"
+            >
+              {{ $t('menu.cloud') }}
+            </button>
+            <div v-if="openMenuId === 'cloud'" class="titlebar-menu-dropdown" @mousedown="stopDragPropagation">
+              <button class="titlebar-menu-item" type="button" @click="handleOpenAccount">
+                <span>{{ auraxlabSignedIn ? $t('menu.myAccount') : $t('menu.signIn') }}</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <button class="titlebar-menu-item" type="button" :disabled="syncNowBusy" @click="closeOpenMenus(); handleSyncNow()">
+                <span>{{ $t('menu.syncNow') }}</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" @click="handleOpenCloudSync">
+                <span>{{ $t('menu.syncSettings') }}</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <button class="titlebar-menu-item titlebar-menu-item--checkable" type="button" @click="closeOpenMenus(); handleToggleCloudConsole()">
+                <span class="titlebar-menu-item-check">{{ settings.autoShareToCloud ? '✓' : '' }}</span>
+                <span>{{ $t('menu.cloudConsole') }}</span>
+              </button>
+              <button class="titlebar-menu-item titlebar-menu-item--checkable" type="button" @click="closeOpenMenus(); handleToggleRemoteSend()">
+                <span class="titlebar-menu-item-check">{{ settings.allowRemoteSend ? '✓' : '' }}</span>
+                <span>{{ $t('menu.allowRemoteSend') }}</span>
               </button>
             </div>
           </div>
@@ -2545,20 +2704,25 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     />
 
     <SettingsDialog v-if="showSettings" :initial="settings" @save="handleSaveSettings" @cancel="showSettings = false" />
-    <CloudSyncDialog v-if="showCloudSync" @close="showCloudSync = false" />
+    <CloudSyncDialog v-if="showCloudSync" @close="showCloudSync = false; refreshSyncViewSilently()" />
     <AccountDialog
       v-if="showAccount"
       :platform="osType"
-      @close="showAccount = false; void refreshCloudBridgeStatus()"
+      @close="showAccount = false; void refreshCloudBridgeStatus(); refreshSyncViewSilently()"
       @open-cloud-sync="showAccount = false; showCloudSync = true"
     />
     <ShareDialog
       v-if="shareDialogTab"
       :session-label="shareDialogTab.title"
+      :remote-send-allowed="settings.allowRemoteSend"
       @cancel="shareDialogTab = null"
       @share="confirmShareDialog"
     />
     <AboutDialog v-if="showAbout" @close="showAbout = false" />
+
+    <div v-if="cloudToast" class="cloud-toast" :class="{ error: cloudToast.error }" role="status">
+      {{ cloudToast.text }}
+    </div>
 
     <div v-if="showNewTabMenu" class="newtab-overlay" @click="showNewTabMenu = false">
       <div class="newtab-dialog" @click.stop>

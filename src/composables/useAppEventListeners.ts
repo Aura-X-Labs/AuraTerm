@@ -10,7 +10,9 @@ interface UseAppEventListenersOptions {
   handleOpenSettings: () => void;
   handleOpenCloudSync: () => void;
   handleOpenAccount: () => void;
-  handleToggleAutoShare: () => void;
+  handleSyncNow: () => void;
+  handleToggleCloudConsole: () => void;
+  handleToggleRemoteSend: () => void;
   handleNewLocalSessionFromMenu: () => void;
   handleOpenConnectionFromMenu: (protocol: ConnectionProtocol) => void;
   handleCloseActiveTab: () => void;
@@ -33,7 +35,9 @@ export function useAppEventListeners({
   handleOpenSettings,
   handleOpenCloudSync,
   handleOpenAccount,
-  handleToggleAutoShare,
+  handleSyncNow,
+  handleToggleCloudConsole,
+  handleToggleRemoteSend,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -87,8 +91,14 @@ export function useAppEventListeners({
         listen("menu-open-account", () => {
           handleOpenAccount();
         }),
-        listen("menu-toggle-auto-share", () => {
-          handleToggleAutoShare();
+        listen("menu-sync-now", () => {
+          handleSyncNow();
+        }),
+        listen("menu-toggle-cloud-console", () => {
+          handleToggleCloudConsole();
+        }),
+        listen("menu-toggle-remote-send", () => {
+          handleToggleRemoteSend();
         }),
         listen("menu-new-local", () => {
           handleNewLocalSessionFromMenu();

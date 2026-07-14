@@ -191,9 +191,14 @@ export interface AppSettings {
   outputRules: OutputRule[];
   /** Automatically reveal the SFTP browser after an SSH connection succeeds. */
   autoOpenSftp: boolean;
-  /** Keep the Cloud Console share slot on the active session (read-only),
-   * without a per-session confirmation, until switched off. */
+  /** Keep the Cloud Console share slot on the active session, without a
+   * per-session confirmation, until switched off. The share policy follows
+   * `allowRemoteSend` (read-write when allowed, read-only otherwise). */
   autoShareToCloud: boolean;
+  /** Global Cloud Console TX gate. On (default): shares may grant remote
+   * input per their TX policy. Off: the cloud can only observe — new shares
+   * are clamped to read-only and remote INPUT is dropped by the bridge. */
+  allowRemoteSend: boolean;
   /** Destination directory for files received through inline Zmodem. */
   zmodemDownloadPath: string;
   /** Last used serial port configuration */
@@ -534,6 +539,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   outputRules: [],
   autoOpenSftp: false,
   autoShareToCloud: false,
+  allowRemoteSend: true,
   zmodemDownloadPath: "~/AuraTerm/downloads",
   lastSerialConfig: null,
   recentSerialConfigs: [],
@@ -647,6 +653,7 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     })),
     autoOpenSftp: value?.autoOpenSftp === true,
     autoShareToCloud: value?.autoShareToCloud === true,
+    allowRemoteSend: value?.allowRemoteSend !== false,
     zmodemDownloadPath: value?.zmodemDownloadPath?.trim() || DEFAULT_SETTINGS.zmodemDownloadPath,
     lastSerialConfig: value?.lastSerialConfig ?? DEFAULT_SETTINGS.lastSerialConfig,
     recentSerialConfigs: value?.recentSerialConfigs ?? DEFAULT_SETTINGS.recentSerialConfigs,
