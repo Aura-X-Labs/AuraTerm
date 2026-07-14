@@ -15,12 +15,10 @@ import TunnelManager from "./TunnelManager.vue";
 import CommandPalette from "./CommandPalette.vue";
 import CloudSyncDialog from "./CloudSyncDialog.vue";
 import AccountDialog from "./AccountDialog.vue";
-import ShareDialog from "./ShareDialog.vue";
 import AiAssistantPanel from "./AiAssistantPanel.vue";
 import { aiHasApiKey } from "./ai";
 import {
   cloudBridgeStatus,
-  connectCloudBridge,
   restoreCloudBridge,
   setCloudBridgeAllowRemoteSend,
   shareSessionToCloud,
@@ -92,7 +90,6 @@ const EMPTY_TERMINAL_SEARCH_RESULTS: TerminalSearchResults = {
 const tabs = ref<Tab[]>([]);
 const osType = ref("windows");
 const bridgeStatus = ref<CloudBridgeStatus>({ enrolled: false, connected: false, reconnecting: false, standby: false, shares: [] });
-const bridgeBusy = ref(false);
 const remoteTxActivity = shallowRef<Record<string, { byteCount: number; at: number }>>({});
 const isMainWindow = new URLSearchParams(window.location.search).get('role') !== 'child';
 
@@ -111,7 +108,6 @@ const settings = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const showSettings = ref(false);
 const showCloudSync = ref(false);
 const showAccount = ref(false);
-const shareDialogTab = ref<Tab | null>(null);
 // AuraXLab sign-in state drives the Cloud menu (Sign In vs My Account).
 // Refreshed on startup and whenever the account / sync dialogs close.
 const syncView = shallowRef<SyncConfigView | null>(null);
@@ -555,6 +551,14 @@ onMounted(async () => {
       };
     },
   ));
+  // Viewer/controller attach + detach and reconnects update the status pill
+  // immediately instead of waiting out the 10s poll.
+  cleanupFns.push(await listen("cloud-bridge-peers-changed", () => {
+    void refreshCloudBridgeStatus().catch(() => {});
+  }));
+  cleanupFns.push(await listen("cloud-bridge-connected", () => {
+    void refreshCloudBridgeStatus().catch(() => {});
+  }));
 
   await tunnels.registerTunnelListener();
   cleanupFns.push(() => {
@@ -610,9 +614,6 @@ const activeSerialConnectionState = computed<SerialConnectionState | null>(() =>
   return serialConnectionStates.value[activeTab.value.id] ?? "connecting";
 });
 
-const activeCloudShared = computed(() => Boolean(
-  activeTabId.value && bridgeStatus.value.shares.some((share) => share.localSessionId === activeTabId.value),
-));
 const activeCloudShare = computed(() => (
   activeTabId.value
     ? bridgeStatus.value.shares.find((share) => share.localSessionId === activeTabId.value) ?? null
@@ -626,75 +627,32 @@ async function refreshCloudBridgeStatus() {
   bridgeStatus.value = await cloudBridgeStatus();
 }
 
-async function ensureCloudBridgeConnected(): Promise<boolean> {
-  await refreshCloudBridgeStatus();
-  if (!bridgeStatus.value.enrolled) {
-    // Binding lives in the account center; sharing resumes once bound.
-    showAccount.value = true;
-    return false;
+// ── Cloud status pill: what the cloud can do with this device right now ────
+// Priority ladder mirrors severity: someone holds control > someone watches >
+// link state (online / reconnecting / standby). Peer roles come from the
+// relay's E2EE_INIT frames, so "control" means a controller is attached even
+// while it is not typing. Hidden entirely until the device is bound.
+type CloudPillKind = "control" | "monitor" | "online" | "standby" | "reconnecting" | "offline";
+const cloudStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
+  const bridge = bridgeStatus.value;
+  if (!bridge.enrolled) return null;
+  const watchers = bridge.shares.reduce((sum, share) => sum + share.viewerCount, 0);
+  if (bridge.shares.some((share) => share.controllerAttached)) {
+    return { kind: "control", text: t("cloudShare.statusControl") };
   }
-  if (!bridgeStatus.value.connected) {
-    await connectCloudBridge();
-    await refreshCloudBridgeStatus();
+  if (watchers > 0) {
+    return { kind: "monitor", text: t("cloudShare.statusMonitor", { n: watchers }) };
   }
-  return bridgeStatus.value.connected;
-}
-
-async function toggleActiveCloudShare() {
-  if (!activeTab.value || bridgeBusy.value) return;
-  if (activeCloudShared.value) {
-    bridgeBusy.value = true;
-    try {
-      // A manual stop is an explicit "stop sharing": it also turns the
-      // auto-share switch off so the watcher does not re-share the tab.
-      if (settings.value.autoShareToCloud) {
-        persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: false });
-      }
-      await stopCloudShare(activeTab.value.id);
-      await refreshCloudBridgeStatus();
-    } catch (error) {
-      window.alert(String(error));
-    } finally {
-      bridgeBusy.value = false;
-    }
-    return;
-  }
-  // Open the share dialog for TX-policy selection; the actual share happens
-  // in confirmShareDialog once the user chooses.
-  bridgeBusy.value = true;
-  try {
-    if (!(await ensureCloudBridgeConnected())) return;
-    shareDialogTab.value = activeTab.value;
-  } catch (error) {
-    window.alert(String(error));
-  } finally {
-    bridgeBusy.value = false;
-  }
-}
-
-async function confirmShareDialog(payload: {
-  policy: "read_only" | "read_write" | "temporary";
-  minutes: number;
-}) {
-  const tab = shareDialogTab.value;
-  shareDialogTab.value = null;
-  if (!tab) return;
-  bridgeBusy.value = true;
-  try {
-    await shareSessionToCloud(
-      tab.id,
-      tab.session.protocol,
-      tab.title,
-      payload.policy,
-      payload.policy === "temporary" ? payload.minutes * 60 : undefined,
-    );
-    await refreshCloudBridgeStatus();
-  } catch (error) {
-    window.alert(String(error));
-  } finally {
-    bridgeBusy.value = false;
-  }
-}
+  if (bridge.connected) return { kind: "online", text: t("cloudShare.statusOnline") };
+  if (bridge.reconnecting) return { kind: "reconnecting", text: t("cloudShare.statusReconnecting") };
+  if (bridge.standby) return { kind: "standby", text: t("cloudShare.statusStandby") };
+  return { kind: "offline", text: t("cloudShare.statusOffline") };
+});
+// Only the main window owns the Cloud Console switch (see
+// handleToggleCloudConsole); child windows show a read-only pill.
+const cloudPillTitle = computed(() => (
+  isMainWindow ? t("cloudShare.statusTooltipToggle") : t("cloudShare.statusTooltip")
+));
 
 // ── Auto-share: one switch, the cloud share slot follows the active tab ─────
 // The device holds a single shared-session slot server-side, so auto mode
@@ -1886,8 +1844,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync settings backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
     { id: "sync-now", title: t("palette.cmd.syncNow"), group: t("palette.groups.app"), keywords: "sync now cloud push pull bookmarks", run: () => handleSyncNow() },
     { id: "account", title: auraxlabSignedIn.value ? t("menu.myAccount") : t("menu.signIn"), group: t("palette.groups.app"), keywords: "account login sign in my account traffic bind device cloud console auraxlab enroll", run: () => { showAccount.value = true; } },
-    { id: "cloud-share", title: activeCloudShared.value ? t("cloudShare.stopButton") : t("cloudShare.shareButton"), group: t("palette.groups.app"), keywords: "cloud console share session rx tx remote view", enabled: hasTab, run: () => { void toggleActiveCloudShare(); } },
-    { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor auto share follow active session", run: () => handleToggleCloudConsole() },
+    { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor share session rx tx remote view follow active", run: () => handleToggleCloudConsole() },
     { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
     { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
@@ -2630,16 +2587,17 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           </div>
           <div class="terminal-statusbar-right">
             <button
+              v-if="cloudStatusPill"
               type="button"
               class="terminal-status-cloud"
-              :disabled="bridgeBusy || activeSerialConnectionState === 'connecting'"
-              @click="toggleActiveCloudShare"
+              :class="`cloud-${cloudStatusPill.kind}`"
+              :title="cloudPillTitle"
+              :disabled="!isMainWindow"
+              @click="handleToggleCloudConsole"
             >
-              {{ activeCloudShared ? t('cloudShare.stopButton') : t('cloudShare.shareButton') }}
+              <span class="cloud-status-dot" />
+              {{ cloudStatusPill.text }}
             </button>
-            <span v-if="settings.autoShareToCloud" class="terminal-status-pill">
-              {{ t('cloudShare.autoShareBadge') }}
-            </span>
             <span v-if="activeCloudShare" class="terminal-status-pill">
               {{ activeCloudShare.txAllowed ? t('cloudShare.rxTx', { policy: activeCloudShare.txPolicy }) : t('cloudShare.rxOnly') }}
             </span>
@@ -2710,13 +2668,6 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       :platform="osType"
       @close="showAccount = false; void refreshCloudBridgeStatus(); refreshSyncViewSilently()"
       @open-cloud-sync="showAccount = false; showCloudSync = true"
-    />
-    <ShareDialog
-      v-if="shareDialogTab"
-      :session-label="shareDialogTab.title"
-      :remote-send-allowed="settings.allowRemoteSend"
-      @cancel="shareDialogTab = null"
-      @share="confirmShareDialog"
     />
     <AboutDialog v-if="showAbout" @close="showAbout = false" />
 

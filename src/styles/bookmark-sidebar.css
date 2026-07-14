@@ -163,12 +163,67 @@
   min-width: 0;
 }
 .terminal-status-cloud {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 2px 8px;
   border: 1px solid var(--app-border);
-  border-radius: 4px;
+  border-radius: 999px;
   background: transparent;
   color: inherit;
   font-size: 11px;
+  cursor: pointer;
+}
+
+.terminal-status-cloud:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.terminal-status-cloud .cloud-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--app-text-dim);
+  flex-shrink: 0;
+}
+
+.terminal-status-cloud.cloud-online .cloud-status-dot {
+  background: var(--app-success);
+}
+
+.terminal-status-cloud.cloud-standby .cloud-status-dot {
+  background: transparent;
+  border: 1.5px solid var(--app-success);
+}
+
+.terminal-status-cloud.cloud-reconnecting .cloud-status-dot {
+  background: var(--app-warning);
+  animation: cloud-status-pulse 1.2s ease-in-out infinite;
+}
+
+.terminal-status-cloud.cloud-monitor {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+}
+
+.terminal-status-cloud.cloud-monitor .cloud-status-dot {
+  background: var(--app-accent);
+}
+
+.terminal-status-cloud.cloud-control {
+  border-color: var(--app-danger);
+  color: var(--app-danger);
+}
+
+.terminal-status-cloud.cloud-control .cloud-status-dot {
+  background: var(--app-danger);
+  animation: cloud-status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes cloud-status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 .terminal-status-indicator {
