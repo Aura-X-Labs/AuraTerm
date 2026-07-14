@@ -1356,12 +1356,15 @@ fn spawn_control_pump(
     device: DeviceConfig,
     heartbeat_every: std::time::Duration,
 ) {
-    // Inbound polling is adaptive: fast only while the cloud is actually
-    // watching — a viewer holds a completed E2EE handshake, or any inbound
-    // frame arrived within the grace window (which covers handshakes in
-    // flight). The idle rate only bounds how quickly a *new* viewer is
-    // discovered; terminal output (RX) is pushed by the output pump and
-    // never waits on this loop.
+    // Inbound frames arrive via a long poll: the server holds each GET open
+    // (up to LONG_POLL_WAIT) and returns the moment a frame lands, so an
+    // idle agent costs ~2 requests/minute while a browser's E2EE handshake
+    // is still picked up sub-second. Terminal output (RX) is pushed by the
+    // output pump and never waits on this loop. Against an older server
+    // that ignores `wait`, fall back to client-side pacing: 1s while the
+    // cloud is actually watching (a completed E2EE peer, or a frame within
+    // the grace window), 5s otherwise.
+    const LONG_POLL_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
     const WATCHED_POLL: std::time::Duration = std::time::Duration::from_secs(1);
     const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
     const WATCHED_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1369,22 +1372,21 @@ fn spawn_control_pump(
         let mut last_frame_at = std::time::Instant::now();
         let mut last_heartbeat_at = std::time::Instant::now();
         loop {
-            let watched = last_frame_at.elapsed() < WATCHED_GRACE
-                || inner.lock().ok().is_some_and(|guard| {
-                    guard.shares.values().any(|share| !share.peers.is_empty())
-                });
-            tokio::time::sleep(if watched { WATCHED_POLL } else { IDLE_POLL }).await;
             let current = inner.lock().ok().and_then(|guard| {
                 guard.device.as_ref().map(|d| d.relay_connection.clone())
             });
             if current.as_deref() != Some(device.relay_connection.as_str()) {
                 break; // deliberately downgraded to idle, or replaced
             }
+            let sent_at = std::time::Instant::now();
             let response = match client
                 .get(format!(
-                    "{}/console-relay/v1/agent/{}/frames",
-                    device.base_url, device.relay_connection
+                    "{}/console-relay/v1/agent/{}/frames?wait={}",
+                    device.base_url,
+                    device.relay_connection,
+                    LONG_POLL_WAIT.as_secs()
                 ))
+                .timeout(LONG_POLL_WAIT + std::time::Duration::from_secs(15))
                 .send()
                 .await
             {
@@ -1395,11 +1397,21 @@ fn spawn_control_pump(
                 Ok(frames) => frames,
                 Err(_) => break,
             };
-            if !frames.frames.is_empty() {
+            let got_frames = !frames.frames.is_empty();
+            if got_frames {
                 last_frame_at = std::time::Instant::now();
             }
             for frame in frames.frames {
                 process_inbound_frame(&client, &inner, &port, &app, &device, frame).await;
+            }
+            if !got_frames && sent_at.elapsed() < std::time::Duration::from_secs(1) {
+                // An empty batch that returned immediately means the server
+                // ignored `wait` (older AuraXLab): pace client-side instead.
+                let watched = last_frame_at.elapsed() < WATCHED_GRACE
+                    || inner.lock().ok().is_some_and(|guard| {
+                        guard.shares.values().any(|share| !share.peers.is_empty())
+                    });
+                tokio::time::sleep(if watched { WATCHED_POLL } else { IDLE_POLL }).await;
             }
             if last_heartbeat_at.elapsed() >= heartbeat_every {
                 let heartbeat = client
