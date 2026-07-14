@@ -360,7 +360,7 @@ fn apply_input(config: &mut SyncConfig, input: SyncSettingsInput) {
     }
     // Default the AuraXLab server to the official one when left blank.
     if config.auraxlab.base_url.trim().is_empty() {
-        config.auraxlab.base_url = DEFAULT_AURAXLAB_BASE_URL.to_string();
+        config.auraxlab.base_url = default_auraxlab_base_url();
     }
 }
 
@@ -612,14 +612,17 @@ fn normalize_base_url(raw: &str) -> String {
 
 /// The official AuraXLab server. Used as the default so users never have to type
 /// a URL; self-hosters can still point at their own server explicitly.
-const DEFAULT_AURAXLAB_BASE_URL: &str = "https://auraxlab.com";
+/// `AURATERM_AURAXLAB_URL` overrides this at runtime (set by `make run` for local dev).
+fn default_auraxlab_base_url() -> String {
+    std::env::var("AURATERM_AURAXLAB_URL").unwrap_or_else(|_| "https://auraxlab.com".to_string())
+}
 
 /// Normalize an AuraXLab server URL, falling back to the official server when
 /// the caller leaves it blank.
 fn resolve_auraxlab_base(raw: &str) -> String {
     let normalized = normalize_base_url(raw);
     if normalized.is_empty() {
-        DEFAULT_AURAXLAB_BASE_URL.to_string()
+        default_auraxlab_base_url()
     } else {
         normalized
     }
