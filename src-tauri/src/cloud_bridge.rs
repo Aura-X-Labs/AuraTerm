@@ -273,6 +273,17 @@ struct GrantResponse {
     relay_grant: String,
     #[serde(default)]
     relay_url: Option<String>,
+    /// Server-advertised heartbeat cadence in seconds (see the AuraXLab
+    /// connect-grant response); absent on older servers.
+    #[serde(default)]
+    heartbeat_interval: Option<u64>,
+}
+
+/// Heartbeat cadence for this connection: what the server advertised in the
+/// connect grant, defaulting to 60s, clamped so a misconfigured server can
+/// neither flood nor silence the beat (presence would flap either way).
+fn heartbeat_period(grant: &GrantResponse) -> std::time::Duration {
+    std::time::Duration::from_secs(grant.heartbeat_interval.unwrap_or(60).clamp(5, 600))
 }
 #[derive(Deserialize)]
 struct RelayConnectResponse {
@@ -958,6 +969,7 @@ async fn connect_attempt(
             Arc::clone(port),
             app.clone(),
             device.clone(),
+            heartbeat_period(&grant),
         );
     }
     recover_shares(client.clone(), Arc::clone(inner)).await;
@@ -1024,6 +1036,7 @@ async fn connect_websocket(
         device,
         socket,
         outbound_rx,
+        heartbeat_period(grant),
     );
     Ok(())
 }
@@ -1341,11 +1354,26 @@ fn spawn_control_pump(
     port: Arc<dyn SharedSessionPort>,
     app: AppHandle,
     device: DeviceConfig,
+    heartbeat_every: std::time::Duration,
 ) {
+    // Inbound polling is adaptive: fast only while the cloud is actually
+    // watching — a viewer holds a completed E2EE handshake, or any inbound
+    // frame arrived within the grace window (which covers handshakes in
+    // flight). The idle rate only bounds how quickly a *new* viewer is
+    // discovered; terminal output (RX) is pushed by the output pump and
+    // never waits on this loop.
+    const WATCHED_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+    const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+    const WATCHED_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
     tauri::async_runtime::spawn(async move {
-        let mut ticks = 0_u8;
+        let mut last_frame_at = std::time::Instant::now();
+        let mut last_heartbeat_at = std::time::Instant::now();
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let watched = last_frame_at.elapsed() < WATCHED_GRACE
+                || inner.lock().ok().is_some_and(|guard| {
+                    guard.shares.values().any(|share| !share.peers.is_empty())
+                });
+            tokio::time::sleep(if watched { WATCHED_POLL } else { IDLE_POLL }).await;
             let current = inner.lock().ok().and_then(|guard| {
                 guard.device.as_ref().map(|d| d.relay_connection.clone())
             });
@@ -1367,11 +1395,13 @@ fn spawn_control_pump(
                 Ok(frames) => frames,
                 Err(_) => break,
             };
+            if !frames.frames.is_empty() {
+                last_frame_at = std::time::Instant::now();
+            }
             for frame in frames.frames {
                 process_inbound_frame(&client, &inner, &port, &app, &device, frame).await;
             }
-            ticks = ticks.wrapping_add(1);
-            if ticks % 30 == 0 {
+            if last_heartbeat_at.elapsed() >= heartbeat_every {
                 let heartbeat = client
                     .post(format!(
                         "{}/console-relay/v1/agent/{}/heartbeat",
@@ -1383,6 +1413,7 @@ fn spawn_control_pump(
                 if !heartbeat.is_ok_and(|response| response.status().is_success()) {
                     break;
                 }
+                last_heartbeat_at = std::time::Instant::now();
             }
         }
         mark_disconnected(&inner, &device.relay_connection);
@@ -1400,6 +1431,7 @@ fn spawn_ws_pumps(
     socket: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     mut outbound_rx: tokio::sync::mpsc::Receiver<serde_json::Value>,
+    heartbeat_every: std::time::Duration,
 ) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -1408,7 +1440,7 @@ fn spawn_ws_pumps(
     let writer_connection = device.relay_connection.clone();
     let writer_inner = Arc::clone(&inner);
     tauri::async_runtime::spawn(async move {
-        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut heartbeat = tokio::time::interval(heartbeat_every);
         loop {
             tokio::select! {
                 envelope = outbound_rx.recv() => {
