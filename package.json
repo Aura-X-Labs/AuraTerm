@@ -1,7 +1,7 @@
 {
   "name": "auraterm",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.2",
   "license": "MIT",
   "type": "module",
   "scripts": {
