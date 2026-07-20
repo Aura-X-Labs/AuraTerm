@@ -171,6 +171,7 @@ All commit messages **must be in English** and follow imperative mood format:
 - **UI theme** is derived via `settings.uiThemeMode` and `deriveUiTheme(theme, uiThemeMode)` — three modes: `follow-terminal`, `light`, `dark`
 - **Screen/tmux reconnect**: keep TERM selection dynamic; do not assume a specific terminfo entry exists on the remote
 - **Xterm addon versions**: search is tied to Xterm 5.x — exercise caution when upgrading addons
+- **Never use `window.confirm` / `window.alert` / `window.prompt`** — they are silent no-ops in the macOS WebView (wry implements no WKUIDelegate JS-dialog handlers; `confirm` always returns `false`). Use `confirmDialog`/`alertDialog` from `src/nativeDialogs.ts` (tauri-plugin-dialog) and `promptText` from `src/promptDialog.ts` (in-app modal hosted by `PromptDialogHost.vue` in App.vue)
 - **Version bumping**: only update `package.json` version; the sync script propagates it everywhere else. Run `npm run sync:version` (or just use `npm run tauri …` which runs it automatically)
 
 ### Data Persistence

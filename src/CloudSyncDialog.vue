@@ -17,6 +17,7 @@ import {
   type SyncResult,
 } from "./cloudSync";
 import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
+import { confirmDialog } from "./nativeDialogs";
 import { t } from "./i18n";
 
 const emit = defineEmits<{ close: [] }>();
@@ -192,7 +193,7 @@ async function doPush() {
 }
 
 async function doPull(replace: boolean) {
-  if (replace && !window.confirm(t("cloudSync.confirmReplace"))) {
+  if (replace && !(await confirmDialog(t("cloudSync.confirmReplace")))) {
     return;
   }
   if (!(await saveConfig())) return;

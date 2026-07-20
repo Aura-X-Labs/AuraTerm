@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { t } from "./i18n";
+import { confirmDialog } from "./nativeDialogs";
+import { promptText } from "./promptDialog";
 import type { RemoteDirectoryListing, RemoteFileEntry, RemoteTransferMode, RemoteTransferProgress, SshConfig } from "./types";
 import "./RemoteFileManager.css";
 
@@ -384,16 +386,16 @@ async function saveRemoteEditor() {
   }
 }
 
-function closeRemoteEditor() {
-  if (editorDirty.value && !window.confirm(t("remoteFiles.confirmDiscardChanges"))) return;
+async function closeRemoteEditor() {
+  if (editorDirty.value && !(await confirmDialog(t("remoteFiles.confirmDiscardChanges")))) return;
   editorPath.value = null;
   editorName.value = "";
   editorContent.value = "";
   editorOriginal.value = "";
 }
 
-function closeManager() {
-  if (editorDirty.value && !window.confirm(t("remoteFiles.confirmCloseDiscard"))) return;
+async function closeManager() {
+  if (editorDirty.value && !(await confirmDialog(t("remoteFiles.confirmCloseDiscard")))) return;
   emit("close");
 }
 
@@ -449,7 +451,7 @@ async function deleteSelected() {
   }
 
   const label = selectedEntry.value.isDir ? t("remoteFiles.labelFolder") : t("remoteFiles.labelFile");
-  if (!window.confirm(t("remoteFiles.confirmDelete", { label, name: selectedEntry.value.name }))) {
+  if (!(await confirmDialog(t("remoteFiles.confirmDelete", { label, name: selectedEntry.value.name })))) {
     return;
   }
 
@@ -471,7 +473,7 @@ async function deleteSelected() {
 }
 
 async function createFolder() {
-  const name = window.prompt(t("remoteFiles.newFolderPrompt"), t("remoteFiles.newFolderDefault"));
+  const name = await promptText(t("remoteFiles.newFolderPrompt"), t("remoteFiles.newFolderDefault"));
   if (!name) {
     return;
   }

@@ -13,6 +13,10 @@ chrono = "0.4"
 [dependencies]
 tauri = { version = "2.10.3", features = [] }
 tauri-plugin-shell = "2.3.5"
+# Native message/confirm dialogs. The WebView's own window.confirm/alert/
+# prompt are silent no-ops on macOS (wry implements no WKUIDelegate JS
+# dialog handlers), so all confirmations must go through this plugin.
+tauri-plugin-dialog = "2.7.2"
 portable-pty = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
