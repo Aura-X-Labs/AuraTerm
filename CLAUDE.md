@@ -56,7 +56,7 @@ There is **no automated test suite** in this project. Verification is done throu
 2. **Rust compile check:** `cd src-tauri && cargo check`
 3. **Interactive integration testing:** `npm run tauri dev`
 
-The CI pipeline (`.github/workflows/ci.yml`) runs `npm run build` as the lint/type-check step and then performs full Tauri builds across all platforms (Ubuntu, macOS x64, macOS arm64, Windows).
+The CI pipeline (`.github/workflows/ci.yml`) runs `npm run build` as the lint/type-check step and then performs full Tauri builds across all platforms (Ubuntu, macOS arm64, Windows — macOS x64/Intel is no longer supported).
 
 ---
 
