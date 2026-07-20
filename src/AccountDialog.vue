@@ -31,6 +31,9 @@ const emit = defineEmits<{ close: []; openCloudSync: [] }>();
 // and the Cloud Console device binding (Ed25519 device identity) stay
 // separate secrets with separate lifecycles, but this dialog presents them
 // as one center and drives both from a single password entry.
+// A server-side password change/reset invalidates the sync credential
+// (account_auth_epoch pin): sync starts failing with 401 "sign in again"
+// and signing in here mints a fresh credential.
 
 // ── account (AuraXLab sign-in + Cloud Console traffic) ──────────────────────
 const syncView = ref<SyncConfigView | null>(null);

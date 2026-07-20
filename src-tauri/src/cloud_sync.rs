@@ -1238,6 +1238,13 @@ pub async fn auraxlab_register(
 /// ever stored on disk. Older servers without that endpoint fall back to the
 /// legacy `/tokens/` flow; those tokens now really expire server-side, after
 /// which the user is asked to sign in again (migration UX).
+///
+/// "Long-lived" has one server-side limit: changing or resetting the account
+/// password invalidates every outstanding sync credential (the server pins
+/// `account_auth_epoch` at issuance). Sync then fails with a 401 whose
+/// message says to sign in again on this device; running this command again
+/// mints a fresh credential under the new epoch and overwrites the stored
+/// one — the same recovery path as a lost rotate write.
 #[tauri::command]
 pub async fn auraxlab_login(
     app: AppHandle,
