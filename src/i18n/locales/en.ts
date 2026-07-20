@@ -493,6 +493,8 @@ const en = {
     signedInAs: "Signed in as",
     signOut: "Sign out",
     signedOut: "Signed out.",
+    signedOutStillBound:
+      "Signed out. This device stays bound and reachable via Cloud Console — use \"Unbind this device\" below to remove it.",
     trafficSection: "Cloud Console traffic",
     trafficTotal: "Total",
     trafficUp: "Upload",
