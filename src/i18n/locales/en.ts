@@ -449,15 +449,29 @@ const en = {
   account: {
     title: "AuraXLab Account",
     subtitle: "One account for Cloud Sync and Cloud Console",
+    statusSection: "Access status",
+    statusSync: "Cloud Sync",
+    statusConsole: "Cloud Console",
+    statusSignedIn: "Signed in · {name}",
+    statusNotSignedIn: "Not signed in",
+    statusBound: "Bound · {label}",
+    statusNotBound: "Not bound",
     deviceSection: "This device",
     notBound: "This device is not bound to an AuraXLab account yet.",
-    bindIntro:
-      "Sign in to bind this device to your account. Bound devices can share terminal sessions to Cloud Console and are manageable from the web.",
+    bindOnLogin: "Also bind this device to Cloud Console",
+    bindIntroSignedIn:
+      "Bind this device to the signed-in account. Bound devices can share terminal sessions to Cloud Console and are manageable from the web.",
+    passwordFreshnessHint:
+      "For security, binding asks for your account password entered right now — the sync sign-in cannot be used to bind a new device to the account.",
+    signInToBindHint:
+      "Sign in above with “Also bind” checked to do both in one step, or use browser approval:",
+    bindNow: "Bind this device",
+    bindAfterLoginFailed: "Signed in, but device binding did not complete:",
+    passwordRequired: "Enter your password.",
     serverUrl: "Server URL",
     deviceLabel: "Device name",
     email: "Email",
     password: "Password",
-    signInAndBind: "Sign in & bind this device",
     browserApprove: "Bind via browser approval (no password in the app)",
     fingerprint: "Fingerprint",
     verifyFingerprint:

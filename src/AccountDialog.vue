@@ -27,6 +27,11 @@ import { t } from "./i18n";
 const props = defineProps<{ platform: string }>();
 const emit = defineEmits<{ close: []; openCloudSync: [] }>();
 
+// One account, two credentials: the sync sign-in (axsync_ scoped credential)
+// and the Cloud Console device binding (Ed25519 device identity) stay
+// separate secrets with separate lifecycles, but this dialog presents them
+// as one center and drives both from a single password entry.
+
 // ── account (AuraXLab sign-in + Cloud Console traffic) ──────────────────────
 const syncView = ref<SyncConfigView | null>(null);
 const overview = ref<AccountOverview | null>(null);
@@ -35,6 +40,7 @@ const overviewBusy = ref(false);
 
 const signedIn = computed(() => syncView.value?.auraxlab.tokenSet ?? false);
 const accountName = computed(() => syncView.value?.auraxlab.username ?? "");
+const accountEmail = computed(() => overview.value?.email ?? "");
 
 // ── device binding (Cloud Console enrollment) ───────────────────────────────
 const status = ref<CloudBridgeStatus | null>(null);
@@ -42,16 +48,22 @@ const busy = ref(false);
 const message = ref("");
 const isError = ref(false);
 
+// Shared server: the sign-in form binds this (v-model:server-url); binding a
+// device while signed in uses the account's server so the two can't diverge.
 const serverUrl = ref(DEFAULT_AURAXLAB_URL);
 const deviceLabel = ref("");
-const email = ref("");
+const email = ref(""); // fallback only, when the profile email is unknown
 const password = ref("");
+const bindOnLogin = ref(true);
 
 // Browser-approval fallback state.
 const enrollment = ref<CloudBridgeEnrollment | null>(null);
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
 const bound = computed(() => status.value?.enrolled ?? false);
+const accountServer = computed(
+  () => syncView.value?.auraxlab.baseUrl || serverUrl.value,
+);
 const connectionText = computed(() => {
   if (!status.value) return "";
   if (status.value.connected) return t("account.connected");
@@ -104,6 +116,10 @@ async function refreshOverview() {
 async function loadAccount() {
   try {
     syncView.value = await getSyncConfig();
+    // A previously used custom server should drive both flows.
+    if (syncView.value?.auraxlab.baseUrl) {
+      serverUrl.value = syncView.value.auraxlab.baseUrl;
+    }
   } catch {
     /* the account section falls back to the sign-in form */
   }
@@ -129,25 +145,54 @@ async function signOut() {
   }
 }
 
-async function bindWithPassword() {
-  if (!email.value.trim() || !password.value) {
+/** Enroll this installation: begin → authorize (password proof) → redeem →
+ * connect. Shared by bind-on-login and the signed-in bind card. */
+async function enrollDevice(server: string, emailArg: string, passwordArg: string) {
+  await beginCloudBridgeEnrollment(
+    server,
+    deviceLabel.value.trim() || props.platform,
+    props.platform,
+  );
+  await authorizeCloudBridgeEnrollment(emailArg, passwordArg);
+  const outcome = await redeemCloudBridgeEnrollment();
+  if (outcome.status !== "ok") {
+    throw new Error(t(`account.${outcome.status === "denied" ? "denied" : "expired"}`));
+  }
+  await connectCloudBridge();
+}
+
+/** Chained onto the sign-in form's password entry: one sign-in issues the
+ * sync credential and (opt-in) enrolls the device — the password is used for
+ * both requests in the same moment and never stored. */
+async function handlePostLogin(credentials: { email: string; password: string }) {
+  if (!bindOnLogin.value || bound.value) return;
+  try {
+    await enrollDevice(serverUrl.value, credentials.email, credentials.password);
+    note(t("account.bound"));
+  } catch (error) {
+    note(`${t("account.bindAfterLoginFailed")} ${String(error)}`, true);
+  } finally {
+    await refresh();
+  }
+}
+
+/** Bind while already signed in: the account email is prefilled; only the
+ * password is asked again (freshness proof — the sync credential itself is
+ * deliberately not accepted for binding a new device identity). */
+async function bindCurrentAccount() {
+  const targetEmail = (accountEmail.value || email.value).trim();
+  if (!targetEmail) {
     note(t("account.needCredentials"), true);
+    return;
+  }
+  if (!password.value) {
+    note(t("account.passwordRequired"), true);
     return;
   }
   busy.value = true;
   note("");
   try {
-    await beginCloudBridgeEnrollment(
-      serverUrl.value,
-      deviceLabel.value.trim() || props.platform,
-      props.platform,
-    );
-    await authorizeCloudBridgeEnrollment(email.value.trim(), password.value);
-    const outcome = await redeemCloudBridgeEnrollment();
-    if (outcome.status !== "ok") {
-      throw new Error(t(`account.${outcome.status === "denied" ? "denied" : "expired"}`));
-    }
-    await connectCloudBridge();
+    await enrollDevice(accountServer.value, targetEmail, password.value);
     note(t("account.bound"));
   } catch (error) {
     note(String(error), true);
@@ -162,12 +207,13 @@ async function bindWithBrowser() {
   busy.value = true;
   note("");
   try {
+    const server = signedIn.value ? accountServer.value : serverUrl.value;
     enrollment.value = await beginCloudBridgeEnrollment(
-      serverUrl.value,
+      server,
       deviceLabel.value.trim() || props.platform,
       props.platform,
     );
-    await openExternalUrl(`${serverUrl.value.replace(/\/+$/, "")}/console`);
+    await openExternalUrl(`${server.replace(/\/+$/, "")}/console`);
     note(t("account.waitingApproval"));
     pollRedeem();
   } catch (error) {
@@ -267,21 +313,59 @@ onBeforeUnmount(stopPolling);
       </div>
 
       <div class="account-body">
+        <!-- Access status: both scopes of the one account, at a glance -->
+        <section class="account-section">
+          <h3>{{ t('account.statusSection') }}</h3>
+          <dl class="account-facts">
+            <dt>{{ t('account.statusSync') }}</dt>
+            <dd>
+              <span class="account-badge" :data-on="signedIn">
+                {{ signedIn ? t('account.statusSignedIn', { name: accountName }) : t('account.statusNotSignedIn') }}
+              </span>
+            </dd>
+            <dt>{{ t('account.statusConsole') }}</dt>
+            <dd class="account-badges">
+              <span class="account-badge" :data-on="bound">
+                {{ bound ? t('account.statusBound', { label: status?.deviceLabel || '' }) : t('account.statusNotBound') }}
+              </span>
+              <span v-if="bound" class="account-badge" :data-on="status?.connected">{{ connectionText }}</span>
+            </dd>
+          </dl>
+        </section>
+
         <!-- My account: sign in / profile + Cloud Console traffic -->
         <section class="account-section">
           <h3>{{ t('account.accountSection') }}</h3>
 
           <template v-if="!signedIn">
             <p class="account-hint">{{ t('account.signInIntro') }}</p>
-            <AuraxlabAuthForm @signed-in="onSignedIn" />
+            <AuraxlabAuthForm
+              v-model:server-url="serverUrl"
+              show-server
+              :post-login="handlePostLogin"
+              @signed-in="onSignedIn"
+            >
+              <div v-if="!bound" class="account-bind-inline">
+                <label class="account-checkbox">
+                  <input v-model="bindOnLogin" type="checkbox" />
+                  <span>{{ t('account.bindOnLogin') }}</span>
+                </label>
+                <template v-if="bindOnLogin">
+                  <label class="account-inline-label">{{ t('account.deviceLabel') }}</label>
+                  <input v-model="deviceLabel" class="account-input" type="text" autocomplete="off" />
+                </template>
+              </div>
+            </AuraxlabAuthForm>
           </template>
 
           <template v-else>
             <dl class="account-facts">
               <dt>{{ t('account.signedInAs') }}</dt>
               <dd>{{ accountName }}</dd>
+              <dt>{{ t('account.email') }}</dt>
+              <dd>{{ accountEmail || '—' }}</dd>
               <dt>{{ t('account.server') }}</dt>
-              <dd>{{ syncView?.auraxlab.baseUrl || DEFAULT_AURAXLAB_URL }}</dd>
+              <dd>{{ accountServer }}</dd>
             </dl>
 
             <h4 class="account-subheading">{{ t('account.trafficSection') }}</h4>
@@ -340,36 +424,55 @@ onBeforeUnmount(stopPolling);
           </div>
         </section>
 
-        <!-- Unbound: sign in & bind -->
+        <!-- Unbound: bind to the signed-in account, or via browser approval -->
         <section v-else class="account-section">
           <h3>{{ t('account.deviceSection') }}</h3>
-          <p class="account-hint">{{ t('account.notBound') }} {{ t('account.bindIntro') }}</p>
 
           <template v-if="!enrollment">
-            <div class="account-grid">
-              <label>{{ t('account.serverUrl') }}</label>
-              <input v-model="serverUrl" class="account-input" type="url" autocomplete="off" spellcheck="false" />
-              <label>{{ t('account.deviceLabel') }}</label>
-              <input v-model="deviceLabel" class="account-input" type="text" autocomplete="off" />
-              <label>{{ t('account.email') }}</label>
-              <input v-model="email" class="account-input" type="email" autocomplete="username" />
-              <label>{{ t('account.password') }}</label>
-              <input
-                v-model="password"
-                class="account-input"
-                type="password"
-                autocomplete="current-password"
-                @keyup.enter="bindWithPassword"
-              />
-            </div>
-            <div class="account-actions">
-              <button class="account-btn primary" type="button" :disabled="busy" @click="bindWithPassword">
-                {{ t('account.signInAndBind') }}
-              </button>
-              <button class="account-btn" type="button" :disabled="busy" @click="bindWithBrowser">
-                {{ t('account.browserApprove') }}
-              </button>
-            </div>
+            <!-- Signed in: prefill the account, only the password is asked
+                 again (freshness proof required by the server). -->
+            <template v-if="signedIn">
+              <p class="account-hint">{{ t('account.bindIntroSignedIn') }}</p>
+              <div class="account-grid">
+                <label>{{ t('account.email') }}</label>
+                <span v-if="accountEmail" class="account-static">{{ accountEmail }}</span>
+                <input v-else v-model="email" class="account-input" type="email" autocomplete="username" />
+                <label>{{ t('account.deviceLabel') }}</label>
+                <input v-model="deviceLabel" class="account-input" type="text" autocomplete="off" />
+                <label>{{ t('account.password') }}</label>
+                <input
+                  v-model="password"
+                  class="account-input"
+                  type="password"
+                  autocomplete="current-password"
+                  @keyup.enter="bindCurrentAccount"
+                />
+              </div>
+              <p class="account-hint">{{ t('account.passwordFreshnessHint') }}</p>
+              <div class="account-actions">
+                <button class="account-btn primary" type="button" :disabled="busy" @click="bindCurrentAccount">
+                  {{ t('account.bindNow') }}
+                </button>
+                <button class="account-btn" type="button" :disabled="busy" @click="bindWithBrowser">
+                  {{ t('account.browserApprove') }}
+                </button>
+              </div>
+            </template>
+
+            <!-- Not signed in: the sign-in form above binds in one step;
+                 browser approval stays available as the no-password path. -->
+            <template v-else>
+              <p class="account-hint">{{ t('account.notBound') }} {{ t('account.signInToBindHint') }}</p>
+              <div class="account-grid">
+                <label>{{ t('account.deviceLabel') }}</label>
+                <input v-model="deviceLabel" class="account-input" type="text" autocomplete="off" />
+              </div>
+              <div class="account-actions">
+                <button class="account-btn" type="button" :disabled="busy" @click="bindWithBrowser">
+                  {{ t('account.browserApprove') }}
+                </button>
+              </div>
+            </template>
           </template>
 
           <template v-else>
@@ -490,6 +593,31 @@ onBeforeUnmount(stopPolling);
   padding: 7px 9px;
   font-size: 13px;
 }
+.account-static {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.account-bind-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.account-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.account-checkbox input {
+  margin: 0;
+}
+.account-inline-label {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-top: 4px;
+}
 .account-facts {
   display: grid;
   grid-template-columns: 110px 1fr;
@@ -529,6 +657,11 @@ onBeforeUnmount(stopPolling);
 }
 .account-badge[data-on="true"] {
   background: #1f4d2e;
+}
+.account-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .account-actions {
   display: flex;

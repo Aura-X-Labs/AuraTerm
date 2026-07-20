@@ -444,15 +444,29 @@ const zhCN: Messages = {
   account: {
     title: "AuraXLab 账户",
     subtitle: "一个账户，同时用于云同步与 Cloud Console",
+    statusSection: "接入状态",
+    statusSync: "云同步",
+    statusConsole: "Cloud Console",
+    statusSignedIn: "已登录 · {name}",
+    statusNotSignedIn: "未登录",
+    statusBound: "已绑定 · {label}",
+    statusNotBound: "未绑定",
     deviceSection: "本设备",
     notBound: "此设备尚未绑定 AuraXLab 账户。",
-    bindIntro:
-      "登录即可把此设备绑定到你的账户。绑定后可将终端会话共享到 Cloud Console，并可在网页端管理设备。",
+    bindOnLogin: "同时绑定此设备到 Cloud Console",
+    bindIntroSignedIn:
+      "把此设备绑定到当前登录的账户。绑定后可将终端会话共享到 Cloud Console，并可在网页端管理设备。",
+    passwordFreshnessHint:
+      "出于安全考虑，绑定设备需当场输入一次账户密码——同步登录态不能用于给账户绑定新设备。",
+    signInToBindHint:
+      "在上方登录并勾选「同时绑定」即可一步完成登录与绑定；也可改用浏览器批准：",
+    bindNow: "绑定此设备",
+    bindAfterLoginFailed: "已登录，但设备绑定未完成：",
+    passwordRequired: "请输入密码。",
     serverUrl: "服务器地址",
     deviceLabel: "设备名称",
     email: "邮箱",
     password: "密码",
-    signInAndBind: "登录并绑定此设备",
     browserApprove: "改用浏览器批准绑定（无需在应用内输入密码）",
     fingerprint: "指纹",
     verifyFingerprint: "在浏览器中输入代码，并核对指纹与下方一致：",

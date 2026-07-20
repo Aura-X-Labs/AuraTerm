@@ -18,8 +18,24 @@ import { t } from "./i18n";
  * Shared by the Cloud Sync dialog and the account center; on success the
  * backend selects the AuraXLab provider and the updated config view is
  * emitted so the host dialog can re-hydrate its own state.
+ *
+ * Hosts can chain an extra step onto the same password entry via `postLogin`
+ * (the account center uses it to enroll the device for Cloud Console — one
+ * sign-in, two credentials). The callback runs after a successful login and
+ * must handle its own errors; the password is never stored and is cleared
+ * as soon as the chained step finishes.
  */
+const props = defineProps<{
+  /** Show an editable server URL field above the login form. */
+  showServer?: boolean;
+  /** Extra step run with the fresh credentials after a successful login. */
+  postLogin?: (credentials: { email: string; password: string }) => Promise<void>;
+}>();
+
 const emit = defineEmits<{ signedIn: [view: SyncConfigView] }>();
+
+/** Server the form talks to; hosts may bind it (`v-model:server-url`). */
+const serverUrl = defineModel<string>("serverUrl", { default: DEFAULT_AURAXLAB_URL });
 
 const email = ref("");
 const password = ref("");
@@ -69,10 +85,16 @@ async function signIn() {
     return;
   }
   await withBusy(async () => {
-    const updated = await auraxlabLogin(DEFAULT_AURAXLAB_URL, email.value, password.value);
+    const updated = await auraxlabLogin(serverUrl.value, email.value, password.value);
+    const freshPassword = password.value;
     password.value = "";
     flash(t("cloudSync.signedIn"));
     emit("signedIn", updated);
+    // Chain the host's extra step (e.g. device binding) onto this same
+    // password entry, then drop the secret.
+    if (props.postLogin) {
+      await props.postLogin({ email: email.value.trim(), password: freshPassword });
+    }
   });
 }
 
@@ -83,7 +105,7 @@ async function sendCode() {
     return;
   }
   await withBusy(async () => {
-    const msg = await auraxlabRequestEmailCode(DEFAULT_AURAXLAB_URL, email.value.trim());
+    const msg = await auraxlabRequestEmailCode(serverUrl.value, email.value.trim());
     code.value = "";
     regStep.value = "code";
     flash(msg);
@@ -98,7 +120,7 @@ async function verifyCode() {
   }
   await withBusy(async () => {
     const msg = await auraxlabVerifyEmailCode(
-      DEFAULT_AURAXLAB_URL,
+      serverUrl.value,
       email.value.trim(),
       code.value.trim(),
     );
@@ -117,7 +139,7 @@ async function register() {
     return;
   }
   await withBusy(async () => {
-    const msg = await auraxlabRegister(DEFAULT_AURAXLAB_URL, email.value, username.value, password.value);
+    const msg = await auraxlabRegister(serverUrl.value, email.value, username.value, password.value);
     password.value = "";
     startLogin();
     flash(msg);
@@ -130,10 +152,16 @@ async function register() {
     <!-- Sign in -->
     <template v-if="mode === 'login'">
       <p class="ax-hint">{{ t('cloudSync.loginHint') }}</p>
+      <template v-if="props.showServer">
+        <label>{{ t('account.serverUrl') }}</label>
+        <input v-model="serverUrl" class="ax-input" type="url" autocomplete="off" spellcheck="false" />
+      </template>
       <label>{{ t('cloudSync.email') }}</label>
       <input v-model="email" class="ax-input" type="email" autocomplete="off" placeholder="you@example.com" />
       <label>{{ t('cloudSync.password') }}</label>
       <input v-model="password" class="ax-input" type="password" autocomplete="off" @keyup.enter="signIn" />
+      <!-- Host-provided extras (e.g. the account center's bind-on-login option). -->
+      <slot />
       <div class="ax-row">
         <button class="ax-btn primary" type="button" :disabled="busy" @click="signIn">{{ t('cloudSync.signIn') }}</button>
         <button class="ax-btn" type="button" :disabled="busy" @click="startRegister">{{ t('cloudSync.needAccount') }}</button>
