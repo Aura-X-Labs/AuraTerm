@@ -120,7 +120,7 @@ async function signOut() {
   try {
     syncView.value = await auraxlabLogout();
     overview.value = null;
-    note(t("account.signedOut"));
+    note(t(bound.value ? "account.signedOutStillBound" : "account.signedOut"));
   } catch (error) {
     note(String(error), true);
   } finally {

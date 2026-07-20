@@ -484,6 +484,8 @@ const zhCN: Messages = {
     signedInAs: "当前账户",
     signOut: "退出登录",
     signedOut: "已退出登录。",
+    signedOutStillBound:
+      "已退出登录。此设备仍处于绑定状态，可通过 Cloud Console 接入；如需移除，请点击下方「解绑此设备」。",
     trafficSection: "Cloud Console 流量",
     trafficTotal: "总流量",
     trafficUp: "上行",
