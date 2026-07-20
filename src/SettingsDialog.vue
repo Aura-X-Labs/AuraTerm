@@ -18,6 +18,7 @@ import {
   type UiThemeMode,
 } from "./settings";
 import { aiClearApiKey, aiHasApiKey, aiSetApiKey, aiTestConnection } from "./ai";
+import { alertDialog, confirmDialog } from "./nativeDialogs";
 
 const props = defineProps<{
   initial: AppSettings;
@@ -384,7 +385,7 @@ async function removeTrustedHostKey(entry: TrustedSshHostKeyEntry) {
 }
 
 async function resetTrustedHostKeys() {
-  const confirmed = window.confirm(t("settings.security.confirmResetHostKeys"));
+  const confirmed = await confirmDialog(t("settings.security.confirmResetHostKeys"));
   if (!confirmed) {
     return;
   }
@@ -525,7 +526,7 @@ async function importCredentials() {
     return;
   }
 
-  const confirmed = window.confirm(
+  const confirmed = await confirmDialog(
     "Importing will overwrite existing connection credentials with the same IDs. Continue?",
   );
   if (!confirmed) {
@@ -549,7 +550,7 @@ async function importCredentials() {
 }
 
 async function lockMasterPasswordNow() {
-  const confirmed = window.confirm(
+  const confirmed = await confirmDialog(
     "Lock the master password now? You'll need to re-enter it before accessing saved credentials.",
   );
   if (!confirmed) {
@@ -558,11 +559,11 @@ async function lockMasterPasswordNow() {
   lockingMasterPassword.value = true;
   try {
     await invoke("lock_master_password");
-    window.alert(t("settings.security.masterPasswordLocked"));
+    await alertDialog(t("settings.security.masterPasswordLocked"));
     window.location.reload();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    window.alert(t("settings.security.lockFailed", { error: message }));
+    await alertDialog(t("settings.security.lockFailed", { error: message }), "error");
   } finally {
     lockingMasterPassword.value = false;
   }
@@ -668,7 +669,7 @@ async function changeMasterPassword() {
 async function disableMasterPassword() {
   mpError.value = "";
   mpSuccess.value = "";
-  const confirmed = window.confirm(
+  const confirmed = await confirmDialog(
     "Remove the master password? Credentials will be re-encrypted with a device-local key and you'll no longer be prompted on startup.",
   );
   if (!confirmed) {

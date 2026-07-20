@@ -21,6 +21,7 @@ import {
   type SyncConfigView,
 } from "./cloudSync";
 import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
+import { confirmDialog } from "./nativeDialogs";
 import { t } from "./i18n";
 
 const props = defineProps<{ platform: string }>();
@@ -228,7 +229,7 @@ async function rotate() {
 }
 
 async function unbind() {
-  if (!window.confirm(t("account.unbindConfirm"))) return;
+  if (!(await confirmDialog(t("account.unbindConfirm")))) return;
   busy.value = true;
   try {
     await unbindCloudBridge();

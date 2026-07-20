@@ -16,6 +16,7 @@ import CommandPalette from "./CommandPalette.vue";
 import CloudSyncDialog from "./CloudSyncDialog.vue";
 import AccountDialog from "./AccountDialog.vue";
 import AiAssistantPanel from "./AiAssistantPanel.vue";
+import PromptDialogHost from "./PromptDialogHost.vue";
 import { aiHasApiKey } from "./ai";
 import {
   cloudBridgeStatus,
@@ -2712,5 +2713,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       @connect="handleConnectResult"
       @cancel="showConnectDialog = false"
     />
+
+    <PromptDialogHost />
   </div>
 </template>

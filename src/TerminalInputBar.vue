@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import type { QuickButton } from "./settings";
 import { buildSnippetPayload, snippetApplies, snippetVariables } from "./snippets";
 import { t } from "./i18n";
+import { promptText } from "./promptDialog";
 import { aiComplete } from "./ai";
 import { commandGenerationSystemPrompt, extractCommand } from "./aiPrompts";
 
@@ -250,10 +251,10 @@ function handleKeyDown(event: KeyboardEvent) {
   }
 }
 
-function handleQuickButton(button: QuickButton) {
+async function handleQuickButton(button: QuickButton) {
   const values: Record<string, string> = {};
   for (const variable of snippetVariables(button.command)) {
-    const value = window.prompt(t("inputBar.valuePrompt", { variable: `{{${variable}}}` }));
+    const value = await promptText(t("inputBar.valuePrompt", { variable: `{{${variable}}}` }));
     if (value === null) return;
     values[variable] = value;
   }
