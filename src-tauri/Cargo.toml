@@ -7,18 +7,18 @@ edition = "2021"
 license = "MIT"
 
 [build-dependencies]
-tauri-build = { version = "2.5.6", features = [] }
+tauri-build = { version = "2.6.3", features = [] }
 chrono = "0.4"
 
 [dependencies]
-tauri = { version = "2.10.3", features = [] }
+tauri = { version = "2.11.5", features = [] }
 tauri-plugin-shell = "2.3.5"
 # Native message/confirm dialogs. The WebView's own window.confirm/alert/
 # prompt are silent no-ops on macOS (wry implements no WKUIDelegate JS
 # dialog handlers), so all confirmations must go through this plugin.
-# Held at 2.6.0 together with the npm package: the 2.7.x npm side requires
-# @tauri-apps/api 2.11, which must match the tauri crate's minor (2.10).
-tauri-plugin-dialog = "2.6.0"
+# Keep in lockstep with the @tauri-apps/plugin-dialog npm package: 2.7.x
+# requires @tauri-apps/api 2.11, which must match the tauri crate's minor.
+tauri-plugin-dialog = "2.7.2"
 portable-pty = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
