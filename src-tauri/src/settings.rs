@@ -162,6 +162,7 @@ pub enum Language {
 impl Language {
     /// Best-effort concrete locale for native UI (e.g. the macOS menubar) built
     /// before the frontend resolves `System`. Defaults to English.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn to_locale(self) -> &'static str {
         match self {
             Language::ZhCn => "zh-CN",
