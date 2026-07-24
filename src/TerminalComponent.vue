@@ -734,6 +734,13 @@ onMounted(() => {
       return false; // Prevent default handling
     }
 
+    // Ctrl/Cmd+F maps to control code \x06, so xterm would handle it and call
+    // stopPropagation(). Let it through so App.vue's window-level handler can
+    // open the terminal search bar.
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "f") {
+      return false;
+    }
+
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === "ArrowUp") {
       event.preventDefault();
       previousCommand();

@@ -17,6 +17,7 @@ const mockState = vi.hoisted(() => {
     written: string[] = [];
     writtenLines: string[] = [];
     selection = "";
+    customKeyHandler: ((event: KeyboardEvent) => boolean) | null = null;
     private dataHandler: ((data: string) => void) | null = null;
     private resizeHandler: ((size: { cols: number; rows: number }) => void) | null = null;
     private selectionHandler: (() => void) | null = null;
@@ -34,7 +35,8 @@ const mockState = vi.hoisted(() => {
 
     dispose() {}
 
-    attachCustomKeyEventHandler() {
+    attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+      this.customKeyHandler = handler;
       return true;
     }
 
@@ -261,6 +263,33 @@ describe("TerminalComponent", () => {
     await flushPromises();
 
     expect(terminal.writtenLines).toContain("\r\n[Connected]");
+
+    wrapper.unmount();
+  });
+
+  it("lets Ctrl+F escape xterm so the window handler can open the search bar", async () => {
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "local-session-find",
+        isVisible: true,
+        isFocused: true,
+        session: { protocol: "local" } satisfies SessionConfig,
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+
+    const handler = mockState.terminals[0]?.customKeyHandler;
+    expect(handler).toBeTypeOf("function");
+
+    // Returning false keeps xterm from handling (and stopPropagation-ing) the key.
+    expect(handler!(new KeyboardEvent("keydown", { key: "f", ctrlKey: true }))).toBe(false);
+    expect(handler!(new KeyboardEvent("keydown", { key: "F", metaKey: true }))).toBe(false);
+    // Ctrl+Shift+F is not an app shortcut, so xterm keeps it.
+    expect(handler!(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, shiftKey: true }))).toBe(true);
+    // A bare "f" must still reach the shell.
+    expect(handler!(new KeyboardEvent("keydown", { key: "f" }))).toBe(true);
 
     wrapper.unmount();
   });

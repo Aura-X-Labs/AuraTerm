@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PaletteCommand } from "./types";
 
 const props = defineProps<{
@@ -7,7 +7,10 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  /** A command was picked; the caller should not steal focus back. */
   close: [];
+  /** Escape or a backdrop click — nothing ran, so focus belongs to the terminal again. */
+  dismiss: [];
 }>();
 
 const query = ref("");
@@ -117,17 +120,26 @@ function handleKeydown(event: KeyboardEvent) {
     void runCommand(filtered.value[activeIndex.value]);
   } else if (event.key === "Escape") {
     event.preventDefault();
-    emit("close");
+    emit("dismiss");
   }
 }
 
+// Listen on the window rather than the overlay: clicking anywhere in the
+// palette that is not the input (the list padding, a gap between rows) moves
+// focus to <body>, which sits outside the overlay, so a bubbling listener
+// would stop seeing keys.
 onMounted(() => {
   void nextTick(() => inputRef.value?.focus());
+  window.addEventListener("keydown", handleKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleKeydown);
 });
 </script>
 
 <template>
-  <div class="palette-overlay" @click.self="emit('close')" @keydown="handleKeydown">
+  <div class="palette-overlay" @click.self="emit('dismiss')">
     <div class="palette" role="dialog" :aria-label="$t('palette.ariaLabel')">
       <input
         ref="inputRef"

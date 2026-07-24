@@ -1812,6 +1812,15 @@ async function handleToggleCommandPalette() {
   showCommandPalette.value = true;
 }
 
+// Dismissing without running anything leaves focus on <body>, so hand it back
+// to the terminal the same way the search bar does.
+function handleDismissCommandPalette() {
+  showCommandPalette.value = false;
+  void nextTick(() => {
+    focusActiveTerminal();
+  });
+}
+
 const paletteCommands = computed<PaletteCommand[]>(() => {
   const hasTab = Boolean(activeTab.value);
   const hasSsh = Boolean(activeSshConfig.value);
@@ -2649,6 +2658,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       v-if="showCommandPalette"
       :commands="paletteCommands"
       @close="showCommandPalette = false"
+      @dismiss="handleDismissCommandPalette"
     />
 
     <div v-if="aiActionUnavailable" class="ai-toast">{{ $t('ai.nothingToActOn') }}</div>
