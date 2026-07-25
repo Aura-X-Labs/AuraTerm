@@ -511,15 +511,24 @@ async fn handle_forward_connection(
 
 /// Splice a server-initiated `forwarded-tcpip` channel (remote `-R` forward) to a
 /// freshly opened local TCP connection.
+///
+/// The channel open is confirmed only once the local connection is up; a refused
+/// target answers `SSH_OPEN_CONNECT_FAILED`, which is what OpenSSH does and what
+/// lets the remote peer fail fast instead of writing into a channel we are about
+/// to drop.
 pub(super) async fn pump_channel_to_local(
     channel: russh::Channel<russh::client::Msg>,
     host: String,
     port: u16,
+    reply: russh::client::ChannelOpenHandle,
 ) {
-    if let Ok(mut tcp) = TcpStream::connect((host.as_str(), port)).await {
-        let mut channel_stream = channel.into_stream();
-        let _ = tokio::io::copy_bidirectional(&mut channel_stream, &mut tcp).await;
-    }
+    let Ok(mut tcp) = TcpStream::connect((host.as_str(), port)).await else {
+        reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+        return;
+    };
+    reply.accept().await;
+    let mut channel_stream = channel.into_stream();
+    let _ = tokio::io::copy_bidirectional(&mut channel_stream, &mut tcp).await;
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@
 //! - [`prompt_for_host_key_override`] which asks the user whether to trust a
 //!   newly-observed fingerprint when a mismatch is detected.
 
-use russh::{client, keys::HashAlg};
+use russh::{client, keys::HashAlg, ChannelOpenFailure};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -91,7 +91,7 @@ impl client::Handler for ClientHandler {
 
     /// Inbound connection for a remote (`-R`) forward: look up the local target
     /// by the server-side bind port and splice the channel to a fresh local
-    /// TCP connection. Unknown ports are dropped (channel closed).
+    /// TCP connection. Ports we never asked the server to forward are rejected.
     fn server_channel_open_forwarded_tcpip(
         &mut self,
         channel: russh::Channel<russh::client::Msg>,
@@ -99,6 +99,7 @@ impl client::Handler for ClientHandler {
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
+        reply: client::ChannelOpenHandle,
         _session: &mut russh::client::Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         let _ = connected_address;
@@ -109,12 +110,16 @@ impl client::Handler for ClientHandler {
             .and_then(|map| map.get(&connected_port).cloned());
 
         async move {
-            if let Some(target) = target {
-                tokio::spawn(super::forwarding::pump_channel_to_local(
-                    channel,
-                    target.host,
-                    target.port,
-                ));
+            match target {
+                Some(target) => {
+                    tokio::spawn(super::forwarding::pump_channel_to_local(
+                        channel,
+                        target.host,
+                        target.port,
+                        reply,
+                    ));
+                }
+                None => reply.reject(ChannelOpenFailure::ConnectFailed).await,
             }
             Ok(())
         }
@@ -123,17 +128,25 @@ impl client::Handler for ClientHandler {
     fn server_channel_open_agent_forward(
         &mut self,
         channel: russh::Channel<russh::client::Msg>,
+        reply: client::ChannelOpenHandle,
         _session: &mut russh::client::Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         let enabled = self.agent_forwarding;
         async move {
             if enabled {
                 tokio::spawn(async move {
-                    if let Ok(mut agent) = super::connect_local_agent_stream().await {
-                        let mut stream = channel.into_stream();
-                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut agent).await;
-                    }
+                    let Ok(mut agent) = super::connect_local_agent_stream().await else {
+                        reply.reject(ChannelOpenFailure::ConnectFailed).await;
+                        return;
+                    };
+                    reply.accept().await;
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut agent).await;
                 });
+            } else {
+                reply
+                    .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
             }
             Ok(())
         }

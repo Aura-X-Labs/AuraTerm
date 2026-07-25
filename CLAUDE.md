@@ -142,7 +142,7 @@ AuraTerm follows the standard Tauri architecture: a **Rust backend** that manage
 | Build tool | Vite 7 + `@vitejs/plugin-vue` |
 | Desktop runtime | Tauri v2 |
 | Backend language | Rust (edition 2021) |
-| SSH library | `russh` 0.57 + `russh-sftp` + `russh-keys` |
+| SSH library | `russh` 0.62 (keys via `russh::keys`) + `russh-sftp` |
 | Serial port | `serialport` 4.8 |
 | PTY (local shell) | `portable-pty` 0.8 |
 | Async runtime | Tokio (multi-thread, full features) |

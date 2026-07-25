@@ -83,8 +83,8 @@ pub fn ssh_generate_key_pair(
     passphrase: Option<String>,
     comment: Option<String>,
 ) -> Result<GeneratedSshKeyPair, String> {
+    use russh::keys::ssh_key::LineEnding;
     use russh::keys::{Algorithm, HashAlg, PrivateKey};
-    use ssh_key::LineEnding;
 
     let mut rng = russh::keys::key::safe_rng();
     let mut key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
@@ -93,7 +93,7 @@ pub fn ssh_generate_key_pair(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     if let Some(comment) = &comment {
-        key.set_comment(comment);
+        key.set_comment(comment.as_str());
     }
     if let Some(passphrase) = passphrase.filter(|value| !value.is_empty()) {
         key = key.encrypt(&mut rng, passphrase.as_bytes())
