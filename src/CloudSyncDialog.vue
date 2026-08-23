@@ -9,18 +9,16 @@ import {
   cloudSyncPull,
   cloudSyncNow,
   cloudSyncTestConnection,
-  auraxlabLogout,
   inputFromView,
   PROVIDER_LABELS,
   type SyncConfigView,
   type SyncProvider,
   type SyncResult,
 } from "./cloudSync";
-import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
 import { confirmDialog } from "./nativeDialogs";
 import { t } from "./i18n";
 
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; openAccount: [] }>();
 
 const view = ref<SyncConfigView | null>(null);
 const busy = ref(false);
@@ -211,17 +209,6 @@ async function testConnection() {
   });
 }
 
-function onSignedIn(updated: SyncConfigView) {
-  hydrate(updated);
-  flash(t("cloudSync.signedIn"));
-}
-
-async function signOut() {
-  await withBusy(async () => {
-    hydrate(await auraxlabLogout());
-    flash(t("cloudSync.signedOut"));
-  });
-}
 </script>
 
 <template>
@@ -309,9 +296,13 @@ async function signOut() {
               <p class="sync-hint">
                 {{ $t('cloudSync.signedInAs', { username: view?.auraxlab.username ?? '' }) }}
               </p>
-              <button class="sync-btn" type="button" :disabled="busy" @click="signOut">{{ $t('cloudSync.signOut') }}</button>
             </template>
-            <AuraxlabAuthForm v-else @signed-in="onSignedIn" />
+            <template v-else>
+              <p class="sync-hint">{{ $t('cloudSync.signInInAccount') }}</p>
+              <button class="sync-btn primary" type="button" @click="emit('openAccount')">
+                {{ $t('cloudSync.openAccount') }}
+              </button>
+            </template>
           </div>
         </section>
 

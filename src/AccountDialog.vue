@@ -1,79 +1,32 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import {
-  authorizeCloudBridgeEnrollment,
-  beginCloudBridgeEnrollment,
-  cloudBridgeStatus,
-  connectCloudBridge,
-  redeemCloudBridgeEnrollment,
-  rotateCloudBridgeCredential,
-  unbindCloudBridge,
-  type CloudBridgeEnrollment,
-  type CloudBridgeStatus,
-} from "./cloudBridge";
-import {
-  auraxlabAccountOverview,
-  auraxlabLogout,
-  getSyncConfig,
-  DEFAULT_AURAXLAB_URL,
-  type AccountOverview,
-  type SyncConfigView,
-} from "./cloudSync";
+  accountLogout,
+  accountState,
+  enableConsole,
+  pauseConsole,
+  type AuraXLabAccountState,
+} from "./account";
 import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
-import { confirmDialog } from "./nativeDialogs";
 import { t } from "./i18n";
 
 const props = defineProps<{ platform: string }>();
 const emit = defineEmits<{ close: []; openCloudSync: [] }>();
 
-// One account, two credentials: the sync sign-in (axsync_ scoped credential)
-// and the Cloud Console device binding (Ed25519 device identity) stay
-// separate secrets with separate lifecycles, but this dialog presents them
-// as one center and drives both from a single password entry.
-// A server-side password change/reset invalidates the sync credential
-// (account_auth_epoch pin): sync starts failing with 401 "sign in again"
-// and signing in here mints a fresh credential.
-
-// ── account (AuraXLab sign-in + Cloud Console traffic) ──────────────────────
-const syncView = ref<SyncConfigView | null>(null);
-const overview = ref<AccountOverview | null>(null);
-const overviewError = ref("");
-const overviewBusy = ref(false);
-
-const signedIn = computed(() => syncView.value?.auraxlab.tokenSet ?? false);
-const accountName = computed(() => syncView.value?.auraxlab.username ?? "");
-const accountEmail = computed(() => overview.value?.email ?? "");
-
-// ── device binding (Cloud Console enrollment) ───────────────────────────────
-const status = ref<CloudBridgeStatus | null>(null);
+const state = ref<AuraXLabAccountState | null>(null);
 const busy = ref(false);
 const message = ref("");
 const isError = ref(false);
-
-// Shared server: the sign-in form binds this (v-model:server-url); binding a
-// device while signed in uses the account's server so the two can't diverge.
-const serverUrl = ref(DEFAULT_AURAXLAB_URL);
-const deviceLabel = ref("");
-const email = ref(""); // fallback only, when the profile email is unknown
-const password = ref("");
 const bindOnLogin = ref(true);
+const deviceLabel = ref("");
+const recoveryPassword = ref("");
 
-// Browser-approval fallback state.
-const enrollment = ref<CloudBridgeEnrollment | null>(null);
-let pollTimer: ReturnType<typeof setTimeout> | null = null;
-
-const bound = computed(() => status.value?.enrolled ?? false);
-const accountServer = computed(
-  () => syncView.value?.auraxlab.baseUrl || serverUrl.value,
+const signedIn = computed(() => state.value?.signedIn ?? false);
+const consoleReady = computed(() => state.value?.consistency === "consistent");
+const needsRecovery = computed(() =>
+  state.value?.consistency === "sync_only" || state.value?.consistency === "mismatch",
 );
-const connectionText = computed(() => {
-  if (!status.value) return "";
-  if (status.value.connected) return t("account.connected");
-  if (status.value.standby) return t("account.standby");
-  if (status.value.reconnecting) return t("account.reconnecting");
-  return t("account.offline");
-});
 
 function note(text: string, error = false) {
   message.value = text;
@@ -96,613 +49,183 @@ function formatBytes(bytes: number): string {
 
 async function refresh() {
   try {
-    status.value = await cloudBridgeStatus();
-  } catch {
-    /* bridge state is best-effort in this dialog */
-  }
-}
-
-async function refreshOverview() {
-  if (!signedIn.value || overviewBusy.value) return;
-  overviewBusy.value = true;
-  overviewError.value = "";
-  try {
-    overview.value = await auraxlabAccountOverview();
+    state.value = await accountState();
   } catch (error) {
-    overview.value = null;
-    overviewError.value = String(error);
-  } finally {
-    overviewBusy.value = false;
+    note(String(error), true);
   }
 }
 
-async function loadAccount() {
+function onSignedIn(next: AuraXLabAccountState) {
+  state.value = next;
+  note(t("cloudSync.signedIn"));
+}
+
+async function recoverConsole() {
+  if (!state.value?.email || !recoveryPassword.value) {
+    note(t("account.passwordRequired"), true);
+    return;
+  }
+  busy.value = true;
   try {
-    syncView.value = await getSyncConfig();
-    // A previously used custom server should drive both flows.
-    if (syncView.value?.auraxlab.baseUrl) {
-      serverUrl.value = syncView.value.auraxlab.baseUrl;
-    }
-  } catch {
-    /* the account section falls back to the sign-in form */
+    state.value = await enableConsole(
+      state.value.email,
+      recoveryPassword.value,
+      deviceLabel.value || props.platform,
+      props.platform,
+    );
+    note(t("account.bound"));
+  } catch (error) {
+    note(String(error), true);
+  } finally {
+    recoveryPassword.value = "";
+    busy.value = false;
   }
-  await refreshOverview();
 }
 
-function onSignedIn(view: SyncConfigView) {
-  syncView.value = view;
-  overview.value = null;
-  void refreshOverview();
+async function pause() {
+  busy.value = true;
+  try {
+    state.value = await pauseConsole();
+    note(t("account.offline"));
+  } catch (error) {
+    note(String(error), true);
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function signOut() {
   busy.value = true;
   try {
-    syncView.value = await auraxlabLogout();
-    overview.value = null;
-    note(t(bound.value ? "account.signedOutStillBound" : "account.signedOut"));
+    state.value = await accountLogout();
+    note(t("account.signedOut"));
   } catch (error) {
     note(String(error), true);
   } finally {
     busy.value = false;
   }
-}
-
-/** Enroll this installation: begin → authorize (password proof) → redeem →
- * connect. Shared by bind-on-login and the signed-in bind card. */
-async function enrollDevice(server: string, emailArg: string, passwordArg: string) {
-  await beginCloudBridgeEnrollment(
-    server,
-    deviceLabel.value.trim() || props.platform,
-    props.platform,
-  );
-  await authorizeCloudBridgeEnrollment(emailArg, passwordArg);
-  const outcome = await redeemCloudBridgeEnrollment();
-  if (outcome.status !== "ok") {
-    throw new Error(t(`account.${outcome.status === "denied" ? "denied" : "expired"}`));
-  }
-  await connectCloudBridge();
-}
-
-/** Chained onto the sign-in form's password entry: one sign-in issues the
- * sync credential and (opt-in) enrolls the device — the password is used for
- * both requests in the same moment and never stored. */
-async function handlePostLogin(credentials: { email: string; password: string }) {
-  if (!bindOnLogin.value || bound.value) return;
-  try {
-    await enrollDevice(serverUrl.value, credentials.email, credentials.password);
-    note(t("account.bound"));
-  } catch (error) {
-    note(`${t("account.bindAfterLoginFailed")} ${String(error)}`, true);
-  } finally {
-    await refresh();
-  }
-}
-
-/** Bind while already signed in: the account email is prefilled; only the
- * password is asked again (freshness proof — the sync credential itself is
- * deliberately not accepted for binding a new device identity). */
-async function bindCurrentAccount() {
-  const targetEmail = (accountEmail.value || email.value).trim();
-  if (!targetEmail) {
-    note(t("account.needCredentials"), true);
-    return;
-  }
-  if (!password.value) {
-    note(t("account.passwordRequired"), true);
-    return;
-  }
-  busy.value = true;
-  note("");
-  try {
-    await enrollDevice(accountServer.value, targetEmail, password.value);
-    note(t("account.bound"));
-  } catch (error) {
-    note(String(error), true);
-  } finally {
-    password.value = "";
-    busy.value = false;
-    await refresh();
-  }
-}
-
-async function bindWithBrowser() {
-  busy.value = true;
-  note("");
-  try {
-    const server = signedIn.value ? accountServer.value : serverUrl.value;
-    enrollment.value = await beginCloudBridgeEnrollment(
-      server,
-      deviceLabel.value.trim() || props.platform,
-      props.platform,
-    );
-    await openExternalUrl(`${server.replace(/\/+$/, "")}/console`);
-    note(t("account.waitingApproval"));
-    pollRedeem();
-  } catch (error) {
-    enrollment.value = null;
-    note(String(error), true);
-  } finally {
-    busy.value = false;
-  }
-}
-
-function stopPolling() {
-  if (pollTimer !== null) {
-    clearTimeout(pollTimer);
-    pollTimer = null;
-  }
-}
-
-function pollRedeem() {
-  stopPolling();
-  pollTimer = setTimeout(async () => {
-    try {
-      const outcome = await redeemCloudBridgeEnrollment();
-      if (outcome.status === "pending") {
-        pollRedeem();
-        return;
-      }
-      enrollment.value = null;
-      if (outcome.status === "ok") {
-        await connectCloudBridge();
-        note(t("account.bound"));
-      } else {
-        note(t(`account.${outcome.status === "denied" ? "denied" : "expired"}`), true);
-      }
-    } catch (error) {
-      enrollment.value = null;
-      note(String(error), true);
-    }
-    await refresh();
-  }, 3000);
-}
-
-function cancelBrowserBind() {
-  stopPolling();
-  enrollment.value = null;
-  note("");
-}
-
-async function rotate() {
-  busy.value = true;
-  try {
-    await rotateCloudBridgeCredential();
-    note(t("account.rotated"));
-  } catch (error) {
-    note(String(error), true);
-  } finally {
-    busy.value = false;
-    await refresh();
-  }
-}
-
-async function unbind() {
-  if (!(await confirmDialog(t("account.unbindConfirm")))) return;
-  busy.value = true;
-  try {
-    await unbindCloudBridge();
-    note("");
-  } catch (error) {
-    note(String(error), true);
-  } finally {
-    busy.value = false;
-    await refresh();
-  }
-}
-
-async function openConsole() {
-  const base = status.value?.baseUrl || serverUrl.value;
-  await openExternalUrl(`${base.replace(/\/+$/, "")}/console`);
 }
 
 onMounted(() => {
   deviceLabel.value = props.platform;
   void refresh();
-  void loadAccount();
 });
-onBeforeUnmount(stopPolling);
 </script>
 
 <template>
   <div class="account-overlay" @click.self="emit('close')">
     <div class="account-dialog" role="dialog" :aria-label="t('account.title')">
-      <div class="account-header">
+      <header class="account-header">
         <div>
           <div class="account-title">{{ t('account.title') }}</div>
           <div class="account-subtitle">{{ t('account.subtitle') }}</div>
         </div>
         <button class="account-close" type="button" :aria-label="t('account.close')" @click="emit('close')">×</button>
-      </div>
+      </header>
 
-      <div class="account-body">
-        <!-- Access status: both scopes of the one account, at a glance -->
+      <main class="account-body">
         <section class="account-section">
           <h3>{{ t('account.statusSection') }}</h3>
-          <dl class="account-facts">
-            <dt>{{ t('account.statusSync') }}</dt>
-            <dd>
-              <span class="account-badge" :data-on="signedIn">
-                {{ signedIn ? t('account.statusSignedIn', { name: accountName }) : t('account.statusNotSignedIn') }}
-              </span>
-            </dd>
-            <dt>{{ t('account.statusConsole') }}</dt>
-            <dd class="account-badges">
-              <span class="account-badge" :data-on="bound">
-                {{ bound ? t('account.statusBound', { label: status?.deviceLabel || '' }) : t('account.statusNotBound') }}
-              </span>
-              <span v-if="bound" class="account-badge" :data-on="status?.connected">{{ connectionText }}</span>
-            </dd>
-          </dl>
+          <div class="account-badges">
+            <span class="account-badge" :data-on="signedIn">
+              {{ signedIn ? t('account.statusSignedIn', { name: state?.username || state?.email || '' }) : t('account.statusNotSignedIn') }}
+            </span>
+            <span class="account-badge" :data-on="consoleReady">
+              {{ consoleReady ? t('account.statusBound', { label: state?.console.deviceLabel || '' }) : t('account.statusNotBound') }}
+            </span>
+          </div>
+          <p v-if="state?.consistency === 'device_only'" class="account-warning">
+            {{ t('account.deviceOnlyMigration') }}
+          </p>
+          <p v-else-if="state?.consistency === 'mismatch'" class="account-warning">
+            {{ t('account.subjectMismatch') }}
+          </p>
         </section>
 
-        <!-- My account: sign in / profile + Cloud Console traffic -->
         <section class="account-section">
           <h3>{{ t('account.accountSection') }}</h3>
-
           <template v-if="!signedIn">
             <p class="account-hint">{{ t('account.signInIntro') }}</p>
             <AuraxlabAuthForm
-              v-model:server-url="serverUrl"
-              show-server
-              :post-login="handlePostLogin"
+              :device-label="deviceLabel || platform"
+              :platform="platform"
+              :enable-console="bindOnLogin"
               @signed-in="onSignedIn"
             >
-              <div v-if="!bound" class="account-bind-inline">
-                <label class="account-checkbox">
-                  <input v-model="bindOnLogin" type="checkbox" />
-                  <span>{{ t('account.bindOnLogin') }}</span>
-                </label>
-                <template v-if="bindOnLogin">
-                  <label class="account-inline-label">{{ t('account.deviceLabel') }}</label>
-                  <input v-model="deviceLabel" class="account-input" type="text" autocomplete="off" />
-                </template>
-              </div>
+              <label class="account-checkbox">
+                <input v-model="bindOnLogin" type="checkbox" />
+                <span>{{ t('account.bindOnLogin') }}</span>
+              </label>
+              <label v-if="bindOnLogin" class="account-inline-label">{{ t('account.deviceLabel') }}</label>
+              <input v-if="bindOnLogin" v-model="deviceLabel" class="account-input" type="text" />
             </AuraxlabAuthForm>
           </template>
 
           <template v-else>
             <dl class="account-facts">
-              <dt>{{ t('account.signedInAs') }}</dt>
-              <dd>{{ accountName }}</dd>
-              <dt>{{ t('account.email') }}</dt>
-              <dd>{{ accountEmail || '—' }}</dd>
-              <dt>{{ t('account.server') }}</dt>
-              <dd>{{ accountServer }}</dd>
+              <dt>{{ t('account.signedInAs') }}</dt><dd>{{ state?.username }}</dd>
+              <dt>{{ t('account.email') }}</dt><dd>{{ state?.email }}</dd>
+              <dt>{{ t('account.deviceId') }}</dt><dd class="account-mono">{{ state?.console.deviceId || '—' }}</dd>
+              <dt>{{ t('account.connection') }}</dt>
+              <dd>{{ state?.console.connected ? t('account.connected') : t('account.offline') }}</dd>
             </dl>
 
-            <h4 class="account-subheading">{{ t('account.trafficSection') }}</h4>
-            <dl v-if="overview?.traffic" class="account-facts">
-              <dt>{{ t('account.trafficTotal') }}</dt>
-              <dd class="account-traffic-total">{{ formatBytes(overview.traffic.bytesTotal) }}</dd>
-              <dt>{{ t('account.trafficUp') }}</dt>
-              <dd>{{ formatBytes(overview.traffic.bytesUp) }}</dd>
-              <dt>{{ t('account.trafficDown') }}</dt>
-              <dd>{{ formatBytes(overview.traffic.bytesDown) }}</dd>
-              <dt>{{ t('account.trafficSessions') }}</dt>
-              <dd>{{ overview.traffic.sessions }}</dd>
-            </dl>
-            <p v-else class="account-hint">
-              {{ overviewBusy ? '…' : (overviewError || t('account.trafficUnavailable')) }}
-            </p>
-            <p class="account-hint">{{ t('account.trafficHint') }}</p>
-
-            <div class="account-actions">
-              <button class="account-btn" type="button" :disabled="overviewBusy" @click="refreshOverview">
-                {{ t('account.refresh') }}
-              </button>
-              <button class="account-btn" type="button" @click="emit('openCloudSync')">
-                {{ t('account.cloudSyncEntry') }}
-              </button>
-              <button class="account-btn danger" type="button" :disabled="busy" @click="signOut">
-                {{ t('account.signOut') }}
+            <div v-if="needsRecovery" class="account-recovery">
+              <p class="account-hint">{{ t('account.rebindHint') }}</p>
+              <input v-model="recoveryPassword" class="account-input" type="password"
+                :placeholder="t('account.password')" @keyup.enter="recoverConsole" />
+              <button class="account-btn primary" type="button" :disabled="busy" @click="recoverConsole">
+                {{ t('account.bindNow') }}
               </button>
             </div>
-          </template>
-        </section>
 
-        <!-- Bound: device summary -->
-        <section v-if="bound" class="account-section">
-          <h3>{{ t('account.deviceSection') }}</h3>
-          <dl class="account-facts">
-            <dt>{{ t('account.deviceLabel') }}</dt>
-            <dd>{{ status?.deviceLabel || '—' }}</dd>
-            <dt>{{ t('account.server') }}</dt>
-            <dd>{{ status?.baseUrl }}</dd>
-            <dt>{{ t('account.deviceId') }}</dt>
-            <dd class="account-mono">{{ status?.deviceId }}</dd>
-            <dt>{{ t('account.fingerprint') }}</dt>
-            <dd class="account-mono account-fingerprint">{{ status?.fingerprint }}</dd>
-            <dt>{{ t('account.connection') }}</dt>
-            <dd>
-              <span class="account-badge" :data-on="status?.connected">{{ connectionText }}</span>
-            </dd>
-            <dt>{{ t('account.sharedSessions') }}</dt>
-            <dd>{{ status?.shares.length ?? 0 }}</dd>
-          </dl>
-          <div class="account-actions">
-            <button class="account-btn" type="button" @click="openConsole">{{ t('account.openConsole') }}</button>
-            <button class="account-btn" type="button" :disabled="busy" @click="rotate">{{ t('account.rotate') }}</button>
-            <button class="account-btn danger" type="button" :disabled="busy" @click="unbind">{{ t('account.unbind') }}</button>
-          </div>
-        </section>
-
-        <!-- Unbound: bind to the signed-in account, or via browser approval -->
-        <section v-else class="account-section">
-          <h3>{{ t('account.deviceSection') }}</h3>
-
-          <template v-if="!enrollment">
-            <!-- Signed in: prefill the account, only the password is asked
-                 again (freshness proof required by the server). -->
-            <template v-if="signedIn">
-              <p class="account-hint">{{ t('account.bindIntroSignedIn') }}</p>
-              <div class="account-grid">
-                <label>{{ t('account.email') }}</label>
-                <span v-if="accountEmail" class="account-static">{{ accountEmail }}</span>
-                <input v-else v-model="email" class="account-input" type="email" autocomplete="username" />
-                <label>{{ t('account.deviceLabel') }}</label>
-                <input v-model="deviceLabel" class="account-input" type="text" autocomplete="off" />
-                <label>{{ t('account.password') }}</label>
-                <input
-                  v-model="password"
-                  class="account-input"
-                  type="password"
-                  autocomplete="current-password"
-                  @keyup.enter="bindCurrentAccount"
-                />
-              </div>
-              <p class="account-hint">{{ t('account.passwordFreshnessHint') }}</p>
-              <div class="account-actions">
-                <button class="account-btn primary" type="button" :disabled="busy" @click="bindCurrentAccount">
-                  {{ t('account.bindNow') }}
-                </button>
-                <button class="account-btn" type="button" :disabled="busy" @click="bindWithBrowser">
-                  {{ t('account.browserApprove') }}
-                </button>
-              </div>
-            </template>
-
-            <!-- Not signed in: the sign-in form above binds in one step;
-                 browser approval stays available as the no-password path. -->
-            <template v-else>
-              <p class="account-hint">{{ t('account.notBound') }} {{ t('account.signInToBindHint') }}</p>
-              <div class="account-grid">
-                <label>{{ t('account.deviceLabel') }}</label>
-                <input v-model="deviceLabel" class="account-input" type="text" autocomplete="off" />
-              </div>
-              <div class="account-actions">
-                <button class="account-btn" type="button" :disabled="busy" @click="bindWithBrowser">
-                  {{ t('account.browserApprove') }}
-                </button>
-              </div>
-            </template>
-          </template>
-
-          <template v-else>
-            <p class="account-hint">{{ t('account.verifyFingerprint') }}</p>
-            <dl class="account-facts">
-              <dt>{{ t('account.userCode') }}</dt>
-              <dd class="account-mono account-code">{{ enrollment.userCode }}</dd>
-              <dt>{{ t('account.fingerprint') }}</dt>
-              <dd class="account-mono account-fingerprint">{{ enrollment.fingerprint }}</dd>
+            <h4>{{ t('account.trafficSection') }}</h4>
+            <dl v-if="state?.traffic" class="account-facts">
+              <dt>{{ t('account.trafficTotal') }}</dt><dd>{{ formatBytes(state.traffic.bytesTotal) }}</dd>
+              <dt>{{ t('account.trafficUp') }}</dt><dd>{{ formatBytes(state.traffic.bytesUp) }}</dd>
+              <dt>{{ t('account.trafficDown') }}</dt><dd>{{ formatBytes(state.traffic.bytesDown) }}</dd>
+              <dt>{{ t('account.trafficSessions') }}</dt><dd>{{ state.traffic.sessions }}</dd>
             </dl>
-            <p class="account-hint">{{ t('account.waitingApproval') }}</p>
+            <p v-else class="account-hint">{{ t('account.trafficUnavailable') }}</p>
+
             <div class="account-actions">
-              <button class="account-btn" type="button" @click="cancelBrowserBind">{{ t('account.cancel') }}</button>
+              <button class="account-btn" type="button" @click="emit('openCloudSync')">{{ t('account.cloudSyncEntry') }}</button>
+              <button class="account-btn" type="button" @click="openExternalUrl('https://auraxlab.com/console')">{{ t('account.openConsole') }}</button>
+              <button v-if="state?.console.connected" class="account-btn" type="button" :disabled="busy" @click="pause">{{ t('account.pauseConsole') }}</button>
+              <button class="account-btn danger" type="button" :disabled="busy" @click="signOut">{{ t('account.signOut') }}</button>
             </div>
           </template>
         </section>
 
         <p v-if="message" class="account-message" :data-error="isError">{{ message }}</p>
-      </div>
+      </main>
     </div>
   </div>
 </template>
 
 <style scoped>
-.account-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-.account-dialog {
-  width: 560px;
-  max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 48px);
-  display: flex;
-  flex-direction: column;
-  background: var(--ui-panel-bg, #1e1e1e);
-  color: var(--ui-fg, #dcdcdc);
-  border: 1px solid var(--ui-border, #3a3a3a);
-  border-radius: 10px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
-  overflow: hidden;
-}
-.account-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--ui-border, #3a3a3a);
-}
-.account-title {
-  font-size: 16px;
-  font-weight: 600;
-}
-.account-subtitle {
-  font-size: 12px;
-  opacity: 0.65;
-}
-.account-close {
-  background: transparent;
-  border: none;
-  color: inherit;
-  font-size: 22px;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.7;
-}
-.account-close:hover {
-  opacity: 1;
-}
-.account-body {
-  padding: 14px 18px;
-  overflow-y: auto;
-}
-.account-section {
-  margin-bottom: 18px;
-}
-.account-section h3 {
-  margin: 0 0 8px;
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.8;
-}
-.account-subheading {
-  margin: 14px 0 4px;
-  font-size: 12px;
-  font-weight: 600;
-  opacity: 0.75;
-}
-.account-hint {
-  font-size: 12px;
-  opacity: 0.7;
-  margin: 6px 0;
-}
-.account-hint a {
-  color: var(--ui-accent, #4d9fff);
-}
-.account-grid {
-  display: grid;
-  grid-template-columns: 110px 1fr;
-  gap: 8px 10px;
-  align-items: center;
-  margin: 10px 0;
-}
-.account-grid label {
-  font-size: 12px;
-  opacity: 0.75;
-}
-.account-input {
-  background: var(--ui-input-bg, #16161a);
-  color: inherit;
-  border: 1px solid var(--ui-border, #3a3a3a);
-  border-radius: 6px;
-  padding: 7px 9px;
-  font-size: 13px;
-}
-.account-static {
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-.account-bind-inline {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 8px;
-}
-.account-checkbox {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 13px;
-  cursor: pointer;
-}
-.account-checkbox input {
-  margin: 0;
-}
-.account-inline-label {
-  font-size: 12px;
-  opacity: 0.75;
-  margin-top: 4px;
-}
-.account-facts {
-  display: grid;
-  grid-template-columns: 110px 1fr;
-  gap: 6px 10px;
-  font-size: 13px;
-  margin: 10px 0;
-}
-.account-facts dt {
-  opacity: 0.65;
-}
-.account-facts dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.account-traffic-total {
-  font-weight: 600;
-  color: var(--ui-accent, #4d9fff);
-}
-.account-mono {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
-}
-.account-code {
-  font-size: 20px;
-  letter-spacing: 3px;
-  color: var(--ui-accent, #4d9fff);
-}
-.account-fingerprint {
-  color: #e5c07b;
-}
-.account-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  background: #5c2b2e;
-}
-.account-badge[data-on="true"] {
-  background: #1f4d2e;
-}
-.account-badges {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.account-actions {
-  display: flex;
-  gap: 8px;
-  margin: 12px 0 4px;
-  flex-wrap: wrap;
-}
-.account-btn {
-  background: var(--ui-input-bg, #26262b);
-  color: inherit;
-  border: 1px solid var(--ui-border, #3a3a3a);
-  border-radius: 6px;
-  padding: 7px 12px;
-  font-size: 13px;
-  cursor: pointer;
-}
-.account-btn:hover:not(:disabled) {
-  border-color: var(--ui-accent, #4d9fff);
-}
-.account-btn.primary {
-  background: var(--ui-accent, #2f6fd0);
-  border-color: transparent;
-  color: #fff;
-}
-.account-btn.danger {
-  border-color: #7a3338;
-  color: #ff8b8f;
-}
-.account-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.account-message {
-  font-size: 12px;
-  margin-top: 10px;
-  color: #7ec699;
-}
-.account-message[data-error="true"] {
-  color: #ff8b8f;
-}
+.account-overlay { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.48); }
+.account-dialog { width: 620px; max-width: calc(100vw - 32px); max-height: calc(100vh - 48px); overflow: hidden; color: var(--ui-fg,#ddd); background: var(--ui-panel-bg,#1e1e1e); border: 1px solid var(--ui-border,#3a3a3a); border-radius: 10px; box-shadow: 0 18px 48px rgba(0,0,0,.55); }
+.account-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--ui-border,#3a3a3a); }
+.account-title { font-size: 16px; font-weight: 600; }
+.account-subtitle,.account-hint { font-size: 12px; opacity: .7; line-height: 1.5; }
+.account-close { border: 0; background: transparent; color: inherit; font-size: 22px; cursor: pointer; }
+.account-body { padding: 14px 18px; overflow-y: auto; max-height: calc(100vh - 110px); }
+.account-section { margin-bottom: 18px; }
+.account-section h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; opacity: .8; }
+.account-section h4 { margin: 16px 0 8px; font-size: 13px; }
+.account-badges,.account-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.account-badge { padding: 3px 9px; border-radius: 999px; font-size: 12px; background: #5c2b2e; }
+.account-badge[data-on="true"] { background: #1f4d2e; }
+.account-facts { display: grid; grid-template-columns: 110px 1fr; gap: 7px 10px; font-size: 13px; }
+.account-facts dt { opacity: .65; }.account-facts dd { margin: 0; overflow-wrap: anywhere; }
+.account-checkbox { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 13px; }
+.account-inline-label { display: block; margin-top: 8px; font-size: 12px; opacity: .75; }
+.account-input { box-sizing: border-box; width: 100%; margin-top: 5px; padding: 7px 9px; color: inherit; background: var(--ui-input-bg,#26262b); border: 1px solid var(--ui-border,#3a3a3a); border-radius: 6px; }
+.account-recovery { padding: 10px; border: 1px solid #8a6a2f; border-radius: 6px; }
+.account-warning { color: #e5c07b; font-size: 12px; }
+.account-btn { padding: 7px 12px; color: inherit; background: var(--ui-input-bg,#26262b); border: 1px solid var(--ui-border,#3a3a3a); border-radius: 6px; cursor: pointer; }
+.account-btn.primary { margin-top: 8px; color: white; background: var(--ui-accent,#2f6fd0); }.account-btn.danger { color: #ff8b8f; border-color: #7a3338; }
+.account-btn:disabled { opacity: .5; }.account-mono { font-family: ui-monospace,Consolas,monospace; font-size: 12px; }
+.account-message { color: #7ec699; font-size: 12px; }.account-message[data-error="true"] { color: #ff8b8f; }
 </style>

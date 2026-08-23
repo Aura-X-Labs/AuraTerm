@@ -17,6 +17,7 @@ use tauri::{
 
 #[macro_use]
 mod logging;
+mod account;
 mod ai;
 mod cloud_sync;
 mod cloud_bridge;
@@ -1183,12 +1184,6 @@ fn main() {
             serial::write_serial_input,
             serial::write_serial_bytes,
             serial::close_serial_session,
-            cloud_bridge::cloud_bridge_begin_enrollment,
-            cloud_bridge::cloud_bridge_authorize_enrollment,
-            cloud_bridge::cloud_bridge_redeem_enrollment,
-            cloud_bridge::cloud_bridge_connect,
-            cloud_bridge::cloud_bridge_restore,
-            cloud_bridge::cloud_bridge_unbind,
             cloud_bridge::cloud_bridge_rotate_credential,
             cloud_bridge::cloud_bridge_share_session,
             cloud_bridge::cloud_bridge_stop_share,
@@ -1226,9 +1221,12 @@ fn main() {
             cloud_sync::auraxlab_request_email_code,
             cloud_sync::auraxlab_verify_email_code,
             cloud_sync::auraxlab_register,
-            cloud_sync::auraxlab_login,
-            cloud_sync::auraxlab_logout,
-            cloud_sync::auraxlab_account_overview,
+            account::auraxlab_account_state,
+            account::auraxlab_account_restore,
+            account::auraxlab_account_login,
+            account::auraxlab_account_logout,
+            account::auraxlab_account_enable_console,
+            account::auraxlab_account_pause_console,
             ai::ai_chat_start,
             ai::ai_chat_cancel,
             ai::ai_complete,

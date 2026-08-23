@@ -440,6 +440,8 @@ const zhCN: Messages = {
     enterCode: "请输入邮件中的验证码。",
     signedOut: "已退出登录。",
     confirmReplace: "用云端副本替换全部本地书签？此操作无法撤销。",
+    signInInAccount: "AuraXLab 登录由账户中心统一管理。",
+    openAccount: "登录 AuraXLab",
   },
   account: {
     title: "AuraXLab 账户",
@@ -508,6 +510,10 @@ const zhCN: Messages = {
     trafficUnavailable: "暂时无法获取流量统计。",
     trafficHint: "此账户共享会话经中继转发的字节数（仅按大小统计，内容始终端到端加密）。",
     refresh: "刷新",
+    deviceOnlyMigration: "检测到旧版设备绑定。请重新登录并验证账户归属后再连接 Cloud Console。",
+    subjectMismatch: "云同步与此设备属于不同或无法验证的账户。重新绑定前，Cloud Console 将保持离线。",
+    rebindHint: "请输入账户密码，验证并将此设备绑定到当前登录账户。",
+    pauseConsole: "暂停 Cloud Console",
   },
   cloudShare: {
     rxTx: "云端 RX/TX（{policy}）",

@@ -32,6 +32,7 @@
 //! offered for the "make this device authoritative" case. `cloud_sync_now`
 //! performs a two-way sync (merge-pull, then push the merged result).
 
+use crate::account::auraxlab_origin;
 use crate::connections::{self, SavedConnection};
 use crate::encryption::{self, CredentialStore, MasterPasswordState, StoredCredential};
 use crate::settings;
@@ -102,26 +103,17 @@ impl SyncState {
     }
 
     pub fn get(&self) -> Option<Zeroizing<String>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn is_unlocked(&self) -> bool {
-        self.inner
-            .lock()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
+        self.inner.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 }
 
 /// Resolve the passphrase to use for this operation: an explicit one (which is
 /// also cached for the session) or the session cache. Errors if neither exists.
-fn resolve_passphrase(
-    sync_state: &SyncState,
-    explicit: Option<String>,
-) -> Result<Zeroizing<String>, String> {
+fn resolve_passphrase(sync_state: &SyncState, explicit: Option<String>) -> Result<Zeroizing<String>, String> {
     if let Some(pass) = explicit {
         if pass.is_empty() {
             return Err("Sync passphrase must not be empty".to_string());
@@ -129,9 +121,7 @@ fn resolve_passphrase(
         sync_state.set(pass.clone());
         return Ok(Zeroizing::new(pass));
     }
-    sync_state
-        .get()
-        .ok_or_else(|| "Sync is locked — enter your sync passphrase first.".to_string())
+    sync_state.get().ok_or_else(|| "Sync is locked — enter your sync passphrase first.".to_string())
 }
 
 // ============================================================================
@@ -155,28 +145,36 @@ struct WebdavProvider {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct AuraxlabProvider {
-    base_url: String,
-    username: String,
-    token: String,
+pub(crate) struct AuraxlabProvider {
+    /// Read-only compatibility field for one migration release. It is never
+    /// serialized again and is never used as a network destination.
+    #[serde(rename = "baseUrl", skip_serializing)]
+    pub(crate) legacy_base_url: String,
+    /// Test-only endpoint seam; persisted configs always deserialize to None.
+    #[serde(skip)]
+    endpoint_override: Option<String>,
+    pub(crate) account_subject: String,
+    pub(crate) email: String,
+    pub(crate) username: String,
+    pub(crate) token: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct SyncConfig {
+pub(crate) struct SyncConfig {
     provider: String, // "" | "github" | "gitee" | "webdav" | "auraxlab"
     include_settings: bool,
     include_known_hosts: bool,
     include_credentials: bool,
     auto_sync: bool,
     device_id: String,
-    device_label: String,
+    pub(crate) device_label: String,
     last_sync_at: Option<u64>,
     last_remote_version: Option<String>,
     github: GistProvider,
     gitee: GistProvider,
     webdav: WebdavProvider,
-    auraxlab: AuraxlabProvider,
+    pub(crate) auraxlab: AuraxlabProvider,
 }
 
 fn sync_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -184,29 +182,29 @@ fn sync_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join(SYNC_CONFIG_FILE))
 }
 
-fn load_config(app: &AppHandle) -> Result<SyncConfig, String> {
+pub(crate) fn load_config(app: &AppHandle) -> Result<SyncConfig, String> {
     let path = sync_config_path(app)?;
     if !path.exists() {
         return Ok(SyncConfig::default());
     }
     let encrypted = fs::read(&path).map_err(|e| format!("Failed to read sync config: {e}"))?;
     let key = encryption::load_or_create_local_key(app)?;
-    let plaintext = Zeroizing::new(
-        encryption::decrypt_data(&encrypted, &key)
-            .map_err(|_| "Sync config is corrupt or was written on another device".to_string())?,
-    );
-    serde_json::from_slice(&plaintext).map_err(|e| format!("Failed to parse sync config: {e}"))
+    let plaintext =
+        Zeroizing::new(encryption::decrypt_data(&encrypted, &key).map_err(|_| "Sync config is corrupt or was written on another device".to_string())?);
+    let mut config: SyncConfig = serde_json::from_slice(&plaintext).map_err(|e| format!("Failed to parse sync config: {e}"))?;
+    if migrate_legacy_auraxlab_config(&mut config) {
+        save_config(app, &config)?;
+    }
+    Ok(config)
 }
 
-fn save_config(app: &AppHandle, config: &SyncConfig) -> Result<(), String> {
+pub(crate) fn save_config(app: &AppHandle, config: &SyncConfig) -> Result<(), String> {
     let path = sync_config_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let key = encryption::load_or_create_local_key(app)?;
-    let plaintext = Zeroizing::new(
-        serde_json::to_vec(config).map_err(|e| format!("Failed to serialize sync config: {e}"))?,
-    );
+    let plaintext = Zeroizing::new(serde_json::to_vec(config).map_err(|e| format!("Failed to serialize sync config: {e}"))?);
     let encrypted = encryption::encrypt_data(&plaintext, &key)?;
     fs::write(&path, &encrypted).map_err(|e| format!("Failed to write sync config: {e}"))?;
     #[cfg(unix)]
@@ -237,8 +235,8 @@ struct WebdavView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuraxlabView {
-    base_url: String,
     username: String,
+    email: String,
     token_set: bool,
 }
 
@@ -290,8 +288,8 @@ impl SyncConfigView {
                 password_set: !config.webdav.password.is_empty(),
             },
             auraxlab: AuraxlabView {
-                base_url: config.auraxlab.base_url.clone(),
                 username: config.auraxlab.username.clone(),
+                email: config.auraxlab.email.clone(),
                 token_set: !config.auraxlab.token.is_empty(),
             },
         }
@@ -316,9 +314,6 @@ pub struct SyncSettingsInput {
     webdav_url: Option<String>,
     webdav_username: Option<String>,
     webdav_password: Option<String>,
-    auraxlab_base_url: Option<String>,
-    auraxlab_token: Option<String>,
-    auraxlab_username: Option<String>,
 }
 
 fn apply_input(config: &mut SyncConfig, input: SyncSettingsInput) {
@@ -348,19 +343,6 @@ fn apply_input(config: &mut SyncConfig, input: SyncSettingsInput) {
     }
     if let Some(v) = input.webdav_password {
         config.webdav.password = v;
-    }
-    if let Some(v) = input.auraxlab_base_url {
-        config.auraxlab.base_url = v;
-    }
-    if let Some(v) = input.auraxlab_token {
-        config.auraxlab.token = v;
-    }
-    if let Some(v) = input.auraxlab_username {
-        config.auraxlab.username = v;
-    }
-    // Default the AuraXLab server to the official one when left blank.
-    if config.auraxlab.base_url.trim().is_empty() {
-        config.auraxlab.base_url = default_auraxlab_base_url();
     }
 }
 
@@ -439,11 +421,7 @@ fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<(), String> 
 }
 
 /// Assemble the current device state into a bundle, honoring the include flags.
-async fn build_bundle(
-    app: &AppHandle,
-    master_state: &MasterPasswordState,
-    config: &SyncConfig,
-) -> Result<SyncBundle, String> {
+async fn build_bundle(app: &AppHandle, master_state: &MasterPasswordState, config: &SyncConfig) -> Result<SyncBundle, String> {
     let mut bundle = SyncBundle {
         schema: BUNDLE_SCHEMA,
         exported_at: now_ms(),
@@ -463,9 +441,7 @@ async fn build_bundle(
 
     if config.include_credentials {
         if !encryption::credentials_accessible(app, master_state) {
-            return Err(
-                "Unlock the master password before syncing saved credentials.".to_string(),
-            );
+            return Err("Unlock the master password before syncing saved credentials.".to_string());
         }
         let secret = encryption::resolve_secret(app, master_state)?;
         let store = encryption::load_encrypted_credentials(app, &secret)?;
@@ -496,13 +472,10 @@ async fn apply_bundle(
     // -- credentials (only when readable; encrypted at rest under the local key/master pw) --
     if !bundle.credentials.is_empty() && encryption::credentials_accessible(app, master_state) {
         let secret = encryption::resolve_secret(app, master_state)?;
-        let mut store = encryption::load_encrypted_credentials(app, &secret)
-            .unwrap_or_else(|_| CredentialStore { credentials: Vec::new() });
+        let mut store = encryption::load_encrypted_credentials(app, &secret).unwrap_or_else(|_| CredentialStore { credentials: Vec::new() });
         let mut synced = 0usize;
         for incoming in bundle.credentials {
-            store
-                .credentials
-                .retain(|c| c.connection_id != incoming.connection_id);
+            store.credentials.retain(|c| c.connection_id != incoming.connection_id);
             store.credentials.push(incoming);
             synced += 1;
         }
@@ -534,17 +507,10 @@ struct MergeOutcome {
 
 /// Union by id; the incoming (remote) copy wins on a conflict. With `replace`,
 /// the remote set becomes authoritative wholesale.
-fn merge_bookmarks(
-    local: Vec<SavedConnection>,
-    remote: Vec<SavedConnection>,
-    replace: bool,
-) -> MergeOutcome {
+fn merge_bookmarks(local: Vec<SavedConnection>, remote: Vec<SavedConnection>, replace: bool) -> MergeOutcome {
     if replace {
         let added = remote.len();
-        return MergeOutcome {
-            items: remote,
-            added,
-        };
+        return MergeOutcome { items: remote, added };
     }
     let mut items = local;
     let mut added = 0usize;
@@ -572,7 +538,7 @@ fn sha256_hex(data: &[u8]) -> String {
 // HTTP plumbing & providers
 // ============================================================================
 
-fn http_client() -> Result<reqwest::Client, String> {
+pub(crate) fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent("AuraTerm-Sync/1.0")
         .timeout(Duration::from_secs(30))
@@ -610,33 +576,46 @@ fn normalize_base_url(raw: &str) -> String {
     raw.trim().trim_end_matches('/').to_string()
 }
 
-/// The official AuraXLab server. Used as the default so users never have to type
-/// a URL; self-hosters can still point at their own server explicitly.
-/// `AURATERM_AURAXLAB_URL` overrides this at runtime (set by `make run` for local dev).
-fn default_auraxlab_base_url() -> String {
-    std::env::var("AURATERM_AURAXLAB_URL").unwrap_or_else(|_| "https://auraxlab.com".to_string())
+fn is_official_auraxlab_url(raw: &str) -> bool {
+    let normalized = normalize_base_url(raw);
+    normalized.is_empty() || normalized == "https://auraxlab.com"
 }
 
-/// Normalize an AuraXLab server URL, falling back to the official server when
-/// the caller leaves it blank.
-fn resolve_auraxlab_base(raw: &str) -> String {
-    let normalized = normalize_base_url(raw);
-    if normalized.is_empty() {
-        default_auraxlab_base_url()
-    } else {
-        normalized
+/// One-release migration for encrypted configs written before the official
+/// AuraXLab origin became fixed. Third-party hosts and generic legacy tokens
+/// are quarantined locally and are never contacted.
+fn migrate_legacy_auraxlab_config(config: &mut SyncConfig) -> bool {
+    let legacy = config.auraxlab.legacy_base_url.clone();
+    let mut changed = !legacy.is_empty();
+    if !is_official_auraxlab_url(&legacy) || (!config.auraxlab.token.is_empty() && !config.auraxlab.token.starts_with("axsync_")) {
+        config.auraxlab.token.clear();
+        config.auraxlab.account_subject.clear();
+        config.auraxlab.email.clear();
+        config.auraxlab.username.clear();
+        config.last_remote_version = None;
+        changed = true;
+    } else if config.auraxlab.email.is_empty() && config.auraxlab.username.contains('@') {
+        // The old username cache actually held the login email.
+        config.auraxlab.email = config.auraxlab.username.clone();
+        changed = true;
+    }
+    config.auraxlab.legacy_base_url.clear();
+    changed
+}
+
+impl AuraxlabProvider {
+    fn endpoint(&self) -> String {
+        #[cfg(test)]
+        if let Some(endpoint) = &self.endpoint_override {
+            return normalize_base_url(endpoint);
+        }
+        auraxlab_origin()
     }
 }
 
 // ---- GitHub / Gitee Gist (shared shape) ----
 
-async fn gist_push(
-    api_base: &str,
-    token: &str,
-    gist_id: &str,
-    content_b64: &str,
-    bearer: bool,
-) -> Result<(String, Option<String>), String> {
+async fn gist_push(api_base: &str, token: &str, gist_id: &str, content_b64: &str, bearer: bool) -> Result<(String, Option<String>), String> {
     let client = http_client()?;
     let files = json!({ SYNC_FILE_NAME: { "content": content_b64 } });
     let resp = if gist_id.is_empty() {
@@ -672,24 +651,12 @@ async fn gist_push(
     if !status.is_success() {
         return Err(format!("Gist upload failed: {}", json_message(&body, status)));
     }
-    let id = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or(gist_id)
-        .to_string();
-    let version = body
-        .get("updated_at")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or(gist_id).to_string();
+    let version = body.get("updated_at").and_then(|v| v.as_str()).map(|s| s.to_string());
     Ok((id, version))
 }
 
-async fn gist_pull(
-    api_base: &str,
-    token: &str,
-    gist_id: &str,
-    bearer: bool,
-) -> Result<RemoteBlob, String> {
+async fn gist_pull(api_base: &str, token: &str, gist_id: &str, bearer: bool) -> Result<RemoteBlob, String> {
     if gist_id.is_empty() {
         return Err("No Gist has been created yet — push from one device first.".to_string());
     }
@@ -716,13 +683,8 @@ async fn gist_pull(
         .and_then(|file| file.get("content"))
         .and_then(|c| c.as_str())
         .ok_or_else(|| "The Gist does not contain AuraTerm sync data.".to_string())?;
-    let data = STANDARD
-        .decode(content.trim())
-        .map_err(|e| format!("Synced data is not valid base64: {e}"))?;
-    let version = body
-        .get("updated_at")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let data = STANDARD.decode(content.trim()).map_err(|e| format!("Synced data is not valid base64: {e}"))?;
+    let version = body.get("updated_at").and_then(|v| v.as_str()).map(|s| s.to_string());
     Ok(RemoteBlob { data, version })
 }
 
@@ -738,10 +700,7 @@ async fn webdav_push(cfg: &WebdavProvider, blob: &[u8]) -> Result<Option<String>
         .await
         .map_err(|e| format!("Network error: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!(
-            "WebDAV upload failed: HTTP {}",
-            resp.status().as_u16()
-        ));
+        return Err(format!("WebDAV upload failed: HTTP {}", resp.status().as_u16()));
     }
     Ok(header_version(&resp))
 }
@@ -758,10 +717,7 @@ async fn webdav_pull(cfg: &WebdavProvider) -> Result<RemoteBlob, String> {
         return Err("No sync data found on the WebDAV server yet.".to_string());
     }
     if !resp.status().is_success() {
-        return Err(format!(
-            "WebDAV download failed: HTTP {}",
-            resp.status().as_u16()
-        ));
+        return Err(format!("WebDAV download failed: HTTP {}", resp.status().as_u16()));
     }
     let version = header_version(&resp);
     let data = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
@@ -770,17 +726,11 @@ async fn webdav_pull(cfg: &WebdavProvider) -> Result<RemoteBlob, String> {
 
 // ---- AuraXLab account (the official self-hostable server) ----
 
-fn auraxlab_vault_url(base_url: &str) -> String {
-    format!("{}/api/v1/auraterm/sync/vault", resolve_auraxlab_base(base_url))
+fn auraxlab_vault_url(cfg: &AuraxlabProvider) -> String {
+    format!("{}/api/v1/auraterm/sync/vault", cfg.endpoint())
 }
 
-async fn auraxlab_push(
-    cfg: &AuraxlabProvider,
-    blob: &[u8],
-    base_version: Option<&str>,
-    device_id: &str,
-    device_label: &str,
-) -> Result<Option<String>, String> {
+async fn auraxlab_push(cfg: &AuraxlabProvider, blob: &[u8], base_version: Option<&str>, device_id: &str, device_label: &str) -> Result<Option<String>, String> {
     let client = http_client()?;
     let body = json!({
         "blob": STANDARD.encode(blob),
@@ -790,7 +740,7 @@ async fn auraxlab_push(
         "deviceLabel": device_label,
     });
     let resp = client
-        .put(auraxlab_vault_url(&cfg.base_url))
+        .put(auraxlab_vault_url(cfg))
         .basic_auth(&cfg.token, Some(""))
         .json(&body)
         .send()
@@ -800,25 +750,18 @@ async fn auraxlab_push(
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     let payload = parse_json(&bytes);
     if status == StatusCode::CONFLICT {
-        return Err(
-            "The server has newer data than this device. Pull first, then push again.".to_string(),
-        );
+        return Err("The server has newer data than this device. Pull first, then push again.".to_string());
     }
     if !status.is_success() {
-        return Err(format!(
-            "AuraXLab sync failed: {}",
-            json_message(&payload, status)
-        ));
+        return Err(format!("AuraXLab sync failed: {}", json_message(&payload, status)));
     }
-    Ok(payload
-        .get("version")
-        .map(|v| v.to_string().trim_matches('"').to_string()))
+    Ok(payload.get("version").map(|v| v.to_string().trim_matches('"').to_string()))
 }
 
 async fn auraxlab_pull(cfg: &AuraxlabProvider) -> Result<RemoteBlob, String> {
     let client = http_client()?;
     let resp = client
-        .get(auraxlab_vault_url(&cfg.base_url))
+        .get(auraxlab_vault_url(cfg))
         .basic_auth(&cfg.token, Some(""))
         .send()
         .await
@@ -830,51 +773,29 @@ async fn auraxlab_pull(cfg: &AuraxlabProvider) -> Result<RemoteBlob, String> {
         return Err("Your AuraXLab account has no synced data yet.".to_string());
     }
     if !status.is_success() {
-        return Err(format!(
-            "AuraXLab download failed: {}",
-            json_message(&payload, status)
-        ));
+        return Err(format!("AuraXLab download failed: {}", json_message(&payload, status)));
     }
     let content = payload
         .get("blob")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Server response did not contain a sync blob.".to_string())?;
-    let data = STANDARD
-        .decode(content.trim())
-        .map_err(|e| format!("Synced data is not valid base64: {e}"))?;
+    let data = STANDARD.decode(content.trim()).map_err(|e| format!("Synced data is not valid base64: {e}"))?;
     let version = payload.get("version").map(|v| v.to_string().trim_matches('"').to_string());
     Ok(RemoteBlob { data, version })
 }
 
 // ---- provider dispatch ----
 
-async fn provider_push(
-    config: &mut SyncConfig,
-    blob: &[u8],
-) -> Result<Option<String>, String> {
+async fn provider_push(config: &mut SyncConfig, blob: &[u8]) -> Result<Option<String>, String> {
     let content_b64 = STANDARD.encode(blob);
     match config.provider.as_str() {
         "github" => {
-            let (id, version) = gist_push(
-                "https://api.github.com",
-                &config.github.token,
-                &config.github.gist_id,
-                &content_b64,
-                true,
-            )
-            .await?;
+            let (id, version) = gist_push("https://api.github.com", &config.github.token, &config.github.gist_id, &content_b64, true).await?;
             config.github.gist_id = id;
             Ok(version)
         }
         "gitee" => {
-            let (id, version) = gist_push(
-                "https://gitee.com/api/v5",
-                &config.gitee.token,
-                &config.gitee.gist_id,
-                &content_b64,
-                false,
-            )
-            .await?;
+            let (id, version) = gist_push("https://gitee.com/api/v5", &config.gitee.token, &config.gitee.gist_id, &content_b64, false).await?;
             config.gitee.gist_id = id;
             Ok(version)
         }
@@ -895,24 +816,8 @@ async fn provider_push(
 
 async fn provider_pull(config: &SyncConfig) -> Result<RemoteBlob, String> {
     match config.provider.as_str() {
-        "github" => {
-            gist_pull(
-                "https://api.github.com",
-                &config.github.token,
-                &config.github.gist_id,
-                true,
-            )
-            .await
-        }
-        "gitee" => {
-            gist_pull(
-                "https://gitee.com/api/v5",
-                &config.gitee.token,
-                &config.gitee.gist_id,
-                false,
-            )
-            .await
-        }
+        "github" => gist_pull("https://api.github.com", &config.github.token, &config.github.gist_id, true).await,
+        "gitee" => gist_pull("https://gitee.com/api/v5", &config.gitee.token, &config.gitee.gist_id, false).await,
         "webdav" => webdav_pull(&config.webdav).await,
         "auraxlab" => auraxlab_pull(&config.auraxlab).await,
         other => Err(format!("Unknown sync provider: '{other}'")),
@@ -937,7 +842,7 @@ fn ensure_provider_ready(config: &SyncConfig) -> Result<(), String> {
             }
         }
         "auraxlab" => {
-            if config.auraxlab.base_url.is_empty() || config.auraxlab.token.is_empty() {
+            if !config.auraxlab.token.starts_with("axsync_") {
                 return Err("Sign in to your AuraXLab account first.".to_string());
             }
         }
@@ -952,20 +857,13 @@ fn ensure_provider_ready(config: &SyncConfig) -> Result<(), String> {
 // ============================================================================
 
 #[tauri::command]
-pub fn get_sync_config(
-    app: AppHandle,
-    sync_state: State<'_, SyncState>,
-) -> Result<SyncConfigView, String> {
+pub fn get_sync_config(app: AppHandle, sync_state: State<'_, SyncState>) -> Result<SyncConfigView, String> {
     let config = load_config(&app)?;
     Ok(SyncConfigView::from_config(&config, sync_state.is_unlocked()))
 }
 
 #[tauri::command]
-pub fn set_sync_config(
-    app: AppHandle,
-    input: SyncSettingsInput,
-    sync_state: State<'_, SyncState>,
-) -> Result<SyncConfigView, String> {
+pub fn set_sync_config(app: AppHandle, input: SyncSettingsInput, sync_state: State<'_, SyncState>) -> Result<SyncConfigView, String> {
     let mut config = load_config(&app)?;
     apply_input(&mut config, input);
     if config.device_id.is_empty() {
@@ -1013,8 +911,7 @@ pub async fn cloud_sync_push(
     }
 
     let bundle = build_bundle(&app, &master_state, &config).await?;
-    let plaintext =
-        Zeroizing::new(serde_json::to_vec(&bundle).map_err(|e| e.to_string())?);
+    let plaintext = Zeroizing::new(serde_json::to_vec(&bundle).map_err(|e| e.to_string())?);
     let blob = encryption::encrypt_sync_blob(&plaintext, &pass)?;
 
     let version = provider_push(&mut config, &blob).await?;
@@ -1047,8 +944,7 @@ pub async fn cloud_sync_pull(
 
     let remote = provider_pull(&config).await?;
     let plaintext = Zeroizing::new(encryption::decrypt_sync_blob(&remote.data, &pass)?);
-    let bundle: SyncBundle =
-        serde_json::from_slice(&plaintext).map_err(|e| format!("Corrupt sync bundle: {e}"))?;
+    let bundle: SyncBundle = serde_json::from_slice(&plaintext).map_err(|e| format!("Corrupt sync bundle: {e}"))?;
 
     let mut result = apply_bundle(&app, &master_state, &config, bundle, replace).await?;
     config.last_sync_at = Some(now_ms());
@@ -1085,8 +981,7 @@ pub async fn cloud_sync_now(
     match provider_pull(&config).await {
         Ok(remote) => {
             let plaintext = Zeroizing::new(encryption::decrypt_sync_blob(&remote.data, &pass)?);
-            let bundle: SyncBundle = serde_json::from_slice(&plaintext)
-                .map_err(|e| format!("Corrupt sync bundle: {e}"))?;
+            let bundle: SyncBundle = serde_json::from_slice(&plaintext).map_err(|e| format!("Corrupt sync bundle: {e}"))?;
             result = apply_bundle(&app, &master_state, &config, bundle, false).await?;
             if remote.version.is_some() {
                 config.last_remote_version = remote.version;
@@ -1124,12 +1019,7 @@ pub async fn cloud_sync_test_connection(app: AppHandle) -> Result<String, String
     match provider_pull(&config).await {
         Ok(_) => Ok("Connected — found existing sync data.".to_string()),
         // A "no data yet" style error still proves the endpoint + auth work.
-        Err(e)
-            if e.contains("no synced data")
-                || e.contains("No sync data")
-                || e.contains("No Gist")
-                || e.contains("has no synced") =>
-        {
+        Err(e) if e.contains("no synced data") || e.contains("No sync data") || e.contains("No Gist") || e.contains("has no synced") => {
             Ok("Connected — no data uploaded yet.".to_string())
         }
         Err(e) => Err(e),
@@ -1138,15 +1028,13 @@ pub async fn cloud_sync_test_connection(app: AppHandle) -> Result<String, String
 
 /// Step 1 of sign-up: ask the server to email a verification code to `email`.
 #[tauri::command]
-pub async fn auraxlab_request_email_code(
-    base_url: String,
-    email: String,
-) -> Result<String, String> {
+pub async fn auraxlab_request_email_code(email: String) -> Result<String, String> {
+    auraxlab_request_email_code_at(&auraxlab_origin(), email).await
+}
+
+async fn auraxlab_request_email_code_at(base_url: &str, email: String) -> Result<String, String> {
     let client = http_client()?;
-    let url = format!(
-        "{}/api/v1/auraterm/sync/email/request-code",
-        resolve_auraxlab_base(&base_url)
-    );
+    let url = format!("{}/api/v1/auraterm/sync/email/request-code", base_url);
     let resp = client
         .post(url)
         .json(&json!({ "email": email }))
@@ -1168,16 +1056,13 @@ pub async fn auraxlab_request_email_code(
 
 /// Step 2 of sign-up: verify the emailed code for `email`.
 #[tauri::command]
-pub async fn auraxlab_verify_email_code(
-    base_url: String,
-    email: String,
-    code: String,
-) -> Result<String, String> {
+pub async fn auraxlab_verify_email_code(email: String, code: String) -> Result<String, String> {
+    auraxlab_verify_email_code_at(&auraxlab_origin(), email, code).await
+}
+
+async fn auraxlab_verify_email_code_at(base_url: &str, email: String, code: String) -> Result<String, String> {
     let client = http_client()?;
-    let url = format!(
-        "{}/api/v1/auraterm/sync/email/verify-code",
-        resolve_auraxlab_base(&base_url)
-    );
+    let url = format!("{}/api/v1/auraterm/sync/email/verify-code", base_url);
     let resp = client
         .post(url)
         .json(&json!({ "email": email, "code": code }))
@@ -1190,28 +1075,16 @@ pub async fn auraxlab_verify_email_code(
     if !status.is_success() {
         return Err(json_message(&body, status));
     }
-    Ok(body
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Email verified.")
-        .to_string())
+    Ok(body.get("message").and_then(|v| v.as_str()).unwrap_or("Email verified.").to_string())
 }
 
 /// Step 3 of sign-up: create the account. The email must already be verified
 /// (steps 1-2); the server creates an already-confirmed account that can sign
 /// in immediately.
 #[tauri::command]
-pub async fn auraxlab_register(
-    base_url: String,
-    email: String,
-    username: String,
-    password: String,
-) -> Result<String, String> {
+pub async fn auraxlab_register(email: String, username: String, password: String) -> Result<String, String> {
     let client = http_client()?;
-    let url = format!(
-        "{}/api/v1/auraterm/sync/register",
-        resolve_auraxlab_base(&base_url)
-    );
+    let url = format!("{}/api/v1/auraterm/sync/register", auraxlab_origin());
     let resp = client
         .post(url)
         .json(&json!({ "email": email, "username": username, "password": password }))
@@ -1231,150 +1104,99 @@ pub async fn auraxlab_register(
         .to_string())
 }
 
-/// Sign in to an AuraXLab account and select the AuraXLab provider.
-///
-/// Preferred path: exchange the password for a **long-lived, revocable,
-/// sync-scoped credential** (`axsync_…`) so no short-lived generic token is
-/// ever stored on disk. Older servers without that endpoint fall back to the
-/// legacy `/tokens/` flow; those tokens now really expire server-side, after
-/// which the user is asked to sign in again (migration UX).
-///
-/// "Long-lived" has one server-side limit: changing or resetting the account
-/// password invalidates every outstanding sync credential (the server pins
-/// `account_auth_epoch` at issuance). Sync then fails with a 401 whose
-/// message says to sign in again on this device; running this command again
-/// mints a fresh credential under the new epoch and overwrites the stored
-/// one — the same recovery path as a lost rotate write.
-#[tauri::command]
-pub async fn auraxlab_login(
-    app: AppHandle,
-    base_url: String,
-    email: String,
-    password: String,
-    sync_state: State<'_, SyncState>,
-) -> Result<SyncConfigView, String> {
-    let client = http_client()?;
-    let resolved_base = resolve_auraxlab_base(&base_url);
+/// Decrypted backend-only view of the scoped account credential.
+#[derive(Clone)]
+pub(crate) struct LocalSyncAccount {
+    pub(crate) subject: String,
+    pub(crate) email: String,
+    pub(crate) username: String,
+    pub(crate) token: String,
+}
 
-    let device_label = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "AuraTerm".to_string());
-    let credentials_url = format!("{}/api/v1/auraterm/sync/credentials", resolved_base);
-    let resp = client
-        .post(credentials_url)
-        .basic_auth(&email, Some(password.clone()))
-        .json(&json!({ "deviceLabel": device_label }))
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {e}"))?;
-    let status = resp.status();
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    let body = parse_json(&bytes);
+pub(crate) fn local_sync_account(app: &AppHandle) -> Result<Option<LocalSyncAccount>, String> {
+    let config = load_config(app)?;
+    if !config.auraxlab.token.starts_with("axsync_") {
+        return Ok(None);
+    }
+    Ok(Some(LocalSyncAccount {
+        subject: config.auraxlab.account_subject,
+        email: config.auraxlab.email,
+        username: config.auraxlab.username,
+        token: config.auraxlab.token,
+    }))
+}
 
-    let token = if status.is_success() {
-        body.get("credential")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Server did not return a credential.".to_string())?
-            .to_string()
-    } else if status == reqwest::StatusCode::NOT_FOUND
-        || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
-    {
-        // Older server: fall back to the legacy short-lived token.
-        let url = format!("{}/api/v1/tokens/", resolved_base);
-        let resp = client
-            .post(url)
-            .basic_auth(&email, Some(password))
-            .send()
-            .await
-            .map_err(|e| format!("Network error: {e}"))?;
-        let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-        let body = parse_json(&bytes);
-        if !status.is_success() {
-            return Err(format!("Sign-in failed: {}", json_message(&body, status)));
-        }
-        body.get("token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Server did not return a token.".to_string())?
-            .to_string()
-    } else {
-        return Err(format!("Sign-in failed: {}", json_message(&body, status)));
-    };
-
-    let mut config = load_config(&app)?;
+pub(crate) fn store_account_login(app: &AppHandle, subject: &str, email: &str, username: &str, token: &str, device_label: &str) -> Result<(), String> {
+    if subject.trim().is_empty() || !token.starts_with("axsync_") {
+        return Err("AuraXLab returned an invalid account credential.".to_string());
+    }
+    let mut config = load_config(app)?;
     config.provider = "auraxlab".to_string();
-    config.auraxlab.base_url = resolved_base;
-    config.auraxlab.token = token;
-    config.auraxlab.username = email.clone();
+    config.auraxlab.account_subject = subject.to_string();
+    config.auraxlab.email = email.to_string();
+    config.auraxlab.username = username.to_string();
+    config.auraxlab.token = token.to_string();
+    config.device_label = device_label.to_string();
     if config.device_id.is_empty() {
         config.device_id = uuid::Uuid::new_v4().to_string();
     }
-    save_config(&app, &config)?;
-    Ok(SyncConfigView::from_config(&config, sync_state.is_unlocked()))
+    save_config(app, &config)
 }
 
-/// Sign out of the AuraXLab account. A scoped sync credential is revoked
-/// server-side (best effort) before the local copy is cleared, so a leaked
-/// backup of the config cannot keep syncing.
-#[tauri::command]
-pub async fn auraxlab_logout(
-    app: AppHandle,
-    sync_state: State<'_, SyncState>,
-) -> Result<SyncConfigView, String> {
-    let mut config = load_config(&app)?;
-    if config.auraxlab.token.starts_with("axsync_") && !config.auraxlab.base_url.is_empty() {
-        if let Ok(client) = http_client() {
-            let url = format!(
-                "{}/api/v1/auraterm/sync/credentials/current",
-                config.auraxlab.base_url
-            );
-            let _ = client
-                .delete(url)
-                .basic_auth(&config.auraxlab.token, Some(""))
-                .send()
-                .await;
-        }
-    }
-    config.auraxlab.token = String::new();
+pub(crate) fn clear_account_login(app: &AppHandle) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.auraxlab.account_subject.clear();
+    config.auraxlab.email.clear();
+    config.auraxlab.username.clear();
+    config.auraxlab.token.clear();
     config.last_remote_version = None;
-    save_config(&app, &config)?;
-    Ok(SyncConfigView::from_config(&config, sync_state.is_unlocked()))
+    save_config(app, &config)
+}
+
+pub(crate) async fn revoke_sync_credential(token: &str) {
+    if !token.starts_with("axsync_") {
+        return;
+    }
+    if let Ok(client) = http_client() {
+        let _ = client
+            .delete(format!("{}/api/v1/auraterm/sync/credentials/current", auraxlab_origin()))
+            .basic_auth(token, Some(""))
+            .send()
+            .await;
+    }
 }
 
 /// Cloud Console traffic totals for the signed-in account, as reported by
 /// `GET /api/v1/auraterm/account` (`traffic` object; absent on older servers).
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountTraffic {
-    bytes_up: u64,
-    bytes_down: u64,
-    bytes_total: u64,
-    sessions: u64,
+    pub(crate) bytes_up: u64,
+    pub(crate) bytes_down: u64,
+    pub(crate) bytes_total: u64,
+    pub(crate) sessions: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountOverview {
-    username: String,
-    email: String,
-    confirmed: bool,
-    traffic: Option<AccountTraffic>,
+    pub(crate) subject: String,
+    pub(crate) username: String,
+    pub(crate) email: String,
+    pub(crate) confirmed: bool,
+    pub(crate) traffic: Option<AccountTraffic>,
 }
 
 /// Fetch the signed-in account's profile and Cloud Console traffic totals
 /// for the "My Account" view. Requires an AuraXLab sign-in; the stored
 /// credential never leaves the backend.
-#[tauri::command]
-pub async fn auraxlab_account_overview(app: AppHandle) -> Result<AccountOverview, String> {
-    let config = load_config(&app)?;
+pub(crate) async fn fetch_account_overview(app: &AppHandle) -> Result<AccountOverview, String> {
+    let mut config = load_config(app)?;
     if config.auraxlab.token.is_empty() {
         return Err("Sign in to your AuraXLab account first.".to_string());
     }
     let client = http_client()?;
-    let url = format!(
-        "{}/api/v1/auraterm/account",
-        resolve_auraxlab_base(&config.auraxlab.base_url)
-    );
+    let url = format!("{}/api/v1/auraterm/account", auraxlab_origin());
     let resp = client
         .get(url)
         .basic_auth(&config.auraxlab.token, Some(""))
@@ -1396,23 +1218,24 @@ pub async fn auraxlab_account_overview(app: AppHandle) -> Result<AccountOverview
             sessions: count("sessions"),
         }
     });
-    Ok(AccountOverview {
-        username: body
-            .get("username")
+    let overview = AccountOverview {
+        subject: body
+            .get("subject")
             .and_then(|v| v.as_str())
-            .unwrap_or(&config.auraxlab.username)
+            .ok_or_else(|| "AuraXLab did not return an account subject.".to_string())?
             .to_string(),
-        email: body
-            .get("email")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        confirmed: body
-            .get("confirmed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        username: body.get("username").and_then(|v| v.as_str()).unwrap_or(&config.auraxlab.username).to_string(),
+        email: body.get("email").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        confirmed: body.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false),
         traffic,
-    })
+    };
+    if config.auraxlab.account_subject != overview.subject || config.auraxlab.email != overview.email || config.auraxlab.username != overview.username {
+        config.auraxlab.account_subject = overview.subject.clone();
+        config.auraxlab.email = overview.email.clone();
+        config.auraxlab.username = overview.username.clone();
+        save_config(app, &config)?;
+    }
+    Ok(overview)
 }
 
 #[cfg(test)]
@@ -1524,9 +1347,6 @@ mod tests {
             webdav_url: None,
             webdav_username: None,
             webdav_password: None,
-            auraxlab_base_url: None,
-            auraxlab_token: None,
-            auraxlab_username: None,
         };
         apply_input(&mut config, input);
         assert_eq!(config.github.token, "keep-me");
@@ -1538,23 +1358,33 @@ mod tests {
     fn sha256_hex_is_lowercase_64_chars() {
         let h = sha256_hex(b"hello");
         assert_eq!(h.len(), 64);
-        assert_eq!(
-            h,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
+        assert_eq!(h, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
     }
 
     #[test]
-    fn auraxlab_base_defaults_to_official_server() {
-        assert_eq!(resolve_auraxlab_base(""), "https://auraxlab.com");
-        assert_eq!(resolve_auraxlab_base("   "), "https://auraxlab.com");
-        // a self-hosted URL is honored (and trailing slash trimmed)
-        assert_eq!(resolve_auraxlab_base("https://my.example.com/"), "https://my.example.com");
-    }
-
-    #[test]
-    fn apply_input_defaults_blank_auraxlab_base() {
+    fn legacy_auraxlab_config_quarantines_nonofficial_and_generic_tokens() {
         let mut config = SyncConfig::default();
+        config.auraxlab.legacy_base_url = "https://other.example".into();
+        config.auraxlab.token = "axsync_secret".into();
+        assert!(migrate_legacy_auraxlab_config(&mut config));
+        assert!(config.auraxlab.token.is_empty());
+
+        config.auraxlab.legacy_base_url = "https://auraxlab.com".into();
+        config.auraxlab.token = "legacy-token".into();
+        assert!(migrate_legacy_auraxlab_config(&mut config));
+        assert!(config.auraxlab.token.is_empty());
+
+        config.auraxlab.legacy_base_url = "https://auraxlab.com/".into();
+        config.auraxlab.token = "axsync_keep".into();
+        assert!(migrate_legacy_auraxlab_config(&mut config));
+        assert_eq!(config.auraxlab.token, "axsync_keep");
+        assert!(config.auraxlab.legacy_base_url.is_empty());
+    }
+
+    #[test]
+    fn apply_input_cannot_replace_account_credentials() {
+        let mut config = SyncConfig::default();
+        config.auraxlab.token = "axsync_keep".into();
         let input = SyncSettingsInput {
             provider: "auraxlab".to_string(),
             include_settings: true,
@@ -1569,12 +1399,9 @@ mod tests {
             webdav_url: None,
             webdav_username: None,
             webdav_password: None,
-            auraxlab_base_url: Some(String::new()), // blank -> official default
-            auraxlab_token: None,
-            auraxlab_username: None,
         };
         apply_input(&mut config, input);
-        assert_eq!(config.auraxlab.base_url, "https://auraxlab.com");
+        assert_eq!(config.auraxlab.token, "axsync_keep");
     }
 
     // ========================================================================
@@ -1640,10 +1467,7 @@ mod tests {
             let parse = || -> Value { serde_json::from_slice(body).unwrap_or(Value::Null) };
             if method == "POST" && url.starts_with("/gists") {
                 let v = parse();
-                *content = v["files"][SYNC_FILE_NAME]["content"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+                *content = v["files"][SYNC_FILE_NAME]["content"].as_str().unwrap_or_default().to_string();
                 let resp = json!({"id": "gist_test_1", "updated_at": "2026-01-01T00:00:00Z"});
                 (201, serde_json::to_vec(&resp).unwrap(), vec![])
             } else if method == "PATCH" && url.starts_with("/gists/gist_test_1") {
@@ -1671,30 +1495,20 @@ mod tests {
         let blob = encryption::encrypt_sync_blob(b"{\"bookmarks\":[1]}", "pw").unwrap();
 
         // create
-        let (id, version) = gist_push(&base, "tok", "", &STANDARD.encode(&blob), true)
-            .await
-            .unwrap();
+        let (id, version) = gist_push(&base, "tok", "", &STANDARD.encode(&blob), true).await.unwrap();
         assert_eq!(id, "gist_test_1");
         assert!(version.is_some());
 
         // read back + decrypt
         let remote = gist_pull(&base, "tok", &id, true).await.unwrap();
         assert_eq!(remote.data, blob);
-        assert_eq!(
-            encryption::decrypt_sync_blob(&remote.data, "pw").unwrap(),
-            b"{\"bookmarks\":[1]}"
-        );
+        assert_eq!(encryption::decrypt_sync_blob(&remote.data, "pw").unwrap(), b"{\"bookmarks\":[1]}");
 
         // update via PATCH (gist_id reused)
         let blob2 = encryption::encrypt_sync_blob(b"{\"bookmarks\":[2]}", "pw").unwrap();
-        gist_push(&base, "tok", &id, &STANDARD.encode(&blob2), true)
-            .await
-            .unwrap();
+        gist_push(&base, "tok", &id, &STANDARD.encode(&blob2), true).await.unwrap();
         let remote2 = gist_pull(&base, "tok", &id, true).await.unwrap();
-        assert_eq!(
-            encryption::decrypt_sync_blob(&remote2.data, "pw").unwrap(),
-            b"{\"bookmarks\":[2]}"
-        );
+        assert_eq!(encryption::decrypt_sync_blob(&remote2.data, "pw").unwrap(), b"{\"bookmarks\":[2]}");
     }
 
     #[tokio::test]
@@ -1702,15 +1516,10 @@ mod tests {
         // Gitee flow (bearer = false): access_token travels in the body / query.
         let base = spawn_gist_mock(Arc::new(Mutex::new(String::new())));
         let blob = encryption::encrypt_sync_blob(b"gitee-payload", "pw").unwrap();
-        let (id, _v) = gist_push(&base, "gitee_tok", "", &STANDARD.encode(&blob), false)
-            .await
-            .unwrap();
+        let (id, _v) = gist_push(&base, "gitee_tok", "", &STANDARD.encode(&blob), false).await.unwrap();
         assert_eq!(id, "gist_test_1");
         let remote = gist_pull(&base, "gitee_tok", &id, false).await.unwrap();
-        assert_eq!(
-            encryption::decrypt_sync_blob(&remote.data, "pw").unwrap(),
-            b"gitee-payload"
-        );
+        assert_eq!(encryption::decrypt_sync_blob(&remote.data, "pw").unwrap(), b"gitee-payload");
     }
 
     // ---- WebDAV (mock) ----
@@ -1741,10 +1550,7 @@ mod tests {
         assert_eq!(version.as_deref(), Some("\"etag-1\""));
         let remote = webdav_pull(&cfg).await.unwrap();
         assert_eq!(remote.data, blob);
-        assert_eq!(
-            encryption::decrypt_sync_blob(&remote.data, "pw").unwrap(),
-            b"webdav-data"
-        );
+        assert_eq!(encryption::decrypt_sync_blob(&remote.data, "pw").unwrap(), b"webdav-data");
     }
 
     // ---- AuraXLab vault (mock) incl. optimistic-concurrency 409 ----
@@ -1776,11 +1582,7 @@ mod tests {
                     (200, serde_json::to_vec(&resp).unwrap(), vec![])
                 }
                 "GET" => match &g.0 {
-                    Some(b) => (
-                        200,
-                        serde_json::to_vec(&json!({"blob": b, "version": g.1})).unwrap(),
-                        vec![],
-                    ),
+                    Some(b) => (200, serde_json::to_vec(&json!({"blob": b, "version": g.1})).unwrap(), vec![]),
                     None => (404, b"{}".to_vec(), vec![]),
                 },
                 _ => (405, b"{}".to_vec(), vec![]),
@@ -1788,9 +1590,10 @@ mod tests {
         });
 
         let cfg = AuraxlabProvider {
-            base_url: base,
+            endpoint_override: Some(base),
             username: "u".into(),
             token: "tok".into(),
+            ..Default::default()
         };
 
         // first push (no base version) -> v1
@@ -1805,9 +1608,7 @@ mod tests {
 
         // stale push (baseVersion 0, server is at 1) -> 409 conflict
         let blob2 = encryption::encrypt_sync_blob(b"axlab-2", "pw").unwrap();
-        let err = auraxlab_push(&cfg, &blob2, Some("0"), "dev", "label")
-            .await
-            .unwrap_err();
+        let err = auraxlab_push(&cfg, &blob2, Some("0"), "dev", "label").await.unwrap_err();
         assert!(err.to_lowercase().contains("pull"), "got: {err}");
 
         // correct push (baseVersion 1) -> v2
@@ -1835,19 +1636,13 @@ mod tests {
             }
         });
 
-        let sent = auraxlab_request_email_code(base.clone(), "a@b.com".into())
-            .await
-            .unwrap();
+        let sent = auraxlab_request_email_code_at(&base, "a@b.com".into()).await.unwrap();
         assert!(sent.to_lowercase().contains("emailed"), "got: {sent}");
 
-        let verified = auraxlab_verify_email_code(base.clone(), "a@b.com".into(), "123456".into())
-            .await
-            .unwrap();
+        let verified = auraxlab_verify_email_code_at(&base, "a@b.com".into(), "123456".into()).await.unwrap();
         assert!(verified.to_lowercase().contains("verified"), "got: {verified}");
 
-        let err = auraxlab_verify_email_code(base, "a@b.com".into(), "000000".into())
-            .await
-            .unwrap_err();
+        let err = auraxlab_verify_email_code_at(&base, "a@b.com".into(), "000000".into()).await.unwrap_err();
         assert!(err.to_lowercase().contains("incorrect"), "got: {err}");
     }
 
@@ -1856,18 +1651,15 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs AURATERM_IT_GH_TOKEN (a GitHub PAT with gist scope)"]
     async fn real_github_gist_roundtrip() {
-        let Some(token) = skip_unless_env("AURATERM_IT_GH_TOKEN") else { return };
+        let Some(token) = skip_unless_env("AURATERM_IT_GH_TOKEN") else {
+            return;
+        };
         let blob = encryption::encrypt_sync_blob(b"auraterm-real-github", "it-pass").unwrap();
         let (id, _v) = gist_push("https://api.github.com", &token, "", &STANDARD.encode(&blob), true)
             .await
             .expect("create gist");
-        let remote = gist_pull("https://api.github.com", &token, &id, true)
-            .await
-            .expect("read gist");
-        assert_eq!(
-            encryption::decrypt_sync_blob(&remote.data, "it-pass").unwrap(),
-            b"auraterm-real-github"
-        );
+        let remote = gist_pull("https://api.github.com", &token, &id, true).await.expect("read gist");
+        assert_eq!(encryption::decrypt_sync_blob(&remote.data, "it-pass").unwrap(), b"auraterm-real-github");
         // cleanup
         let _ = http_client()
             .unwrap()
@@ -1881,18 +1673,15 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs AURATERM_IT_GITEE_TOKEN (a Gitee private token with gists scope)"]
     async fn real_gitee_gist_roundtrip() {
-        let Some(token) = skip_unless_env("AURATERM_IT_GITEE_TOKEN") else { return };
+        let Some(token) = skip_unless_env("AURATERM_IT_GITEE_TOKEN") else {
+            return;
+        };
         let blob = encryption::encrypt_sync_blob(b"auraterm-real-gitee", "it-pass").unwrap();
         let (id, _v) = gist_push("https://gitee.com/api/v5", &token, "", &STANDARD.encode(&blob), false)
             .await
             .expect("create gitee gist");
-        let remote = gist_pull("https://gitee.com/api/v5", &token, &id, false)
-            .await
-            .expect("read gitee gist");
-        assert_eq!(
-            encryption::decrypt_sync_blob(&remote.data, "it-pass").unwrap(),
-            b"auraterm-real-gitee"
-        );
+        let remote = gist_pull("https://gitee.com/api/v5", &token, &id, false).await.expect("read gitee gist");
+        assert_eq!(encryption::decrypt_sync_blob(&remote.data, "it-pass").unwrap(), b"auraterm-real-gitee");
         let _ = http_client()
             .unwrap()
             .delete(format!("https://gitee.com/api/v5/gists/{id}?access_token={token}"))
@@ -1904,7 +1693,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs AURATERM_IT_WEBDAV_URL (+ optional _USER/_PASS)"]
     async fn real_webdav_roundtrip() {
-        let Some(url) = skip_unless_env("AURATERM_IT_WEBDAV_URL") else { return };
+        let Some(url) = skip_unless_env("AURATERM_IT_WEBDAV_URL") else {
+            return;
+        };
         let cfg = WebdavProvider {
             url,
             username: std::env::var("AURATERM_IT_WEBDAV_USER").unwrap_or_default(),
@@ -1914,19 +1705,24 @@ mod tests {
         webdav_push(&cfg, &blob).await.expect("webdav put");
         let remote = webdav_pull(&cfg).await.expect("webdav get");
         assert_eq!(remote.data, blob);
-        assert_eq!(
-            encryption::decrypt_sync_blob(&remote.data, "it-pass").unwrap(),
-            b"auraterm-real-webdav"
-        );
+        assert_eq!(encryption::decrypt_sync_blob(&remote.data, "it-pass").unwrap(), b"auraterm-real-webdav");
         eprintln!("OK real WebDAV round-trip");
     }
 
     #[tokio::test]
     #[ignore = "needs AURATERM_IT_AURAXLAB_URL + AURATERM_IT_AURAXLAB_TOKEN (a live AuraXLab server)"]
     async fn real_auraxlab_roundtrip() {
-        let Some(base_url) = skip_unless_env("AURATERM_IT_AURAXLAB_URL") else { return };
-        let Some(token) = skip_unless_env("AURATERM_IT_AURAXLAB_TOKEN") else { return };
-        let cfg = AuraxlabProvider { base_url, username: String::new(), token };
+        let Some(base_url) = skip_unless_env("AURATERM_IT_AURAXLAB_URL") else {
+            return;
+        };
+        let Some(token) = skip_unless_env("AURATERM_IT_AURAXLAB_TOKEN") else {
+            return;
+        };
+        let cfg = AuraxlabProvider {
+            endpoint_override: Some(base_url.clone()),
+            token,
+            ..Default::default()
+        };
 
         let payload = br#"{"bookmarks":[{"id":"it-1","name":"it"}]}"#;
         let blob = encryption::encrypt_sync_blob(payload, "it-pass").unwrap();
@@ -1948,6 +1744,6 @@ mod tests {
         // a stale write must conflict (409 -> "pull first")
         let stale = auraxlab_push(&cfg, &blob, Some("0"), "it-device", "ci").await;
         assert!(stale.is_err(), "stale push should 409");
-        eprintln!("OK real AuraXLab round-trip + conflict against {}", cfg.base_url);
+        eprintln!("OK real AuraXLab round-trip + conflict against {base_url}");
     }
 }

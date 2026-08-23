@@ -32,7 +32,7 @@
   - 「本设备」区不再有独立的邮箱 + 密码表单；服务器地址上移为登录表单字段，登录与绑定共用同一地址，不再可能各指一个服务器
   - 对话框顶部新增「接入状态」总览：云同步登录态与 Cloud Console 绑定态并列徽章展示，四种组合状态一目了然
 - **书签会话持久化徽章** —— 侧栏书签名旁显示 T（tmux）/ S（screen）小徽章并附说明 tooltip，一眼区分可断线重连的会话；搜索可直接匹配 tmux / screen 关键字
-- 本地开发可用 `AURATERM_AURAXLAB_URL` / `VITE_AURAXLAB_URL` 指向自托管 AuraXLab 服务器；新增 `make run` 一键联调
+- 新增 `make run` 一键启动桌面端开发环境
 
 ### 修复
 - macOS 原生菜单补齐「Cloud Sync…」入口（与 Windows 自绘菜单对齐），两端共用同一打开逻辑
