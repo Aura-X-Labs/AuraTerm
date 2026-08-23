@@ -45,6 +45,10 @@ export function accountState(): Promise<AuraXLabAccountState> {
   return invoke("auraxlab_account_state");
 }
 
+export function refreshAccount(): Promise<AuraXLabAccountState> {
+  return invoke("auraxlab_account_refresh");
+}
+
 export function restoreAccount(): Promise<AuraXLabAccountState> {
   return invoke("auraxlab_account_restore");
 }

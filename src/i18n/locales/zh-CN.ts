@@ -446,6 +446,8 @@ const zhCN: Messages = {
   account: {
     title: "AuraXLab 账户",
     subtitle: "一个账户，同时用于云同步与 Cloud Console",
+    loading: "正在读取已保存的账户…",
+    refreshing: "正在刷新账户资料…",
     statusSection: "接入状态",
     statusSync: "云同步",
     statusConsole: "Cloud Console",

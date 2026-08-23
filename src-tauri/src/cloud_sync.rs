@@ -1191,15 +1191,16 @@ pub struct AccountOverview {
 /// for the "My Account" view. Requires an AuraXLab sign-in; the stored
 /// credential never leaves the backend.
 pub(crate) async fn fetch_account_overview(app: &AppHandle) -> Result<AccountOverview, String> {
-    let mut config = load_config(app)?;
+    let config = load_config(app)?;
     if config.auraxlab.token.is_empty() {
         return Err("Sign in to your AuraXLab account first.".to_string());
     }
+    let credential = config.auraxlab.token.clone();
     let client = http_client()?;
     let url = format!("{}/api/v1/auraterm/account", auraxlab_origin());
     let resp = client
         .get(url)
-        .basic_auth(&config.auraxlab.token, Some(""))
+        .basic_auth(&credential, Some(""))
         .send()
         .await
         .map_err(|e| format!("Network error: {e}"))?;
@@ -1230,10 +1231,16 @@ pub(crate) async fn fetch_account_overview(app: &AppHandle) -> Result<AccountOve
         traffic,
     };
     if config.auraxlab.account_subject != overview.subject || config.auraxlab.email != overview.email || config.auraxlab.username != overview.username {
-        config.auraxlab.account_subject = overview.subject.clone();
-        config.auraxlab.email = overview.email.clone();
-        config.auraxlab.username = overview.username.clone();
-        save_config(app, &config)?;
+        // The request may finish after the user signs out or switches
+        // accounts. Never write the stale snapshot back over newer state.
+        let mut current = load_config(app)?;
+        if current.auraxlab.token != credential {
+            return Err("AuraXLab account changed while refreshing.".to_string());
+        }
+        current.auraxlab.account_subject = overview.subject.clone();
+        current.auraxlab.email = overview.email.clone();
+        current.auraxlab.username = overview.username.clone();
+        save_config(app, &current)?;
     }
     Ok(overview)
 }

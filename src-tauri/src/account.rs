@@ -123,7 +123,20 @@ async fn read_state(app: &AppHandle, bridge: &cloud_bridge::CloudBridgeState, re
 }
 
 #[tauri::command]
-pub async fn auraxlab_account_state(app: AppHandle, bridge: State<'_, cloud_bridge::CloudBridgeState>) -> Result<AuraXLabAccountState, String> {
+pub async fn auraxlab_account_state(
+    app: AppHandle,
+    bridge: State<'_, cloud_bridge::CloudBridgeState>,
+) -> Result<AuraXLabAccountState, String> {
+    // Opening the account dialog must not wait on the network. The persisted
+    // credential is the source of truth; profile data is refreshed separately.
+    read_state(&app, &bridge, false).await
+}
+
+#[tauri::command]
+pub async fn auraxlab_account_refresh(
+    app: AppHandle,
+    bridge: State<'_, cloud_bridge::CloudBridgeState>,
+) -> Result<AuraXLabAccountState, String> {
     read_state(&app, &bridge, true).await
 }
 
