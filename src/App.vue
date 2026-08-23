@@ -17,6 +17,7 @@ import CloudSyncDialog from "./CloudSyncDialog.vue";
 import AccountDialog from "./AccountDialog.vue";
 import RemoteAssistDialog from "./RemoteAssistDialog.vue";
 import AssistKnockDialog from "./AssistKnockDialog.vue";
+import JoinAssistDialog from "./JoinAssistDialog.vue";
 import {
   assistStatus as fetchAssistStatus,
   respondAssistJoin,
@@ -122,6 +123,7 @@ const showSettings = ref(false);
 const showCloudSync = ref(false);
 const showAccount = ref(false);
 const showRemoteAssist = ref(false);
+const showJoinAssist = ref(false);
 // Remote Assist host state (design docs/plans/remote-assist-design.md §9.3).
 const assistState = ref<AssistStatus | null>(null);
 const assistKnocks = ref<AssistKnock[]>([]);
@@ -315,6 +317,7 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleToggleCloudConsole,
   handleToggleRemoteSend,
   handleOpenRemoteAssist,
+  handleOpenJoinAssist,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -717,11 +720,27 @@ async function refreshAssistState() {
   }
 }
 
-const assistSessionChoices = computed(() => tabs.value.map((tab) => ({
-  id: tab.id,
-  protocol: tab.session.protocol,
-  title: tab.title,
-})));
+// Only real local sessions can be assisted; a guest tab cannot be re-shared.
+const assistSessionChoices = computed(() => tabs.value
+  .filter((tab): tab is Tab & { session: { protocol: "serial" | "ssh" | "telnet" | "local" } } => tab.session.protocol !== "assist")
+  .map((tab) => ({ id: tab.id, protocol: tab.session.protocol, title: tab.title })));
+
+function handleOpenJoinAssist() {
+  closeOpenMenus();
+  showJoinAssist.value = true;
+}
+
+function handleJoinAssist(code: string, displayName: string) {
+  showJoinAssist.value = false;
+  const newId = mintTabId();
+  const title = t("assist.guestTabTitle", { code: code.slice(0, 4) });
+  tabs.value = [...tabs.value, {
+    id: newId,
+    title,
+    session: { protocol: "assist", assistConfig: { code, displayName: displayName || undefined } },
+  }];
+  assignTabToFocusedPane(newId);
+}
 
 function handleOpenRemoteAssist() {
   closeOpenMenus();
@@ -764,7 +783,7 @@ watch(activeTabId, (tabId) => {
   assistFollowTimer = setTimeout(() => {
     assistFollowTimer = null;
     const tab = tabs.value.find((candidate) => candidate.id === tabId);
-    if (!tab) return;
+    if (!tab || tab.session.protocol === "assist") return;
     void switchAssistSession(tab.id, tab.session.protocol, tab.title)
       .then(() => refreshAssistState())
       .catch(() => {});
@@ -808,7 +827,7 @@ async function syncAutoShare() {
     const alreadyShared = bridgeStatus.value.shares.some(
       (share) => share.localSessionId === target?.id && share.txAllowed === allowTx,
     );
-    if (target && !alreadyShared) {
+    if (target && target.session.protocol !== "assist" && !alreadyShared) {
       // A freshly opened tab may not have a live PTY yet; a failed attempt
       // is dropped silently and the next status poll converges.
       await shareSessionToCloud(
@@ -1978,6 +1997,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor share session rx tx remote view follow active", run: () => handleToggleCloudConsole() },
     { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
     { id: "remote-assist", title: assistState.value ? t("assist.paletteManage") : t("assist.paletteStart"), group: t("palette.groups.app"), keywords: "remote assist help support code invite guest share screen pair", run: () => handleOpenRemoteAssist() },
+    { id: "join-assist", title: t("assist.paletteJoin"), group: t("palette.groups.app"), keywords: "join remote assist code guest help someone terminal", run: () => handleOpenJoinAssist() },
     { id: "remote-assist-revoke", title: t("assist.paletteRevoke"), group: t("palette.groups.app"), keywords: "remote assist revoke control kick stop input", run: () => handleRevokeAllAssistControl() },
     { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
@@ -2205,6 +2225,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleOpenRemoteAssist">
                 <span>{{ assistState ? $t('menu.remoteAssistManage') : $t('menu.remoteAssist') }}</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" @click="handleOpenJoinAssist">
+                <span>{{ $t('menu.joinAssist') }}</span>
               </button>
             </div>
           </div>
@@ -2819,6 +2842,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       @close="showRemoteAssist = false"
       @changed="refreshAssistState"
     />
+    <JoinAssistDialog v-if="showJoinAssist" @close="showJoinAssist = false" @join="handleJoinAssist" />
     <AssistKnockDialog
       :queue="assistKnocks"
       :allow-control="assistState?.policy.control !== 'view_only'"

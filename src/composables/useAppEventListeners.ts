@@ -14,6 +14,7 @@ interface UseAppEventListenersOptions {
   handleToggleCloudConsole: () => void;
   handleToggleRemoteSend: () => void;
   handleOpenRemoteAssist: () => void;
+  handleOpenJoinAssist: () => void;
   handleNewLocalSessionFromMenu: () => void;
   handleOpenConnectionFromMenu: (protocol: ConnectionProtocol) => void;
   handleCloseActiveTab: () => void;
@@ -40,6 +41,7 @@ export function useAppEventListeners({
   handleToggleCloudConsole,
   handleToggleRemoteSend,
   handleOpenRemoteAssist,
+  handleOpenJoinAssist,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -104,6 +106,9 @@ export function useAppEventListeners({
         }),
         listen("menu-remote-assist", () => {
           handleOpenRemoteAssist();
+        }),
+        listen("menu-join-assist", () => {
+          handleOpenJoinAssist();
         }),
         listen("menu-new-local", () => {
           handleNewLocalSessionFromMenu();

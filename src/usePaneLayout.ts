@@ -678,7 +678,9 @@ export function usePaneLayout({ tabs, isWindowFocused, terminalContainerRef }: U
 
     return {
       version: 1,
-      tabs: tabs.value.map((tab) => ({
+      // Remote Assist guest tabs are one-time (their code must never reach
+      // disk) and are not restorable.
+      tabs: tabs.value.filter((tab) => tab.session.protocol !== "assist").map((tab) => ({
         id: tab.id,
         title: tab.title,
         session: sanitizeSessionForPersistence(tab.session),
@@ -1068,6 +1070,8 @@ export function usePaneLayout({ tabs, isWindowFocused, terminalContainerRef }: U
         return "Telnet";
       case "serial":
         return "Serial";
+      case "assist":
+        return "Assist";
     }
   }
 

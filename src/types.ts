@@ -216,11 +216,20 @@ export interface SavedConnection {
   tunnels?: TunnelConfig[];
 }
 
+/** Remote Assist guest tab: joins another AuraTerm's session with a code.
+ *  Never persisted (the code is one-time and its secret must not be written
+ *  to disk). */
+export interface AssistGuestConfig {
+  code: string;
+  displayName?: string;
+}
+
 export type SessionConfig =
   | { protocol: "local"; cwd?: string }
   | { protocol: "ssh"; sshConfig: SshConfig }
   | { protocol: "telnet"; telnetConfig: TelnetConfig }
-  | { protocol: "serial"; serialConfig: SerialConfig };
+  | { protocol: "serial"; serialConfig: SerialConfig }
+  | { protocol: "assist"; assistConfig: AssistGuestConfig };
 
 export type SerialConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 

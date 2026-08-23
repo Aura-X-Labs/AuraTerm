@@ -6,9 +6,11 @@ import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
+import { t } from "./i18n";
 import { useTerminalSearch } from "./composables/useTerminalSearch";
 import { useTerminalSessionCommands } from "./composables/useTerminalSessionCommands";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
@@ -170,6 +172,38 @@ const actualLogPath = ref<string | undefined>(undefined);
 const activeSession = ref<SessionConfig>(props.session);
 const activeSessionRef = ref<SessionConfig>(props.session);
 const showRetryOverlay = ref(false);
+// Remote Assist guest tab: what the host told us (size, role, status).
+interface AssistGuestView {
+  state: "handshake" | "pending_approval" | "active" | "denied" | "ended" | string;
+  role: "viewer" | "controller" | string;
+  cols?: number | null;
+  rows?: number | null;
+  hostLabel?: string | null;
+  fingerprint?: string | null;
+  controlPolicy?: string | null;
+  reason?: string | null;
+}
+const assistGuest = ref<AssistGuestView | null>(null);
+const isAssistGuest = computed(() => props.session.protocol === "assist");
+let unlistenAssistState: UnlistenFn | null = null;
+
+/** Guest tabs render the host's grid; local fitting is a no-op for them. */
+function applyRemoteSize() {
+  if (!terminal || !assistGuest.value?.cols || !assistGuest.value?.rows) return;
+  if (terminal.cols !== assistGuest.value.cols || terminal.rows !== assistGuest.value.rows) {
+    terminal.resize(assistGuest.value.cols, assistGuest.value.rows);
+  }
+}
+
+function requestAssistControl() {
+  if (!ptyId.value) return;
+  void invoke("assist_request_control", { id: ptyId.value }).catch((error) => console.error("assist control request failed", error));
+}
+
+function releaseAssistControl() {
+  if (!ptyId.value) return;
+  void invoke("assist_release_control", { id: ptyId.value }).catch((error) => console.error("assist control release failed", error));
+}
 const retryPassword = ref("");
 const mfaEvent = ref<SshMfaPromptEvent | null>(null);
 const mfaResponses = ref<string[]>([]);
@@ -382,7 +416,7 @@ watch(effectiveSettings, (value) => {
   terminal.options.fontFamily = value.fontFamily;
   terminal.options.scrollback = value.scrollback;
   terminal.options.theme = buildTerminalTheme(value);
-  fitAddon?.fit();
+  fit();
 }, { deep: true });
 
 watch(() => props.isFocused, (isFocused) => {
@@ -390,7 +424,7 @@ watch(() => props.isFocused, (isFocused) => {
     return;
   }
   setTimeout(() => {
-    fitAddon?.fit();
+    fit();
     terminal?.focus();
   }, 0);
 });
@@ -445,7 +479,7 @@ watch(() => props.isVisible, (isVisible) => {
 
   attachRenderer();
   setTimeout(() => {
-    fitAddon?.fit();
+    fit();
     if (props.isFocused) {
       terminal?.focus();
     }
@@ -495,6 +529,10 @@ function writeInput(data: string) {
 }
 
 function fit() {
+  if (isAssistGuest.value) {
+    applyRemoteSize();
+    return;
+  }
   fitAddon?.fit();
 }
 
@@ -837,6 +875,10 @@ onMounted(() => {
     if (!props.isVisible) {
       return;
     }
+    if (isAssistGuest.value) {
+      applyRemoteSize();
+      return;
+    }
     fitAddon?.fit();
     if (!ptyId.value || !terminal) {
       return;
@@ -1062,6 +1104,7 @@ onMounted(() => {
         unlistenHostKeyMismatch?.();
         unlistenSerialConnected?.();
         unlistenZmodem?.();
+        unlistenAssistState?.();
         return;
       }
 
@@ -1094,6 +1137,25 @@ onMounted(() => {
             const cwd = session.cwd ?? window.getStartupDir?.() ?? undefined;
             await startLocalSession(newId, cols, rows, cwd);
             break;
+          case "assist": {
+            assistGuest.value = { state: "handshake", role: "viewer" };
+            terminal.writeln(t("assist.guestJoining"));
+            unlistenAssistState?.();
+            unlistenAssistState = await listen<AssistGuestView & { id: string }>(`assist-client-state:${newId}`, (event) => {
+              assistGuest.value = event.payload;
+              applyRemoteSize();
+              if (terminal) {
+                terminal.options.disableStdin = event.payload.role !== "controller";
+              }
+            });
+            const joined = await invoke<{ fingerprint: string }>("assist_join", {
+              id: newId,
+              code: session.assistConfig.code,
+              displayName: session.assistConfig.displayName ?? null,
+            });
+            terminal.writeln(t("assist.guestJoined", { fingerprint: joined.fingerprint }));
+            break;
+          }
         }
       } catch (error) {
         if (disposed || !terminal) {
@@ -1268,7 +1330,34 @@ async function handleCancelZmodem() {
       backgroundColor: effectiveSettings.theme.background,
     }"
   >
-    <div ref="terminalRootRef" :style="{ flex: 1, minHeight: 0 }" />
+    <div v-if="isAssistGuest && assistGuest" class="assist-guest-bar" :class="assistGuest.role === 'controller' ? 'controlling' : assistGuest.state">
+      <span class="assist-guest-label">
+        {{ $t('assist.guestBanner', { host: assistGuest.hostLabel || '…' }) }}
+        <span v-if="assistGuest.fingerprint" class="assist-guest-fingerprint">{{ assistGuest.fingerprint }}</span>
+      </span>
+      <span class="assist-guest-status">
+        <template v-if="assistGuest.state === 'handshake'">{{ $t('assist.guestStateHandshake') }}</template>
+        <template v-else-if="assistGuest.state === 'pending_approval'">{{ $t('assist.guestStatePending') }}</template>
+        <template v-else-if="assistGuest.state === 'denied'">{{ $t('assist.guestStateDenied') }}</template>
+        <template v-else-if="assistGuest.state === 'ended'">{{ $t('assist.guestStateEnded', { reason: assistGuest.reason || '' }) }}</template>
+        <template v-else-if="assistGuest.role === 'controller'">{{ $t('assist.guestStateControl') }}</template>
+        <template v-else>{{ $t('assist.guestStateView') }}</template>
+      </span>
+      <span class="assist-guest-spacer" />
+      <button
+        v-if="assistGuest.state === 'active' && assistGuest.role !== 'controller' && assistGuest.controlPolicy !== 'view_only'"
+        type="button"
+        class="assist-guest-btn"
+        @click="requestAssistControl"
+      >{{ $t('assist.guestRequestControl') }}</button>
+      <button
+        v-if="assistGuest.state === 'active' && assistGuest.role === 'controller'"
+        type="button"
+        class="assist-guest-btn"
+        @click="releaseAssistControl"
+      >{{ $t('assist.guestReleaseControl') }}</button>
+    </div>
+    <div ref="terminalRootRef" :style="{ flex: 1, minHeight: 0, overflow: isAssistGuest ? 'auto' : undefined }" />
 
     <div v-if="zmodemTransfer" class="zmodem-transfer-bar" :class="zmodemTransfer.status">
       <input ref="zmodemFileInput" type="file" hidden @change="handleZmodemFileSelected">
@@ -1411,6 +1500,23 @@ async function handleCancelZmodem() {
 </template>
 
 <style scoped>
+.assist-guest-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  background: rgba(47, 111, 208, 0.18);
+  border-bottom: 1px solid rgba(47, 111, 208, 0.45);
+}
+.assist-guest-bar.controlling { background: rgba(122, 51, 56, 0.25); border-bottom-color: rgba(255, 139, 143, 0.5); }
+.assist-guest-bar.pending_approval { background: rgba(138, 106, 47, 0.25); }
+.assist-guest-bar.denied, .assist-guest-bar.ended { background: rgba(92, 43, 46, 0.35); }
+.assist-guest-label { font-weight: 600; }
+.assist-guest-fingerprint { margin-left: 6px; font-family: ui-monospace, Consolas, monospace; font-weight: 400; opacity: .75; }
+.assist-guest-status { opacity: .85; }
+.assist-guest-spacer { flex: 1; }
+.assist-guest-btn { padding: 2px 10px; font-size: 12px; color: inherit; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.25); border-radius: 4px; cursor: pointer; }
 .reconnect-status-bar {
   position: absolute;
   bottom: 0;

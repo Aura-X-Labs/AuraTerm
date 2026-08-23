@@ -34,7 +34,6 @@ const CONFIRMATION_INFO: &[u8] = b"ConfirmationKeys";
 pub const SHARE_LEN: usize = 65;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Role::A is the guest side (design Phase 4).
 pub enum Role {
     /// The party that sends its share first (the Remote Assist guest).
     A,
@@ -172,11 +171,6 @@ impl Spake2 {
             id_a: id_a.to_vec(),
             id_b: id_b.to_vec(),
         })
-    }
-
-    #[allow(dead_code)]
-    pub fn role(&self) -> Role {
-        self.role
     }
 
     /// Our public share (`pA` or `pB`), uncompressed SEC1.

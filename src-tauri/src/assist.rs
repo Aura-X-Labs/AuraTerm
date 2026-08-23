@@ -16,7 +16,6 @@ use zeroize::Zeroizing;
 
 /// No look-alike glyphs; identical to the device-enrollment user code.
 pub const CODE_ALPHABET: &[u8; 28] = b"BCDFGHJKLMNPQRSTVWXZ23456789";
-#[allow(dead_code)] // guest-side code parsing (design Phase 4)
 pub const ROUTE_LEN: usize = 4;
 pub const SECRET_LEN: usize = 8;
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -27,14 +26,13 @@ const HOST_IDENTITY_PREFIX: &str = "auraxlab-assist-host|";
 const SESSION_KEY_INFO_PREFIX: &str = "auraxlab-assist|e2ee-v1|";
 const FINGERPRINT_LABEL: &[u8] = b"auraxlab-assist-sas|";
 
-#[allow(dead_code)] // guest side (design Phase 4)
 pub struct AssistCode {
     pub route: String,
     pub secret: Zeroizing<String>,
 }
 
 impl AssistCode {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn formatted(&self) -> String {
         format_code(&self.route, &self.secret)
     }
@@ -56,7 +54,6 @@ pub fn format_code(route: &str, secret: &str) -> String {
 
 /// Normalise user input: a bare code, a code with any separators, or an
 /// assist link (`https://auraxlab.com/assist#CODE`). Case-insensitive.
-#[allow(dead_code)] // guest side (design Phase 4)
 pub fn parse_code(input: &str) -> Result<AssistCode, String> {
     let raw = input.trim();
     let raw = match raw.rfind('#') {
@@ -104,7 +101,6 @@ pub fn host_pake(w: &[u8; 32], assist_id: &str, connection_id: &str) -> Result<S
 }
 
 /// Start the guest (role A) side of the handshake.
-#[allow(dead_code)] // guest side (design Phase 4)
 pub fn guest_pake(w: &[u8; 32], assist_id: &str, connection_id: &str) -> Result<Spake2, String> {
     Spake2::new(Role::A, w, &guest_identity(assist_id, connection_id), &host_identity(assist_id, connection_id))
         .map_err(|e| e.to_string())
