@@ -7,9 +7,12 @@
   - 敲门审批：访客加入或申请控制时弹出确认（允许查看 / 允许控制 / 拒绝；60 秒不处理视为拒绝）；控制权带 fence，撤销即失效；`Ctrl/Cmd+Shift+Esc` 一键收回所有访客控制权；关闭被协助标签页即结束协助（跟随模式则自动切换）
   - 状态栏胶囊新增「协助·等待加入 / N 人观看 / N 人控制」状态，远端键入沿用既有提示
 - **远程协助——访客侧**：「云服务 ▸ 加入远程协助…」/ 命令面板「加入远程协助」输入协助码或链接，即在新标签页（`assist` 类型）中接入对方 AuraTerm 的终端：无需账户，经 AuraXLab 取票、WSS 中继、SPAKE2 互证并建立端到端加密；标签页顶部横幅显示主机名/会话指纹/状态（验证中 / 等待批准 / 只读 / 控制中 / 已结束），可申请或放弃控制；只读时键入在本机丢弃，控制态键入以带 fence 的密文 `INPUT` 送达主机；终端跟随主机的 cols/rows（本地不 fit，容器内滚动）；访客标签页不进入工作区恢复、不可被再次共享
+- **远程协助——续期与短链接**：对话框显示「会话将在 h:mm:ss 后自动结束」（默认 4 小时）并可「延长 1 小时」（服务端记录 `assist.extended`）；复制的链接改为短形式 `https://auraxlab.com/s#码`
 - **终端尺寸转发**：前端每次 fit 后上报当前 cols/rows，Cloud Console 观看者与远程协助访客收到 `RESIZE` 并按主机真实网格渲染（取代原先写死的 80×24）
 
 ### 内部
+- `assist_extend` 命令 + 主机测试（进程内假 AuraXLab 应答 `/extend`，校验截止时间更新与范围钳制）
+- `cargo audit`：3 项均为传递依赖——`quick-xml 0.38`（经 `plist` ← `tauri-utils`，构建期配置解析，RUSTSEC-2026-0194/0195，需上游升到 0.41）、`rsa 0.10.0-rc`（经 `russh`，RUSTSEC-2023-0071 Marvin，无修复版本）；其余为 gtk-rs GTK3 绑定"不再维护"类告警（Tauri Linux 依赖）
 - 新增 `pake.rs`（SPAKE2-P256，RFC 向量 + 跨语言 fixture 锁定）、`assist.rs`、`assist_host.rs`；E2EE 信封抽为 `e2ee.rs::PeerCipher`（方向标签进 AAD）
 - 新增 `assist_client.rs`（访客端：join → 中继 → SPAKE2 → E2EE → 输出/状态事件；`assist_join/write_assist_input/assist_request_control/assist_release_control/close_assist_session`）
 - `cargo test` 新增访客端集成测试（进程内假 AuraXLab + 假 relay/主机：握手、指纹一致、HELLO、只读丢弃输入、申请控制→授予→带 fence 输入；错码在确认前被识别且不发送确认）
