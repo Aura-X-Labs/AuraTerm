@@ -100,6 +100,9 @@ pub(crate) struct AssistHost {
     join_expires_at: SystemTime,
     join_url_base: String,
     created_at: SystemTime,
+    /// Server-side lifetime cap (`max_duration_seconds` from creation);
+    /// `assist_extend` pushes it out.
+    max_duration_seconds: u64,
     locked: bool,
 }
 
@@ -145,6 +148,7 @@ impl AssistHost {
             join_expires_at: system_time_seconds(Some(self.join_expires_at)).unwrap_or(0),
             join_open: now < self.join_expires_at && (!self.policy.single_use || self.guests.is_empty()),
             created_at: system_time_seconds(Some(self.created_at)).unwrap_or(0),
+            expires_at: system_time_seconds(Some(self.created_at + Duration::from_secs(self.max_duration_seconds))).unwrap_or(0),
             failed_attempts: self.failed_attempts,
             fence: self.fence,
             locked: self.locked,
@@ -181,6 +185,8 @@ pub struct AssistStatusView {
     pub join_expires_at: u64,
     pub join_open: bool,
     pub created_at: u64,
+    /// When the server will end the session unless extended.
+    pub expires_at: u64,
     pub failed_attempts: u32,
     pub fence: u64,
     pub locked: bool,
@@ -205,7 +211,21 @@ struct CreateResponse {
     join_expires_at: Option<String>,
     #[serde(default)]
     join_url_base: Option<String>,
+    #[serde(default)]
+    max_duration_seconds: Option<u64>,
 }
+
+#[derive(Deserialize)]
+struct ExtendResponse {
+    #[serde(default)]
+    max_duration_seconds: Option<u64>,
+}
+
+/// Default lifetime when the server does not say (matches
+/// `ConsoleDefaults.assist_max_duration`).
+const DEFAULT_MAX_DURATION_SECS: u64 = 4 * 3600;
+/// One press of "extend" in the dialog.
+pub const EXTEND_STEP_SECS: u64 = 3600;
 
 fn now_secs() -> u64 {
     system_time_seconds(Some(SystemTime::now())).unwrap_or(0)
@@ -413,7 +433,8 @@ pub async fn assist_start(
         failed_attempts: 0,
         fence: 0,
         join_expires_at,
-        join_url_base: created.join_url_base.unwrap_or_else(|| "https://auraxlab.com/assist".to_string()),
+        join_url_base: created.join_url_base.unwrap_or_else(|| "https://auraxlab.com/s".to_string()),
+        max_duration_seconds: created.max_duration_seconds.unwrap_or(DEFAULT_MAX_DURATION_SECS),
         created_at: SystemTime::now(),
         locked: false,
     };
@@ -599,6 +620,39 @@ pub async fn assist_switch_session(
     }
     let _ = app.emit("assist-changed", ());
     Ok(())
+}
+
+/// Extend the server-side lifetime cap by `seconds` (default one hour)
+/// counted from now; the server records `assist.extended`.
+#[tauri::command]
+pub async fn assist_extend(app: AppHandle, state: State<'_, CloudBridgeState>, seconds: Option<u64>) -> Result<u64, String> {
+    extend_assist(&state.client, &state.inner, &app, seconds.unwrap_or(EXTEND_STEP_SECS)).await
+}
+
+async fn extend_assist<R: tauri::Runtime>(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner>>, app: &AppHandle<R>, seconds: u64) -> Result<u64, String> {
+    let seconds = seconds.clamp(60, 4 * 3600);
+    let device = device_of(inner)?;
+    let assist_id = {
+        let guard = inner.lock().map_err(|e| e.to_string())?;
+        guard.assist.as_ref().map(|a| a.assist_id.clone()).ok_or_else(|| "No remote assist session is running.".to_string())?
+    };
+    let response = device_post(client, &device, &format!("/assist/sessions/{assist_id}/extend"), json!({"seconds": seconds})).await?;
+    let extended: ExtendResponse = json_response(response).await?;
+    let mut guard = inner.lock().map_err(|e| e.to_string())?;
+    let Some(assist) = guard.assist.as_mut() else {
+        return Err("No remote assist session is running.".into());
+    };
+    if let Some(total) = extended.max_duration_seconds {
+        assist.max_duration_seconds = total;
+    } else {
+        // Server did not echo the cap: mirror its rule (elapsed + seconds).
+        let elapsed = SystemTime::now().duration_since(assist.created_at).unwrap_or_default().as_secs();
+        assist.max_duration_seconds = elapsed + seconds;
+    }
+    let expires_at = system_time_seconds(Some(assist.created_at + Duration::from_secs(assist.max_duration_seconds))).unwrap_or(0);
+    drop(guard);
+    let _ = app.emit("assist-changed", ());
+    Ok(expires_at)
 }
 
 #[tauri::command]
@@ -1252,6 +1306,11 @@ mod tests {
     const LOCAL_ID: &str = "tab-1";
 
     fn harness(policy: ControlPolicy, approval_required: bool) -> Harness {
+        // Unroutable base URL: event reports fail fast and silently.
+        harness_at(policy, approval_required, "http://127.0.0.1:9")
+    }
+
+    fn harness_at(policy: ControlPolicy, approval_required: bool, base_url: &str) -> Harness {
         let hub = Arc::new(TerminalEventHub::new());
         let written = Arc::new(Mutex::new(Vec::new()));
         let port: Arc<dyn SharedSessionPort> = Arc::new(FakePort {
@@ -1259,8 +1318,7 @@ mod tests {
             written: Arc::clone(&written),
         });
         let state = CloudBridgeState::new(Arc::clone(&port));
-        // Unroutable base URL: event reports fail fast and silently.
-        let outbound = install_fake_device(&state.inner, "http://127.0.0.1:9");
+        let outbound = install_fake_device(&state.inner, base_url);
         let secret = assist::generate_secret();
         let w = assist::derive_w(&secret, ASSIST_ID);
         let output_notify = Arc::new(tokio::sync::Notify::new());
@@ -1289,7 +1347,8 @@ mod tests {
             failed_attempts: 0,
             fence: 0,
             join_expires_at: SystemTime::now() + Duration::from_secs(600),
-            join_url_base: "https://auraxlab.com/assist".into(),
+            join_url_base: "https://auraxlab.com/s".into(),
+            max_duration_seconds: DEFAULT_MAX_DURATION_SECS,
             created_at: SystemTime::now(),
             locked: false,
         });
@@ -1530,5 +1589,49 @@ mod tests {
         assert_eq!(decode_hex("410d0a").unwrap(), b"A\r\n");
         assert!(decode_hex("41f").is_err());
         assert!(decode_hex("zz").is_err());
+    }
+
+    #[test]
+    fn extend_pushes_the_server_deadline_out() {
+        // Fake AuraXLab answering the extend call like the real coordinator
+        // (max_duration = elapsed + seconds) and rejecting other paths.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_by_server = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
+                seen_by_server.lock().unwrap().push((request.url().to_string(), body.clone()));
+                let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                let response = if request.url().ends_with("/assist/sessions/assist-test-1/extend") {
+                    let seconds = payload["seconds"].as_u64().unwrap_or(0);
+                    tiny_http::Response::from_string(json!({"assist_id": ASSIST_ID, "max_duration_seconds": 5 + seconds}).to_string()).with_status_code(200)
+                } else {
+                    tiny_http::Response::from_string("{}").with_status_code(404)
+                };
+                let _ = request.respond(response.with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
+            }
+        });
+        tauri::async_runtime::block_on(async {
+            let h = harness_at(ControlPolicy::OnRequest, false, &base_url);
+            let before = h.state.inner.lock().unwrap().assist.as_ref().unwrap().status_view();
+            assert_eq!(before.expires_at, before.created_at + DEFAULT_MAX_DURATION_SECS);
+            let handle = h.app.handle().clone();
+            let deadline = extend_assist(&h.state.client, &h.state.inner, &handle, 3600).await.expect("extend succeeds");
+            let after = h.state.inner.lock().unwrap().assist.as_ref().unwrap().status_view();
+            assert_eq!(deadline, after.expires_at);
+            assert_eq!(after.expires_at, after.created_at + 5 + 3600);
+            {
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.len(), 1);
+                assert!(seen[0].0.ends_with("/extend"), "{}", seen[0].0);
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&seen[0].1).unwrap()["seconds"], 3600);
+            }
+            // Out-of-range requests are clamped, never rejected locally.
+            let deadline = extend_assist(&h.state.client, &h.state.inner, &handle, 10).await.expect("clamped extend");
+            assert_eq!(deadline, after.created_at + 5 + 60);
+        });
     }
 }

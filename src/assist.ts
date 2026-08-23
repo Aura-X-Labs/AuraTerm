@@ -37,6 +37,8 @@ export interface AssistStatus {
   joinExpiresAt: number;
   joinOpen: boolean;
   createdAt: number;
+  /** Server-side end of the session unless extended (unix seconds). */
+  expiresAt: number;
   failedAttempts: number;
   fence: number;
   locked: boolean;
@@ -105,6 +107,11 @@ export function switchAssistSession(localSessionId: string, protocol: AssistProt
 
 export function setAssistFollowActiveTab(follow: boolean): Promise<void> {
   return invoke("assist_set_follow_active_tab", { follow });
+}
+
+/** Push the server-side lifetime cap out by `seconds` (default 1 h) from now; resolves to the new deadline. */
+export function extendAssist(seconds?: number): Promise<number> {
+  return invoke("assist_extend", { seconds: seconds ?? null });
 }
 
 /** Report the fitted terminal grid so cloud viewers/guests render the real size. */

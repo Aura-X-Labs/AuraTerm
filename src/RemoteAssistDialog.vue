@@ -12,6 +12,7 @@ import {
   type AssistGuest,
   type AssistProtocol,
   type AssistStatus,
+  extendAssist,
 } from "./assist";
 import { t } from "./i18n";
 
@@ -44,6 +45,25 @@ const remainingJoin = computed(() => {
   if (!props.status) return 0;
   return Math.max(0, props.status.joinExpiresAt - now.value);
 });
+const remainingSession = computed(() => {
+  if (!props.status) return 0;
+  return Math.max(0, props.status.expiresAt - now.value);
+});
+const extending = ref(false);
+
+async function handleExtend() {
+  if (extending.value) return;
+  extending.value = true;
+  try {
+    await extendAssist();
+    note(t("assist.extended"));
+    emit("changed");
+  } catch (error) {
+    note(String(error), true);
+  } finally {
+    extending.value = false;
+  }
+}
 const maskedCode = computed(() => {
   if (!props.status) return "";
   const code = props.status.code;
@@ -58,8 +78,10 @@ function note(text: string, error = false) {
 }
 
 function formatClock(seconds: number): string {
-  const m = Math.floor(seconds / 60);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
+  if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
@@ -242,6 +264,10 @@ onBeforeUnmount(() => {
               <span v-else>{{ t('assist.joinClosed') }}</span>
               <span class="assist-dim">· {{ t('assist.sessionLabel') }}: {{ status.label }} ({{ status.protocol }})</span>
             </div>
+            <div class="assist-code-meta">
+              <span :class="{ 'assist-warning': remainingSession < 600 }">{{ t('assist.sessionEndsIn', { time: formatClock(remainingSession) }) }}</span>
+              <button class="assist-btn assist-btn--inline" type="button" :disabled="extending || status.locked" @click="handleExtend">{{ extending ? t('assist.extending') : t('assist.extend') }}</button>
+            </div>
             <div class="assist-actions">
               <button class="assist-btn" type="button" @click="copy('code')">{{ copied === 'code' ? t('assist.copied') : t('assist.copyCode') }}</button>
               <button class="assist-btn" type="button" @click="copy('link')">{{ copied === 'link' ? t('assist.copied') : t('assist.copyLink') }}</button>
@@ -323,7 +349,8 @@ onBeforeUnmount(() => {
 .assist-code-section { text-align: center; }
 .assist-code { font-family: ui-monospace,Consolas,monospace; font-size: 34px; letter-spacing: .12em; padding: 14px; border: 1px dashed var(--ui-border,#3a3a3a); border-radius: 8px; cursor: pointer; user-select: all; }
 .assist-code.locked { color: #ff8b8f; text-decoration: line-through; }
-.assist-code-meta { margin-top: 6px; font-size: 12px; }
+.assist-code-meta { margin-top: 6px; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.assist-btn--inline { padding: 2px 8px; font-size: 12px; }
 .assist-dim { opacity: .6; }
 .assist-mono { font-family: ui-monospace,Consolas,monospace; font-size: 12px; }
 .assist-guest { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--ui-border,#3a3a3a); }

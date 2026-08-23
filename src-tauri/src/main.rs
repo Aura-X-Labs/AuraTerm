@@ -1210,6 +1210,7 @@ fn main() {
             assist_host::assist_revoke_all_control,
             assist_host::assist_switch_session,
             assist_host::assist_set_follow_active_tab,
+            assist_host::assist_extend,
             assist_client::assist_join,
             assist_client::write_assist_input,
             assist_client::assist_request_control,
