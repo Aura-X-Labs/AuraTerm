@@ -12,8 +12,6 @@
 //! vector plus a cross-language interop fixture shared with the browser
 //! implementation in AuraXLab.
 
-// Consumed by the assist host/guest modules (design Phase 2/4).
-#![allow(dead_code)]
 
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -36,6 +34,7 @@ const CONFIRMATION_INFO: &[u8] = b"ConfirmationKeys";
 pub const SHARE_LEN: usize = 65;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)] // Role::A is the guest side (design Phase 4).
 pub enum Role {
     /// The party that sends its share first (the Remote Assist guest).
     A,
@@ -175,6 +174,7 @@ impl Spake2 {
         })
     }
 
+    #[allow(dead_code)]
     pub fn role(&self) -> Role {
         self.role
     }

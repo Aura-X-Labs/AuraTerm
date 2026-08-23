@@ -20,9 +20,7 @@ use std::sync::{Arc, Mutex};
 /// encrypted by one side can never be replayed back to it as its own output.
 pub const DIRECTION_AGENT: &str = "agent";
 pub const DIRECTION_BROWSER: &str = "browser";
-#[allow(dead_code)] // Remote Assist host/guest modules (design Phase 2/4).
 pub const DIRECTION_HOST: &str = "host";
-#[allow(dead_code)]
 pub const DIRECTION_GUEST: &str = "guest";
 
 #[derive(Clone)]

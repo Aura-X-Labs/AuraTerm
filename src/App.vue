@@ -15,6 +15,18 @@ import TunnelManager from "./TunnelManager.vue";
 import CommandPalette from "./CommandPalette.vue";
 import CloudSyncDialog from "./CloudSyncDialog.vue";
 import AccountDialog from "./AccountDialog.vue";
+import RemoteAssistDialog from "./RemoteAssistDialog.vue";
+import AssistKnockDialog from "./AssistKnockDialog.vue";
+import {
+  assistStatus as fetchAssistStatus,
+  respondAssistJoin,
+  revokeAllAssistControl,
+  setAssistRole,
+  stopAssist,
+  switchAssistSession,
+  type AssistKnock,
+  type AssistStatus,
+} from "./assist";
 import AiAssistantPanel from "./AiAssistantPanel.vue";
 import PromptDialogHost from "./PromptDialogHost.vue";
 import { aiHasApiKey } from "./ai";
@@ -109,6 +121,10 @@ const settings = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const showSettings = ref(false);
 const showCloudSync = ref(false);
 const showAccount = ref(false);
+const showRemoteAssist = ref(false);
+// Remote Assist host state (design docs/plans/remote-assist-design.md §9.3).
+const assistState = ref<AssistStatus | null>(null);
+const assistKnocks = ref<AssistKnock[]>([]);
 // AuraXLab sign-in state drives the Cloud menu (Sign In vs My Account).
 // Refreshed on startup and whenever the account / sync dialogs close.
 const syncView = shallowRef<SyncConfigView | null>(null);
@@ -298,6 +314,7 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleSyncNow,
   handleToggleCloudConsole,
   handleToggleRemoteSend,
+  handleOpenRemoteAssist,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -357,6 +374,12 @@ function handleGlobalKeyDown(event: KeyboardEvent) {
     if (event.shiftKey && normalizedKey === "p") {
       event.preventDefault();
       handleToggleCommandPalette();
+      return;
+    }
+
+    if (event.shiftKey && normalizedKey === "escape" && assistState.value) {
+      event.preventDefault();
+      handleRevokeAllAssistControl();
       return;
     }
 
@@ -560,6 +583,26 @@ onMounted(async () => {
   cleanupFns.push(await listen("cloud-bridge-connected", () => {
     void refreshCloudBridgeStatus().catch(() => {});
   }));
+  // Remote Assist: guest arrivals, role changes and the end of a session
+  // refresh the host view; knocks queue up for the approval dialog.
+  cleanupFns.push(await listen("assist-changed", () => {
+    void refreshAssistState();
+  }));
+  cleanupFns.push(await listen<AssistKnock>("assist-guest-knock", ({ payload }) => {
+    assistKnocks.value = [
+      ...assistKnocks.value.filter((k) => !(k.connectionId === payload.connectionId && k.kind === payload.kind)),
+      payload,
+    ];
+  }));
+  cleanupFns.push(await listen<{ reason: string }>("assist-ended", ({ payload }) => {
+    assistKnocks.value = [];
+    void refreshAssistState();
+    showCloudToast(t("assist.endedToast", { reason: payload.reason }), payload.reason === "locked");
+  }));
+  cleanupFns.push(await listen("assist-locked", () => {
+    showCloudToast(t("assist.lockedToast"), true);
+  }));
+  void refreshAssistState();
 
   await tunnels.registerTunnelListener();
   cleanupFns.push(() => {
@@ -633,10 +676,18 @@ async function refreshCloudBridgeStatus() {
 // link state (online / reconnecting / standby). Peer roles come from the
 // relay's E2EE_INIT frames, so "control" means a controller is attached even
 // while it is not typing. Hidden entirely until the device is bound.
-type CloudPillKind = "control" | "monitor" | "online" | "standby" | "reconnecting" | "offline";
+type CloudPillKind = "control" | "monitor" | "online" | "standby" | "reconnecting" | "offline" | "assist";
 const cloudStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
   const bridge = bridgeStatus.value;
   if (!bridge.enrolled) return null;
+  const assist = assistState.value;
+  if (assist) {
+    const controllers = assist.guests.filter((g) => g.role === "controller").length;
+    const viewers = assist.guests.filter((g) => g.role === "viewer").length;
+    if (controllers > 0) return { kind: "control", text: t("assist.statusControl", { n: controllers }) };
+    if (viewers > 0) return { kind: "assist", text: t("assist.statusViewers", { n: viewers }) };
+    return { kind: "assist", text: t("assist.statusWaiting") };
+  }
   const watchers = bridge.shares.reduce((sum, share) => sum + share.viewerCount, 0);
   if (bridge.shares.some((share) => share.controllerAttached)) {
     return { kind: "control", text: t("cloudShare.statusControl") };
@@ -652,8 +703,73 @@ const cloudStatusPill = computed<{ kind: CloudPillKind; text: string } | null>((
 // Only the main window owns the Cloud Console switch (see
 // handleToggleCloudConsole); child windows show a read-only pill.
 const cloudPillTitle = computed(() => (
-  isMainWindow ? t("cloudShare.statusTooltipToggle") : t("cloudShare.statusTooltip")
+  assistState.value
+    ? t("assist.statusTooltip")
+    : isMainWindow ? t("cloudShare.statusTooltipToggle") : t("cloudShare.statusTooltip")
 ));
+
+// ── Remote Assist host wiring ───────────────────────────────────────────────
+async function refreshAssistState() {
+  try {
+    assistState.value = await fetchAssistStatus();
+  } catch {
+    assistState.value = null;
+  }
+}
+
+const assistSessionChoices = computed(() => tabs.value.map((tab) => ({
+  id: tab.id,
+  protocol: tab.session.protocol,
+  title: tab.title,
+})));
+
+function handleOpenRemoteAssist() {
+  closeOpenMenus();
+  showRemoteAssist.value = true;
+  void refreshAssistState();
+}
+
+function handleCloudPillClick() {
+  if (assistState.value) {
+    handleOpenRemoteAssist();
+  } else {
+    handleToggleCloudConsole();
+  }
+}
+
+function handleAssistKnockDecision(knock: AssistKnock, decision: "allow_view" | "allow_control" | "deny") {
+  assistKnocks.value = assistKnocks.value.filter((k) => k !== knock);
+  const action = knock.kind === "join"
+    ? respondAssistJoin(knock.connectionId, decision)
+    : decision === "allow_control"
+      ? setAssistRole(knock.connectionId, "controller")
+      : Promise.resolve();
+  void action.then(() => refreshAssistState()).catch((error) => showCloudToast(String(error), true));
+}
+
+function handleRevokeAllAssistControl() {
+  if (!assistState.value) return;
+  void revokeAllAssistControl()
+    .then(() => { showCloudToast(t("assist.controlRevokedToast")); return refreshAssistState(); })
+    .catch(() => {});
+}
+
+// "Follow active tab": keep the assisted session on whatever the host looks
+// at. Debounced like auto-share so rapid switching settles first.
+let assistFollowTimer: ReturnType<typeof setTimeout> | null = null;
+watch(activeTabId, (tabId) => {
+  const assist = assistState.value;
+  if (!isMainWindow || !assist || !assist.followActiveTab || !tabId || tabId === assist.localSessionId) return;
+  if (assistFollowTimer) clearTimeout(assistFollowTimer);
+  assistFollowTimer = setTimeout(() => {
+    assistFollowTimer = null;
+    const tab = tabs.value.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    void switchAssistSession(tab.id, tab.session.protocol, tab.title)
+      .then(() => refreshAssistState())
+      .catch(() => {});
+  }, 400);
+});
 
 // ── Auto-share: one switch, the cloud share slot follows the active tab ─────
 // The device holds a single shared-session slot server-side, so auto mode
@@ -1609,6 +1725,11 @@ function handleCloseTab(id: string) {
       .then(() => refreshCloudBridgeStatus())
       .catch(() => {});
   }
+  // Neither may a remote assist session (unless it follows the active tab,
+  // in which case the watcher moves it to the next tab).
+  if (assistState.value?.localSessionId === id && !assistState.value.followActiveTab) {
+    void stopAssist("tab_closed").then(() => refreshAssistState()).catch(() => {});
+  }
 
   if (tabContextMenu.value?.tabId === id) {
     tabContextMenu.value = null;
@@ -1856,6 +1977,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "account", title: auraxlabSignedIn.value ? t("menu.myAccount") : t("menu.signIn"), group: t("palette.groups.app"), keywords: "account login sign in my account traffic bind device cloud console auraxlab enroll", run: () => { showAccount.value = true; } },
     { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor share session rx tx remote view follow active", run: () => handleToggleCloudConsole() },
     { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
+    { id: "remote-assist", title: assistState.value ? t("assist.paletteManage") : t("assist.paletteStart"), group: t("palette.groups.app"), keywords: "remote assist help support code invite guest share screen pair", run: () => handleOpenRemoteAssist() },
+    { id: "remote-assist-revoke", title: t("assist.paletteRevoke"), group: t("palette.groups.app"), keywords: "remote assist revoke control kick stop input", run: () => handleRevokeAllAssistControl() },
     { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
   ];
@@ -2078,6 +2201,10 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               <button class="titlebar-menu-item titlebar-menu-item--checkable" type="button" @click="closeOpenMenus(); handleToggleRemoteSend()">
                 <span class="titlebar-menu-item-check">{{ settings.allowRemoteSend ? '✓' : '' }}</span>
                 <span>{{ $t('menu.allowRemoteSend') }}</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <button class="titlebar-menu-item" type="button" @click="handleOpenRemoteAssist">
+                <span>{{ assistState ? $t('menu.remoteAssistManage') : $t('menu.remoteAssist') }}</span>
               </button>
             </div>
           </div>
@@ -2602,8 +2729,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               class="terminal-status-cloud"
               :class="`cloud-${cloudStatusPill.kind}`"
               :title="cloudPillTitle"
-              :disabled="!isMainWindow"
-              @click="handleToggleCloudConsole"
+              :disabled="!isMainWindow && !assistState"
+              @click="handleCloudPillClick"
             >
               <span class="cloud-status-dot" />
               {{ cloudStatusPill.text }}
@@ -2683,6 +2810,19 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       :platform="osType"
       @close="showAccount = false; void refreshCloudBridgeStatus(); refreshSyncViewSilently()"
       @open-cloud-sync="showAccount = false; showCloudSync = true"
+    />
+    <RemoteAssistDialog
+      v-if="showRemoteAssist"
+      :sessions="assistSessionChoices"
+      :active-session-id="activeTabId"
+      :status="assistState"
+      @close="showRemoteAssist = false"
+      @changed="refreshAssistState"
+    />
+    <AssistKnockDialog
+      :queue="assistKnocks"
+      :allow-control="assistState?.policy.control !== 'view_only'"
+      @decide="handleAssistKnockDecision"
     />
     <AboutDialog v-if="showAbout" @close="showAbout = false" />
 
