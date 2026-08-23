@@ -24,6 +24,7 @@ mod cloud_bridge;
 mod e2ee;
 mod pake;
 mod assist;
+mod assist_host;
 mod connections;
 mod encryption;
 mod keychain;
@@ -881,6 +882,7 @@ fn build_app_menu(
         model.cloud_remote_send_on,
         None::<&str>,
     )?;
+    let remote_assist_item = MenuItem::with_id(app, "menu-remote-assist", l("Remote Assist…", "远程协助…"), true, None::<&str>)?;
 
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
     let command_palette_item = MenuItem::with_id(app, "menu-open-command-palette", l("Command Palette", "命令面板"), true, Some("Cmd+Shift+P"))?;
@@ -946,6 +948,8 @@ fn build_app_menu(
         .separator()
         .item(&cloud_console_item)
         .item(&remote_send_item)
+        .separator()
+        .item(&remote_assist_item)
         .build()?;
     let window_menu = SubmenuBuilder::new(app, l("Window", "窗口"))
         .item(&new_window_item)
@@ -1192,6 +1196,16 @@ fn main() {
             cloud_bridge::cloud_bridge_stop_share,
             cloud_bridge::cloud_bridge_status,
             cloud_bridge::cloud_bridge_set_allow_remote_send,
+            cloud_bridge::cloud_bridge_report_size,
+            assist_host::assist_start,
+            assist_host::assist_stop,
+            assist_host::assist_status,
+            assist_host::assist_respond_join,
+            assist_host::assist_set_role,
+            assist_host::assist_kick,
+            assist_host::assist_revoke_all_control,
+            assist_host::assist_switch_session,
+            assist_host::assist_set_follow_active_tab,
             zmodem::zmodem_start_send,
             zmodem::zmodem_cancel,
             settings::get_settings,

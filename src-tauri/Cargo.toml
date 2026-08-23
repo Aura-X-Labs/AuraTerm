@@ -72,6 +72,9 @@ keyring = { version = "3", features = ["windows-native"] }
 # Lightweight in-process HTTP server for cloud-sync provider integration tests
 # (mock GitHub/Gitee Gist, WebDAV and AuraXLab vault endpoints).
 tiny_http = "0.12"
+# `tauri::test::mock_app()` gives the Remote Assist host handshake test a
+# real AppHandle (events are no-ops without windows).
+tauri = { version = "2.11.5", features = ["test"] }
 
 [profile.release]
 opt-level = 3

@@ -13,6 +13,7 @@ interface UseAppEventListenersOptions {
   handleSyncNow: () => void;
   handleToggleCloudConsole: () => void;
   handleToggleRemoteSend: () => void;
+  handleOpenRemoteAssist: () => void;
   handleNewLocalSessionFromMenu: () => void;
   handleOpenConnectionFromMenu: (protocol: ConnectionProtocol) => void;
   handleCloseActiveTab: () => void;
@@ -38,6 +39,7 @@ export function useAppEventListeners({
   handleSyncNow,
   handleToggleCloudConsole,
   handleToggleRemoteSend,
+  handleOpenRemoteAssist,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -99,6 +101,9 @@ export function useAppEventListeners({
         }),
         listen("menu-toggle-remote-send", () => {
           handleToggleRemoteSend();
+        }),
+        listen("menu-remote-assist", () => {
+          handleOpenRemoteAssist();
         }),
         listen("menu-new-local", () => {
           handleNewLocalSessionFromMenu();

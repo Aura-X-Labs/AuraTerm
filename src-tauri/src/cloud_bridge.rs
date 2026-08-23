@@ -28,20 +28,20 @@ use zeroize::Zeroizing;
 const DEVICE_CONFIG_FILE: &str = "console_device.enc";
 
 #[derive(Clone)]
-struct DeviceConfig {
-    base_url: String,
+pub(crate) struct DeviceConfig {
+    pub(crate) base_url: String,
     account_subject: String,
     /// URL-safe base64 of the Ed25519 private seed (32 bytes). Signs every
     /// proof-of-possession; never leaves the device after enrollment.
     identity_key: String,
     /// URL-safe base64 of the Ed25519 public key uploaded at enrollment.
     identity_public: String,
-    credential: String,
-    device_id: String,
+    pub(crate) credential: String,
+    pub(crate) device_id: String,
     key_version: u32,
-    label: String,
+    pub(crate) label: String,
     boot_id: String,
-    relay_connection: String,
+    pub(crate) relay_connection: String,
     /// kid -> Ed25519 public key bytes (authority verification material).
     authority_keys: HashMap<String, Vec<u8>>,
 }
@@ -78,26 +78,26 @@ struct PendingEnrollment {
     label: String,
 }
 
-const DEFAULT_RX_RING_BYTES: usize = 256 * 1024;
+pub(crate) const DEFAULT_RX_RING_BYTES: usize = 256 * 1024;
 const MAX_RX_RING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_E2EE_SNAPSHOT_BYTES: usize = 20 * 1024;
-const MAX_TX_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_TX_BYTES: usize = 16 * 1024;
 /// Idle mode (no shares): presence ping cadence and how long a share-less
 /// relay connection is kept before downgrading, so a quick unshare/re-share
 /// does not flap the connection.
 const IDLE_PING_INTERVAL_SECS: u64 = 30;
 const IDLE_DOWNGRADE_GRACE_SECS: u64 = 60;
 
-struct RxRing {
-    chunks: VecDeque<(u64, Vec<u8>)>,
+pub(crate) struct RxRing {
+    pub(crate) chunks: VecDeque<(u64, Vec<u8>)>,
     bytes: usize,
     capacity: usize,
     next_seq: u64,
-    delivered_seq: u64,
+    pub(crate) delivered_seq: u64,
 }
 
 impl RxRing {
-    fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             chunks: VecDeque::new(),
             bytes: 0,
@@ -107,7 +107,7 @@ impl RxRing {
         }
     }
 
-    fn push(&mut self, bytes: Vec<u8>) {
+    pub(crate) fn push(&mut self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
@@ -132,7 +132,7 @@ impl RxRing {
         (self.next_seq.saturating_sub(1), bytes)
     }
 
-    fn e2ee_snapshot(&self) -> (u64, Vec<u8>) {
+    pub(crate) fn e2ee_snapshot(&self) -> (u64, Vec<u8>) {
         let (seq, bytes) = self.snapshot();
         let start = bytes.len().saturating_sub(MAX_E2EE_SNAPSHOT_BYTES);
         (seq, bytes[start..].to_vec())
@@ -167,14 +167,19 @@ enum AgentTransport {
 }
 
 #[derive(Default)]
-struct BridgeInner {
-    device: Option<DeviceConfig>,
+pub(crate) struct BridgeInner {
+    pub(crate) device: Option<DeviceConfig>,
     pending: Option<PendingEnrollment>,
     shares: HashMap<String, SharedSession>,
     transport: Option<AgentTransport>,
+    /// Remote Assist host session (at most one per device).
+    pub(crate) assist: Option<crate::assist_host::AssistHost>,
+    /// Last terminal size reported by the UI per local session; snapshots
+    /// and RESIZE frames use it so viewers/guests render the real grid.
+    pub(crate) terminal_sizes: HashMap<String, (u16, u16)>,
     /// The supervisor keeps the agent online while this is true; unbind and
     /// explicit disconnect clear it.
-    want_online: bool,
+    pub(crate) want_online: bool,
     supervisor_running: bool,
     connecting: bool,
     /// Global "Allow Remote Send" gate mirrored from the persisted frontend
@@ -183,10 +188,23 @@ struct BridgeInner {
     allow_remote_send: bool,
 }
 
+impl BridgeInner {
+    /// (cols, rows) for a local session, defaulting to the classic 80x24
+    /// until the UI reports a real fit.
+    pub(crate) fn terminal_size(&self, local_session_id: &str) -> (u16, u16) {
+        self.terminal_sizes.get(local_session_id).copied().unwrap_or((80, 24))
+    }
+
+    /// Any cloud-facing activity that needs the relay link held up.
+    pub(crate) fn has_cloud_sessions(&self) -> bool {
+        !self.shares.is_empty() || self.assist.is_some()
+    }
+}
+
 pub struct CloudBridgeState {
-    port: Arc<dyn SharedSessionPort>,
-    inner: Arc<Mutex<BridgeInner>>,
-    client: reqwest::Client,
+    pub(crate) port: Arc<dyn SharedSessionPort>,
+    pub(crate) inner: Arc<Mutex<BridgeInner>>,
+    pub(crate) client: reqwest::Client,
 }
 
 impl CloudBridgeState {
@@ -248,6 +266,8 @@ pub struct BridgeStatus {
     account_subject: Option<String>,
     fingerprint: Option<String>,
     shares: Vec<ShareView>,
+    /// Remote Assist host session, when one is running.
+    assist: Option<crate::assist_host::AssistStatusView>,
 }
 
 #[derive(Serialize)]
@@ -333,10 +353,10 @@ struct LeaseClaims {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RemoteTxEvent {
-    local_session_id: String,
-    byte_count: usize,
-    fence: u64,
+pub(crate) struct RemoteTxEvent {
+    pub(crate) local_session_id: String,
+    pub(crate) byte_count: usize,
+    pub(crate) fence: u64,
 }
 
 fn device_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -534,7 +554,7 @@ fn verify_input_frame(share: &mut SharedSession, device: &DeviceConfig, frame: &
     Ok((bytes, frame_fence, input_seq))
 }
 
-async fn json_response<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T, String> {
+pub(crate) async fn json_response<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T, String> {
     let status = response.status();
     let body = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -787,7 +807,7 @@ pub async fn cloud_bridge_rotate_credential(app: AppHandle, state: State<'_, Clo
     Ok(())
 }
 
-async fn connect_inner(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, port: Arc<dyn SharedSessionPort>, app: AppHandle) -> Result<(), String> {
+pub(crate) async fn connect_inner(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, port: Arc<dyn SharedSessionPort>, app: AppHandle) -> Result<(), String> {
     // Single-flight: a second caller while a connect is in progress is a
     // no-op instead of racing for the relay connection.
     {
@@ -988,7 +1008,7 @@ async fn idle_presence_ping(client: &reqwest::Client, inner: &Arc<Mutex<BridgeIn
 /// is held up (exponential backoff on failures); with none it is dropped
 /// after a grace period and the agent downgrades to lightweight presence
 /// pings — no data plane, just liveness. One supervisor per app.
-fn ensure_supervisor(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, port: Arc<dyn SharedSessionPort>, app: AppHandle) {
+pub(crate) fn ensure_supervisor(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, port: Arc<dyn SharedSessionPort>, app: AppHandle) {
     {
         let Ok(mut guard) = inner.lock() else { return };
         if guard.supervisor_running {
@@ -1006,7 +1026,7 @@ fn ensure_supervisor(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, po
             let Some((want_online, has_shares, connected)) = inner.lock().ok().map(|guard| {
                 (
                     guard.want_online && guard.device.is_some(),
-                    !guard.shares.is_empty(),
+                    guard.has_cloud_sessions(),
                     guard.device.as_ref().is_some_and(|device| !device.relay_connection.is_empty()),
                 )
             }) else {
@@ -1064,6 +1084,11 @@ async fn process_inbound_frame(
     device: &DeviceConfig,
     mut frame: serde_json::Value,
 ) {
+    // Remote Assist frames (ASSIST_INIT / PAKE_* and anything addressed to
+    // the assist session) are owned by the host module.
+    if crate::assist_host::handle_frame(client, inner, port, app, &frame).await {
+        return;
+    }
     let kind = frame.get("kind").and_then(|value| value.as_str());
     if kind == Some("E2EE_INIT") {
         let Some(cloud_id) = frame.get("session_id").and_then(|v| v.as_str()) else {
@@ -1088,10 +1113,10 @@ async fn process_inbound_frame(
         let ring = inner.lock().ok().and_then(|guard| {
             guard
                 .shares
-                .values()
-                .find_map(|share| (share.cloud_session_id == cloud_id).then(|| Arc::clone(&share.ring)))
+                .iter()
+                .find_map(|(local, share)| (share.cloud_session_id == cloud_id).then(|| (Arc::clone(&share.ring), guard.terminal_size(local))))
         });
-        let Some(ring) = ring else {
+        let Some((ring, (cols, rows))) = ring else {
             return;
         };
         let Ok(proof) = ed25519_sign_b64(
@@ -1116,7 +1141,7 @@ async fn process_inbound_frame(
         }
         let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
         let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
-            "snapshot_seq": seq, "cols": 80, "rows": 24,
+            "snapshot_seq": seq, "cols": cols, "rows": rows,
             "data_hex": encode_hex(&bytes)});
         if send_e2ee_frame(client, inner, cloud_id, connection_id, &peer, &snapshot).await.is_err() {
             return;
@@ -1501,11 +1526,11 @@ pub async fn cloud_bridge_share_session(
     Ok(view)
 }
 
-fn system_time_seconds(value: Option<std::time::SystemTime>) -> Option<u64> {
+pub(crate) fn system_time_seconds(value: Option<std::time::SystemTime>) -> Option<u64> {
     value.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()))
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -1576,8 +1601,9 @@ fn spawn_output_pump(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, lo
             let expected = ring.lock().map(|ring| ring.delivered_seq + 1).unwrap_or(seq);
             if seq != expected {
                 let (snapshot_seq, snapshot_bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
+                let (cols, rows) = inner.lock().map(|g| g.terminal_size(&local_session_id)).unwrap_or((80, 24));
                 let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
-                    "snapshot_seq": snapshot_seq, "cols": 80, "rows": 24,
+                    "snapshot_seq": snapshot_seq, "cols": cols, "rows": rows,
                     "data_hex": encode_hex(&snapshot_bytes)});
                 for (connection_id, peer) in &peers {
                     let _ = send_e2ee_frame(&client, &inner, &cloud_id, connection_id, peer, &snapshot).await;
@@ -1614,8 +1640,9 @@ async fn recover_shares(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>)
         .unwrap_or_default();
     for (local, cloud, ring, peers) in shares {
         let (seq, bytes) = ring.lock().map(|r| r.e2ee_snapshot()).unwrap_or_default();
+        let (cols, rows) = inner.lock().map(|g| g.terminal_size(&local)).unwrap_or((80, 24));
         let snapshot = json!({"kind": "TERMINAL_SNAPSHOT",
-            "snapshot_seq": seq, "cols": 80, "rows": 24,
+            "snapshot_seq": seq, "cols": cols, "rows": rows,
             "data_hex": encode_hex(&bytes)});
         let mut recovered = true;
         for (connection_id, peer) in &peers {
@@ -1627,7 +1654,7 @@ async fn recover_shares(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>)
     }
 }
 
-async fn send_frame(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner>>, session_id: &str, frame: serde_json::Value) -> Result<(), String> {
+pub(crate) async fn send_frame(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner>>, session_id: &str, frame: serde_json::Value) -> Result<(), String> {
     let transport = inner
         .lock()
         .map_err(|e| e.to_string())?
@@ -1684,6 +1711,76 @@ pub async fn cloud_bridge_stop_share(state: State<'_, CloudBridgeState>, local_s
     }
 }
 
+/// The UI reports the fitted terminal grid of a local session. Cloud
+/// Console viewers and Remote Assist guests get a RESIZE frame when it
+/// changes, so they render the same cols/rows as the host instead of a
+/// hard-coded 80x24.
+#[tauri::command]
+pub async fn cloud_bridge_report_size(state: State<'_, CloudBridgeState>, local_session_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
+    let (changed, console_peers, assist_targets) = {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let previous = inner.terminal_sizes.insert(local_session_id.clone(), (cols, rows));
+        let changed = previous != Some((cols, rows));
+        let console_peers = inner
+            .shares
+            .get(&local_session_id)
+            .map(|share| (share.cloud_session_id.clone(), share.peers.clone()))
+            .filter(|_| changed);
+        let assist_targets = inner
+            .assist
+            .as_ref()
+            .filter(|assist| assist.local_session_id == local_session_id && changed)
+            .map(|assist| (assist.assist_id.clone(), assist.active_ciphers()));
+        (changed, console_peers, assist_targets)
+    };
+    if !changed {
+        return Ok(());
+    }
+    let resize = json!({"kind": "RESIZE", "cols": cols, "rows": rows});
+    if let Some((cloud_id, peers)) = console_peers {
+        for (connection_id, peer) in &peers {
+            let _ = send_e2ee_frame(&state.client, &state.inner, &cloud_id, connection_id, peer, &resize).await;
+        }
+    }
+    if let Some((assist_id, guests)) = assist_targets {
+        for (connection_id, cipher) in &guests {
+            let _ = crate::assist_host::send_to_guest(&state.client, &state.inner, &assist_id, connection_id, cipher, &resize).await;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! Seams for in-process host tests: a fake enrolled device and a relay
+    //! transport whose outbound frames land in a channel instead of a socket.
+    use super::*;
+
+    pub(crate) fn install_fake_device(inner: &Arc<Mutex<BridgeInner>>, base_url: &str) -> tokio::sync::mpsc::Receiver<serde_json::Value> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let mut guard = inner.lock().unwrap();
+        guard.device = Some(DeviceConfig {
+            base_url: base_url.to_string(),
+            account_subject: "acc_test".into(),
+            identity_key: String::new(),
+            identity_public: String::new(),
+            credential: "axdev_test".into(),
+            device_id: "device-test".into(),
+            key_version: 1,
+            label: "Test Host".into(),
+            boot_id: "boot-test".into(),
+            relay_connection: "conn-test".into(),
+            authority_keys: HashMap::new(),
+        });
+        guard.transport = Some(AgentTransport::Ws { outbound: tx });
+        guard.want_online = true;
+        rx
+    }
+}
+
 /// Mirror the persisted "Allow Remote Send" setting into the bridge. The
 /// frontend pushes it on startup and on every toggle; until the first push
 /// the bridge keeps its fail-closed default and drops all remote INPUT.
@@ -1713,7 +1810,7 @@ pub fn cloud_bridge_status(state: State<'_, CloudBridgeState>) -> Result<BridgeS
         .collect::<Vec<_>>();
     shares.sort_by(|a, b| a.local_session_id.cmp(&b.local_session_id));
     let connected = inner.device.as_ref().is_some_and(|d| !d.relay_connection.is_empty());
-    let has_shares = !inner.shares.is_empty();
+    let has_shares = inner.has_cloud_sessions();
     Ok(BridgeStatus {
         enrolled: inner.device.is_some(),
         connected,
@@ -1725,6 +1822,7 @@ pub fn cloud_bridge_status(state: State<'_, CloudBridgeState>) -> Result<BridgeS
         account_subject: inner.device.as_ref().map(|d| d.account_subject.clone()),
         fingerprint: inner.device.as_ref().map(|d| sha256_hex(&d.identity_public)),
         shares,
+        assist: inner.assist.as_ref().map(|assist| assist.status_view()),
     })
 }
 

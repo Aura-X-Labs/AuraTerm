@@ -27,6 +27,9 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
   }
 
   function resizeSession(id: string, cols: number, rows: number, session: SessionConfig) {
+    // Cloud Console viewers and Remote Assist guests follow the host's grid;
+    // the bridge only sends RESIZE when the size actually changed.
+    void invoke("cloud_bridge_report_size", { localSessionId: id, cols, rows }).catch(() => {});
     switch (session.protocol) {
       case "ssh":
         return invoke("resize_ssh_pty", { id, cols, rows });

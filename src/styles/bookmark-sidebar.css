@@ -221,6 +221,16 @@
   animation: cloud-status-pulse 1.2s ease-in-out infinite;
 }
 
+/* Remote Assist: a guest session is open (waiting or watching). */
+.terminal-status-cloud.cloud-assist {
+  border-color: var(--app-warning);
+  color: var(--app-warning);
+}
+
+.terminal-status-cloud.cloud-assist .cloud-status-dot {
+  background: var(--app-warning);
+}
+
 @keyframes cloud-status-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
