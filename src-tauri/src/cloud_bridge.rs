@@ -8,13 +8,10 @@
 //! force re-enrollment.
 
 use crate::account::auraxlab_origin;
+use crate::e2ee::{PeerCipher, DIRECTION_AGENT, DIRECTION_BROWSER};
 use crate::encryption;
 use crate::shared_session::{SessionPolicy, SessionProtocol, SharedSessionPort, TxPolicy};
 use crate::terminal_event_hub::{SubscriptionToken, TerminalEvent};
-use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
-    Aes256Gcm, Nonce,
-};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hkdf::Hkdf;
 use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKey};
@@ -157,19 +154,6 @@ struct SharedSession {
     peer_roles: HashMap<String, String>,
     last_fence: u64,
     last_input_seq: u64,
-}
-
-#[derive(Clone)]
-struct PeerCipher {
-    key: [u8; 32],
-    counters: Arc<Mutex<PeerCounters>>,
-    send_lock: Arc<tokio::sync::Mutex<()>>,
-}
-
-#[derive(Default)]
-struct PeerCounters {
-    sent: u64,
-    received: u64,
 }
 
 /// How agent frames reach the relay right now. Hot-swapped on reconnect so
@@ -1182,7 +1166,7 @@ async fn process_inbound_frame(
         let Some(peer) = peer else {
             return;
         };
-        let Ok(decrypted) = decrypt_e2ee_frame(&cloud_id, &connection_id, &peer, &frame) else {
+        let Ok(decrypted) = peer.decrypt(&cloud_id, &connection_id, DIRECTION_BROWSER, &frame) else {
             return;
         };
         frame = decrypted;
@@ -1547,88 +1531,9 @@ fn derive_peer_cipher(session_id: &str, connection_id: &str, peer_public_key: &s
         .expand(info.as_bytes(), &mut key)
         .map_err(|_| "could not derive E2EE key".to_string())?;
     Ok((
-        PeerCipher {
-            key,
-            counters: Arc::new(Mutex::new(PeerCounters::default())),
-            send_lock: Arc::new(tokio::sync::Mutex::new(())),
-        },
+        PeerCipher::new(key),
         URL_SAFE_NO_PAD.encode(agent_public.to_encoded_point(false).as_bytes()),
     ))
-}
-
-fn encrypt_e2ee_frame(
-    session_id: &str,
-    connection_id: &str,
-    direction: &str,
-    peer: &PeerCipher,
-    frame: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let cipher = Aes256Gcm::new_from_slice(&peer.key).map_err(|_| "invalid E2EE key".to_string())?;
-    let mut nonce = [0_u8; 12];
-    rand::thread_rng().fill(&mut nonce);
-    let counter = {
-        let mut counters = peer.counters.lock().map_err(|e| e.to_string())?;
-        counters.sent += 1;
-        counters.sent
-    };
-    let aad = format!("{session_id}|{connection_id}|{direction}|{counter}");
-    let plaintext = serde_json::to_vec(frame).map_err(|e| e.to_string())?;
-    let ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: &plaintext,
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(|_| "E2EE encryption failed".to_string())?;
-    Ok(json!({
-        "kind": "E2EE_FRAME", "connection_id": connection_id,
-        "counter": counter,
-        "nonce": URL_SAFE_NO_PAD.encode(nonce),
-        "ciphertext": URL_SAFE_NO_PAD.encode(ciphertext),
-    }))
-}
-
-fn decrypt_e2ee_frame(session_id: &str, connection_id: &str, peer: &PeerCipher, envelope: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let nonce = URL_SAFE_NO_PAD
-        .decode(envelope.get("nonce").and_then(|v| v.as_str()).ok_or_else(|| "missing E2EE nonce".to_string())?)
-        .map_err(|_| "invalid E2EE nonce".to_string())?;
-    if nonce.len() != 12 {
-        return Err("invalid E2EE nonce length".into());
-    }
-    let ciphertext = URL_SAFE_NO_PAD
-        .decode(
-            envelope
-                .get("ciphertext")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "missing E2EE ciphertext".to_string())?,
-        )
-        .map_err(|_| "invalid E2EE ciphertext".to_string())?;
-    let cipher = Aes256Gcm::new_from_slice(&peer.key).map_err(|_| "invalid E2EE key".to_string())?;
-    let counter = envelope
-        .get("counter")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "missing E2EE counter".to_string())?;
-    {
-        let counters = peer.counters.lock().map_err(|e| e.to_string())?;
-        if counter != counters.received + 1 {
-            return Err("replayed or out-of-order E2EE frame".into());
-        }
-    }
-    let aad = format!("{session_id}|{connection_id}|browser|{counter}");
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: &ciphertext,
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(|_| "E2EE authentication failed".to_string())?;
-    let decoded = serde_json::from_slice(&plaintext).map_err(|_| "invalid E2EE payload".to_string())?;
-    peer.counters.lock().map_err(|e| e.to_string())?.received = counter;
-    Ok(decoded)
 }
 
 async fn send_e2ee_frame(
@@ -1640,7 +1545,7 @@ async fn send_e2ee_frame(
     frame: &serde_json::Value,
 ) -> Result<(), String> {
     let _guard = peer.send_lock.lock().await;
-    let envelope = encrypt_e2ee_frame(session_id, connection_id, "agent", peer, frame)?;
+    let envelope = peer.encrypt(session_id, connection_id, DIRECTION_AGENT, frame)?;
     send_frame(client, inner, session_id, envelope).await
 }
 
@@ -1939,20 +1844,11 @@ mod tests {
         assert_eq!(agent_peer.key, browser_key);
 
         let input = json!({"kind": "INPUT", "data_hex": "410d0a"});
-        let envelope = encrypt_e2ee_frame(
-            "session-1",
-            "connection-1",
-            "browser",
-            &PeerCipher {
-                key: browser_key,
-                counters: Arc::new(Mutex::new(PeerCounters::default())),
-                send_lock: Arc::new(tokio::sync::Mutex::new(())),
-            },
-            &input,
-        )
-        .unwrap();
-        assert_eq!(decrypt_e2ee_frame("session-1", "connection-1", &agent_peer, &envelope).unwrap(), input);
-        assert!(decrypt_e2ee_frame("session-1", "connection-1", &agent_peer, &envelope).is_err());
-        assert!(decrypt_e2ee_frame("session-1", "other-connection", &agent_peer, &envelope).is_err());
+        let envelope = PeerCipher::new(browser_key)
+            .encrypt("session-1", "connection-1", DIRECTION_BROWSER, &input)
+            .unwrap();
+        assert_eq!(agent_peer.decrypt("session-1", "connection-1", DIRECTION_BROWSER, &envelope).unwrap(), input);
+        assert!(agent_peer.decrypt("session-1", "connection-1", DIRECTION_BROWSER, &envelope).is_err());
+        assert!(agent_peer.decrypt("session-1", "other-connection", DIRECTION_BROWSER, &envelope).is_err());
     }
 }
