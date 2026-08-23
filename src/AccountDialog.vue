@@ -6,6 +6,7 @@ import {
   accountState,
   enableConsole,
   pauseConsole,
+  refreshAccount,
   type AuraXLabAccountState,
 } from "./account";
 import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
@@ -15,12 +16,15 @@ const props = defineProps<{ platform: string }>();
 const emit = defineEmits<{ close: []; openCloudSync: [] }>();
 
 const state = ref<AuraXLabAccountState | null>(null);
+const loading = ref(true);
+const refreshingProfile = ref(false);
 const busy = ref(false);
 const message = ref("");
 const isError = ref(false);
 const bindOnLogin = ref(true);
 const deviceLabel = ref("");
 const recoveryPassword = ref("");
+let refreshGeneration = 0;
 
 const signedIn = computed(() => state.value?.signedIn ?? false);
 const consoleReady = computed(() => state.value?.consistency === "consistent");
@@ -48,14 +52,43 @@ function formatBytes(bytes: number): string {
 }
 
 async function refresh() {
+  const generation = ++refreshGeneration;
+  loading.value = true;
   try {
     state.value = await accountState();
   } catch (error) {
     note(String(error), true);
+  } finally {
+    loading.value = false;
+  }
+
+  if (state.value?.signedIn && generation === refreshGeneration) {
+    void refreshProfile(generation);
+  }
+}
+
+async function refreshProfile(generation = refreshGeneration) {
+  if (refreshingProfile.value) return;
+  refreshingProfile.value = true;
+  try {
+    const next = await refreshAccount();
+    if (generation === refreshGeneration) {
+      state.value = next;
+    }
+  } catch (error) {
+    if (generation === refreshGeneration) {
+      note(String(error), true);
+    }
+  } finally {
+    if (generation === refreshGeneration) {
+      refreshingProfile.value = false;
+    }
   }
 }
 
 function onSignedIn(next: AuraXLabAccountState) {
+  refreshGeneration += 1;
+  refreshingProfile.value = false;
   state.value = next;
   note(t("cloudSync.signedIn"));
 }
@@ -65,6 +98,8 @@ async function recoverConsole() {
     note(t("account.passwordRequired"), true);
     return;
   }
+  refreshGeneration += 1;
+  refreshingProfile.value = false;
   busy.value = true;
   try {
     state.value = await enableConsole(
@@ -95,6 +130,8 @@ async function pause() {
 }
 
 async function signOut() {
+  refreshGeneration += 1;
+  refreshingProfile.value = false;
   busy.value = true;
   try {
     state.value = await accountLogout();
@@ -126,7 +163,8 @@ onMounted(() => {
       <main class="account-body">
         <section class="account-section">
           <h3>{{ t('account.statusSection') }}</h3>
-          <div class="account-badges">
+          <p v-if="loading" class="account-hint" role="status">{{ t('account.loading') }}</p>
+          <div v-else class="account-badges">
             <span class="account-badge" :data-on="signedIn">
               {{ signedIn ? t('account.statusSignedIn', { name: state?.username || state?.email || '' }) : t('account.statusNotSignedIn') }}
             </span>
@@ -144,7 +182,10 @@ onMounted(() => {
 
         <section class="account-section">
           <h3>{{ t('account.accountSection') }}</h3>
-          <template v-if="!signedIn">
+          <template v-if="loading">
+            <p class="account-hint" role="status">{{ t('account.loading') }}</p>
+          </template>
+          <template v-else-if="!signedIn">
             <p class="account-hint">{{ t('account.signInIntro') }}</p>
             <AuraxlabAuthForm
               :device-label="deviceLabel || platform"
@@ -180,7 +221,8 @@ onMounted(() => {
             </div>
 
             <h4>{{ t('account.trafficSection') }}</h4>
-            <dl v-if="state?.traffic" class="account-facts">
+            <p v-if="refreshingProfile" class="account-hint" role="status">{{ t('account.refreshing') }}</p>
+            <dl v-else-if="state?.traffic" class="account-facts">
               <dt>{{ t('account.trafficTotal') }}</dt><dd>{{ formatBytes(state.traffic.bytesTotal) }}</dd>
               <dt>{{ t('account.trafficUp') }}</dt><dd>{{ formatBytes(state.traffic.bytesUp) }}</dd>
               <dt>{{ t('account.trafficDown') }}</dt><dd>{{ formatBytes(state.traffic.bytesDown) }}</dd>
@@ -189,6 +231,7 @@ onMounted(() => {
             <p v-else class="account-hint">{{ t('account.trafficUnavailable') }}</p>
 
             <div class="account-actions">
+              <button class="account-btn" type="button" :disabled="busy || refreshingProfile" @click="refreshProfile()">{{ t('account.refresh') }}</button>
               <button class="account-btn" type="button" @click="emit('openCloudSync')">{{ t('account.cloudSyncEntry') }}</button>
               <button class="account-btn" type="button" @click="openExternalUrl('https://auraxlab.com/console')">{{ t('account.openConsole') }}</button>
               <button v-if="state?.console.connected" class="account-btn" type="button" :disabled="busy" @click="pause">{{ t('account.pauseConsole') }}</button>

@@ -1222,6 +1222,7 @@ fn main() {
             cloud_sync::auraxlab_verify_email_code,
             cloud_sync::auraxlab_register,
             account::auraxlab_account_state,
+            account::auraxlab_account_refresh,
             account::auraxlab_account_restore,
             account::auraxlab_account_login,
             account::auraxlab_account_logout,

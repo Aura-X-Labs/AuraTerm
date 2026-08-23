@@ -451,6 +451,8 @@ const en = {
   account: {
     title: "AuraXLab Account",
     subtitle: "One account for Cloud Sync and Cloud Console",
+    loading: "Loading your saved account…",
+    refreshing: "Refreshing account details…",
     statusSection: "Access status",
     statusSync: "Cloud Sync",
     statusConsole: "Cloud Console",
