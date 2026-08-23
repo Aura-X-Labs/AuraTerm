@@ -444,6 +444,8 @@ const en = {
     validEmailRequired: "A valid email address is required",
     enterCode: "Enter the verification code from your email.",
     signedOut: "Signed out.",
+    signInInAccount: "AuraXLab sign-in is managed in the Account center.",
+    openAccount: "Sign in to AuraXLab",
     confirmReplace: "Replace ALL local bookmarks with the cloud copy? This cannot be undone.",
   },
   account: {
@@ -518,6 +520,12 @@ const en = {
     trafficHint:
       "Relay bytes for this account's shared sessions (payload size only — content stays end-to-end encrypted).",
     refresh: "Refresh",
+    deviceOnlyMigration:
+      "A legacy device binding was found. Sign in again to verify ownership before Cloud Console can reconnect.",
+    subjectMismatch:
+      "Cloud Sync and this device belong to different or unverifiable accounts. Cloud Console is offline until you bind it again.",
+    rebindHint: "Enter your account password to verify and bind this device to the signed-in account.",
+    pauseConsole: "Pause Cloud Console",
   },
   cloudShare: {
     rxTx: "Cloud RX/TX ({policy})",

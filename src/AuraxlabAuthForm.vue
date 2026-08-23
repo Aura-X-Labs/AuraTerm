@@ -1,41 +1,29 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import {
-  auraxlabLogin,
   auraxlabRegister,
   auraxlabRequestEmailCode,
   auraxlabVerifyEmailCode,
   validateRegistration,
-  DEFAULT_AURAXLAB_URL,
   SYNC_EMAIL_RE,
   SYNC_MIN_PASSWORD_LENGTH,
-  type SyncConfigView,
 } from "./cloudSync";
+import { accountLogin, type AuraXLabAccountState } from "./account";
 import { t } from "./i18n";
 
 /**
  * AuraXLab sign-in / sign-up form (login + verify-first registration).
- * Shared by the Cloud Sync dialog and the account center; on success the
- * backend selects the AuraXLab provider and the updated config view is
- * emitted so the host dialog can re-hydrate its own state.
  *
- * Hosts can chain an extra step onto the same password entry via `postLogin`
- * (the account center uses it to enroll the device for Cloud Console — one
- * sign-in, two credentials). The callback runs after a successful login and
- * must handle its own errors; the password is never stored and is cleared
- * as soon as the chained step finishes.
+ * Used only by the Account center. The password crosses one coordinated IPC
+ * boundary and is cleared as soon as login completes.
  */
 const props = defineProps<{
-  /** Show an editable server URL field above the login form. */
-  showServer?: boolean;
-  /** Extra step run with the fresh credentials after a successful login. */
-  postLogin?: (credentials: { email: string; password: string }) => Promise<void>;
+  deviceLabel: string;
+  platform: string;
+  enableConsole: boolean;
 }>();
 
-const emit = defineEmits<{ signedIn: [view: SyncConfigView] }>();
-
-/** Server the form talks to; hosts may bind it (`v-model:server-url`). */
-const serverUrl = defineModel<string>("serverUrl", { default: DEFAULT_AURAXLAB_URL });
+const emit = defineEmits<{ signedIn: [state: AuraXLabAccountState] }>();
 
 const email = ref("");
 const password = ref("");
@@ -85,16 +73,16 @@ async function signIn() {
     return;
   }
   await withBusy(async () => {
-    const updated = await auraxlabLogin(serverUrl.value, email.value, password.value);
-    const freshPassword = password.value;
+    const updated = await accountLogin({
+      email: email.value.trim(),
+      password: password.value,
+      deviceLabel: props.deviceLabel,
+      platform: props.platform,
+      enableConsole: props.enableConsole,
+    });
     password.value = "";
     flash(t("cloudSync.signedIn"));
     emit("signedIn", updated);
-    // Chain the host's extra step (e.g. device binding) onto this same
-    // password entry, then drop the secret.
-    if (props.postLogin) {
-      await props.postLogin({ email: email.value.trim(), password: freshPassword });
-    }
   });
 }
 
@@ -105,7 +93,7 @@ async function sendCode() {
     return;
   }
   await withBusy(async () => {
-    const msg = await auraxlabRequestEmailCode(serverUrl.value, email.value.trim());
+    const msg = await auraxlabRequestEmailCode(email.value.trim());
     code.value = "";
     regStep.value = "code";
     flash(msg);
@@ -120,7 +108,6 @@ async function verifyCode() {
   }
   await withBusy(async () => {
     const msg = await auraxlabVerifyEmailCode(
-      serverUrl.value,
       email.value.trim(),
       code.value.trim(),
     );
@@ -139,7 +126,7 @@ async function register() {
     return;
   }
   await withBusy(async () => {
-    const msg = await auraxlabRegister(serverUrl.value, email.value, username.value, password.value);
+    const msg = await auraxlabRegister(email.value, username.value, password.value);
     password.value = "";
     startLogin();
     flash(msg);
@@ -152,10 +139,6 @@ async function register() {
     <!-- Sign in -->
     <template v-if="mode === 'login'">
       <p class="ax-hint">{{ t('cloudSync.loginHint') }}</p>
-      <template v-if="props.showServer">
-        <label>{{ t('account.serverUrl') }}</label>
-        <input v-model="serverUrl" class="ax-input" type="url" autocomplete="off" spellcheck="false" />
-      </template>
       <label>{{ t('cloudSync.email') }}</label>
       <input v-model="email" class="ax-input" type="email" autocomplete="off" placeholder="you@example.com" />
       <label>{{ t('cloudSync.password') }}</label>

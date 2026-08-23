@@ -12,12 +12,6 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type SyncProvider = "" | "github" | "gitee" | "webdav" | "auraxlab";
 
-/**
- * The official AuraXLab server. Pre-filled for users; self-hosters can override it.
- * `VITE_AURAXLAB_URL` overrides this at build time (set by `make run` for local dev).
- */
-export const DEFAULT_AURAXLAB_URL = import.meta.env.VITE_AURAXLAB_URL || "https://auraxlab.com";
-
 export interface GistView {
   tokenSet: boolean;
   gistId: string;
@@ -30,8 +24,8 @@ export interface WebdavView {
 }
 
 export interface AuraxlabView {
-  baseUrl: string;
   username: string;
+  email: string;
   tokenSet: boolean;
 }
 
@@ -71,9 +65,6 @@ export interface SyncSettingsInput {
   webdavUrl: string | null;
   webdavUsername: string | null;
   webdavPassword: string | null;
-  auraxlabBaseUrl: string | null;
-  auraxlabToken: string | null;
-  auraxlabUsername: string | null;
 }
 
 export interface SyncResult {
@@ -124,58 +115,23 @@ export function cloudSyncTestConnection(): Promise<string> {
   return invoke<string>("cloud_sync_test_connection");
 }
 
-export function auraxlabRequestEmailCode(baseUrl: string, email: string): Promise<string> {
-  return invoke<string>("auraxlab_request_email_code", { baseUrl, email });
+export function auraxlabRequestEmailCode(email: string): Promise<string> {
+  return invoke<string>("auraxlab_request_email_code", { email });
 }
 
 export function auraxlabVerifyEmailCode(
-  baseUrl: string,
   email: string,
   code: string,
 ): Promise<string> {
-  return invoke<string>("auraxlab_verify_email_code", { baseUrl, email, code });
+  return invoke<string>("auraxlab_verify_email_code", { email, code });
 }
 
 export function auraxlabRegister(
-  baseUrl: string,
   email: string,
   username: string,
   password: string,
 ): Promise<string> {
-  return invoke<string>("auraxlab_register", { baseUrl, email, username, password });
-}
-
-export function auraxlabLogin(
-  baseUrl: string,
-  email: string,
-  password: string,
-): Promise<SyncConfigView> {
-  return invoke<SyncConfigView>("auraxlab_login", { baseUrl, email, password });
-}
-
-export function auraxlabLogout(): Promise<SyncConfigView> {
-  return invoke<SyncConfigView>("auraxlab_logout");
-}
-
-/** Cloud Console traffic totals for the signed-in account (relay bytes,
- * counted size-only server-side; `null` on servers without the field). */
-export interface AccountTraffic {
-  bytesUp: number;
-  bytesDown: number;
-  bytesTotal: number;
-  sessions: number;
-}
-
-export interface AccountOverview {
-  username: string;
-  email: string;
-  confirmed: boolean;
-  traffic: AccountTraffic | null;
-}
-
-/** Fetch profile + Cloud Console traffic for the "My Account" view. */
-export function auraxlabAccountOverview(): Promise<AccountOverview> {
-  return invoke<AccountOverview>("auraxlab_account_overview");
+  return invoke<string>("auraxlab_register", { email, username, password });
 }
 
 export const PROVIDER_LABELS: Record<Exclude<SyncProvider, "">, string> = {
@@ -236,8 +192,5 @@ export function inputFromView(view: SyncConfigView): SyncSettingsInput {
     webdavUrl: view.webdav.url,
     webdavUsername: view.webdav.username,
     webdavPassword: null,
-    auraxlabBaseUrl: view.auraxlab.baseUrl,
-    auraxlabToken: null,
-    auraxlabUsername: view.auraxlab.username,
   };
 }

@@ -20,12 +20,12 @@ import PromptDialogHost from "./PromptDialogHost.vue";
 import { aiHasApiKey } from "./ai";
 import {
   cloudBridgeStatus,
-  restoreCloudBridge,
   setCloudBridgeAllowRemoteSend,
   shareSessionToCloud,
   stopCloudShare,
   type CloudBridgeStatus,
 } from "./cloudBridge";
+import { restoreAccount } from "./account";
 import { cloudSyncNow, getSyncConfig, type SyncConfigView } from "./cloudSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
@@ -416,10 +416,10 @@ function handleGlobalKeyDown(event: KeyboardEvent) {
 let bridgeStatusTimer: ReturnType<typeof setInterval> | null = null;
 
 onMounted(async () => {
-  // Restore the persisted device identity, then keep the status pill fresh
-  // (the supervisor reconnects in the background; polling only reflects it).
-  void restoreCloudBridge()
-    .catch(() => false)
+  // Restore account credentials together and reconnect only when their stable
+  // account subjects match. Legacy device-only/mismatch states stay offline.
+  void restoreAccount()
+    .catch(() => null)
     .finally(() => void refreshCloudBridgeStatus().catch(() => {}));
   bridgeStatusTimer = setInterval(() => {
     void refreshCloudBridgeStatus()
@@ -2673,7 +2673,11 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     />
 
     <SettingsDialog v-if="showSettings" :initial="settings" @save="handleSaveSettings" @cancel="showSettings = false" />
-    <CloudSyncDialog v-if="showCloudSync" @close="showCloudSync = false; refreshSyncViewSilently()" />
+    <CloudSyncDialog
+      v-if="showCloudSync"
+      @close="showCloudSync = false; refreshSyncViewSilently()"
+      @open-account="showCloudSync = false; showAccount = true"
+    />
     <AccountDialog
       v-if="showAccount"
       :platform="osType"
