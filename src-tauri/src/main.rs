@@ -25,6 +25,7 @@ mod e2ee;
 mod pake;
 mod assist;
 mod assist_host;
+mod assist_client;
 mod connections;
 mod encryption;
 mod keychain;
@@ -883,6 +884,7 @@ fn build_app_menu(
         None::<&str>,
     )?;
     let remote_assist_item = MenuItem::with_id(app, "menu-remote-assist", l("Remote Assist…", "远程协助…"), true, None::<&str>)?;
+    let join_assist_item = MenuItem::with_id(app, "menu-join-assist", l("Join Remote Assist…", "加入远程协助…"), true, None::<&str>)?;
 
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
     let command_palette_item = MenuItem::with_id(app, "menu-open-command-palette", l("Command Palette", "命令面板"), true, Some("Cmd+Shift+P"))?;
@@ -950,6 +952,7 @@ fn build_app_menu(
         .item(&remote_send_item)
         .separator()
         .item(&remote_assist_item)
+        .item(&join_assist_item)
         .build()?;
     let window_menu = SubmenuBuilder::new(app, l("Window", "窗口"))
         .item(&new_window_item)
@@ -1144,6 +1147,7 @@ fn main() {
         .manage(telnet_state)
         .manage(serial_state)
         .manage(cloud_bridge::CloudBridgeState::new(shared_port))
+        .manage(assist_client::AssistClientState::default())
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
         .manage(cloud_sync::SyncState::default())
@@ -1206,6 +1210,11 @@ fn main() {
             assist_host::assist_revoke_all_control,
             assist_host::assist_switch_session,
             assist_host::assist_set_follow_active_tab,
+            assist_client::assist_join,
+            assist_client::write_assist_input,
+            assist_client::assist_request_control,
+            assist_client::assist_release_control,
+            assist_client::close_assist_session,
             zmodem::zmodem_start_send,
             zmodem::zmodem_cancel,
             settings::get_settings,

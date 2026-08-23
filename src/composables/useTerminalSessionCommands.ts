@@ -23,10 +23,16 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
         return invoke("write_serial_input", { id, data });
       case "local":
         return invoke("write_pty_input", { id, data });
+      case "assist":
+        return invoke("write_assist_input", { id, data });
     }
   }
 
   function resizeSession(id: string, cols: number, rows: number, session: SessionConfig) {
+    if (session.protocol === "assist") {
+      // A guest tab follows the host's grid; it never resizes anything.
+      return Promise.resolve();
+    }
     // Cloud Console viewers and Remote Assist guests follow the host's grid;
     // the bridge only sends RESIZE when the size actually changed.
     void invoke("cloud_bridge_report_size", { localSessionId: id, cols, rows }).catch(() => {});
@@ -52,6 +58,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
         return invoke("close_serial_session", { id });
       case "local":
         return invoke("close_pty", { id });
+      case "assist":
+        return invoke("close_assist_session", { id });
     }
   }
 
