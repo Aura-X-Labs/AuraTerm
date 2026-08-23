@@ -38,6 +38,11 @@ p256 = { version = "0.13", features = ["ecdh"] }
 # (ADR #1). Pure-Rust, no C toolchain.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"
+# SPAKE2 (RFC 9382) for Remote Assist: HMAC confirmation MACs, PBKDF2 MHF,
+# constant-time comparison. All pure Rust.
+hmac = "0.12"
+pbkdf2 = "0.12"
+subtle = "2"
 sha2 = "0.10"
 argon2 = "0.5"
 zeroize = { version = "1.6", features = ["derive"] }
