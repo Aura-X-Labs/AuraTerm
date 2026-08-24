@@ -22,7 +22,7 @@
 }
 
 .dialog-content--wide {
-  width: 520px;
+  width: 580px;
   max-width: calc(100vw - 40px);
 }
 
@@ -35,9 +35,10 @@
 
 .protocol-selector {
   display: grid;
-  /* Five categories now; auto-fit keeps them on one row when there is space and
-     wraps cleanly when there is not. */
-  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  /* Five categories now. The minimum is sized so a label like "Network Serial"
+     never wraps inside its own button — the row breaks instead, which reads far
+     better than five cramped two-line cells. */
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
   margin-bottom: 18px;
 }
