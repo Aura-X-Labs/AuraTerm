@@ -644,6 +644,7 @@ const zhCN: Messages = {
   },
   bookmarkManager: {
     title: "书签管理",
+    resizeHint: "拖动调整宽度 · 双击恢复默认",
     searchPlaceholder: "搜索名称、主机、用户或分组…",
     newConnection: "新建",
     scopeAll: "全部",

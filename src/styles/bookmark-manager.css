@@ -13,8 +13,10 @@
 }
 
 .bm-page {
-  width: min(1180px, 94vw);
-  height: min(760px, 88vh);
+  /* Overridden by an inline width once the user drags the edge. */
+  width: min(1440px, 96vw);
+  height: min(820px, 88vh);
+  position: relative;
   background: var(--app-panel-bg);
   border: 1px solid var(--app-border);
   border-radius: 8px;
@@ -24,6 +26,42 @@
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
   font-size: 13px;
+}
+
+/* Drag the right edge to widen the page; the page stays centred, so the width
+   changes by twice the pointer delta and the edge tracks the cursor. */
+.bm-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 20;
+}
+
+.bm-resize::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  width: 3px;
+  height: 34px;
+  margin-top: -17px;
+  border-radius: 2px;
+  background: var(--app-border-strong);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.bm-resize:hover::after,
+.bm-resize.dragging::after {
+  opacity: 1;
+}
+
+.bm-page.resizing {
+  user-select: none;
 }
 
 /* ------------------------------------------------------------------ header */

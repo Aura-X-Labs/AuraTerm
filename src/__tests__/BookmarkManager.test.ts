@@ -38,6 +38,19 @@ function connection(id: string, group: string | undefined, lastUsed?: number): S
 
 let store: SavedConnection[] = [];
 
+// This jsdom run has no usable localStorage; the page only treats it as a
+// convenience, so back it with a Map to assert what gets remembered.
+const storage = new Map<string, string>();
+Object.defineProperty(window, "localStorage", {
+  configurable: true,
+  value: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => void storage.set(key, value),
+    removeItem: (key: string) => void storage.delete(key),
+    clear: () => storage.clear(),
+  },
+});
+
 function mountManager(bookmarkGroups: string[] = []) {
   return mount(BookmarkManager, {
     props: { bookmarkGroups },
@@ -56,6 +69,7 @@ beforeEach(() => {
     connection("bastion", "Production", 100),
     connection("scratch", undefined),
   ];
+  storage.clear();
   dialogs.confirmDialog.mockResolvedValue(true);
   prompt.promptText.mockResolvedValue("");
   tauri.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -222,6 +236,30 @@ describe("BookmarkManager", () => {
 
     expect(tauri.invoke).toHaveBeenCalledWith("delete_connections", { ids: ["bastion"] });
     expect(wrapper.find(".bm-context-menu").exists()).toBe(false);
+  });
+
+  it("widens on a drag of the edge and remembers the width", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 2000, configurable: true });
+    storage.set("auraterm:bookmark-manager-width", "900");
+
+    const wrapper = mountManager();
+    await flushPromises();
+
+    // Dispatched directly: test-utils cannot set clientX on the event it builds.
+    wrapper.find(".bm-resize").element
+      .dispatchEvent(new MouseEvent("pointerdown", { clientX: 500, bubbles: true }));
+    window.dispatchEvent(new MouseEvent("pointermove", { clientX: 600 }));
+    window.dispatchEvent(new MouseEvent("pointerup"));
+    await flushPromises();
+
+    // Started from the remembered 900px; a centred page widens by twice the
+    // pointer travel, so +100px of drag lands on 1100px. (The inline style
+    // itself uses min(), which jsdom's CSS parser drops, hence asserting the
+    // remembered value instead.)
+    expect(storage.get("auraterm:bookmark-manager-width")).toBe("1100");
+
+    await wrapper.find(".bm-resize").trigger("dblclick");
+    expect(storage.has("auraterm:bookmark-manager-width")).toBe(false);
   });
 
   it("refuses to save while credentials are locked, instead of erasing them", async () => {

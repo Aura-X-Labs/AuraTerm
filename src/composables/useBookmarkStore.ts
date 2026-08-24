@@ -60,7 +60,13 @@ function restoreCollapsedState() {
 }
 
 function persistCollapsedState() {
-  localStorage.setItem(STORAGE_KEY_COLLAPSED, JSON.stringify([...collapsedGroups.value]));
+  // Storage can be unavailable (blocked site data, private windows): folding
+  // state is a convenience, never worth throwing into a click handler over.
+  try {
+    localStorage.setItem(STORAGE_KEY_COLLAPSED, JSON.stringify([...collapsedGroups.value]));
+  } catch (error) {
+    console.error("Failed to persist collapsed state", error);
+  }
 }
 
 function toggleGroup(path: string) {

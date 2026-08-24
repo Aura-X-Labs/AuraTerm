@@ -656,6 +656,7 @@ const en = {
   },
   bookmarkManager: {
     title: "Bookmark Manager",
+    resizeHint: "Drag to change the width · double-click to reset",
     searchPlaceholder: "Search name, host, user or group…",
     newConnection: "New",
     scopeAll: "All",
