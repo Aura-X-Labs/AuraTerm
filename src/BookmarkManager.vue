@@ -64,7 +64,79 @@ const draggingIds = ref<string[]>([]);
 const dropTarget = ref<string | null>(null);
 let statusTimer: number | undefined;
 
+/* ------------------------------------------------------------- page width */
+
+const WIDTH_STORAGE_KEY = "auraterm:bookmark-manager-width";
+const MIN_PAGE_WIDTH = 760;
+/** Widest the page may get, leaving the overlay's padding visible. */
+function maxPageWidth() {
+  return Math.max(MIN_PAGE_WIDTH, window.innerWidth - 48);
+}
+
+/** User-chosen width; null means the stylesheet default. */
+const pageWidth = ref<number | null>(null);
+const resizing = ref(false);
+
+const pageStyle = computed(() => (pageWidth.value === null
+  ? undefined
+  : { width: `min(${pageWidth.value}px, calc(100vw - 48px))` }));
+
+/** Remembered width, if storage is readable — it is only a convenience. */
+function restoreWidth() {
+  try {
+    const saved = Number(localStorage.getItem(WIDTH_STORAGE_KEY));
+    if (Number.isFinite(saved) && saved >= MIN_PAGE_WIDTH) {
+      pageWidth.value = saved;
+    }
+  } catch (error) {
+    console.error("Failed to read the stored width", error);
+  }
+}
+
+function storeWidth(width: number | null) {
+  try {
+    if (width === null) {
+      localStorage.removeItem(WIDTH_STORAGE_KEY);
+    } else {
+      localStorage.setItem(WIDTH_STORAGE_KEY, String(width));
+    }
+  } catch (error) {
+    console.error("Failed to persist the width", error);
+  }
+}
+
+function startResize(event: PointerEvent) {
+  const startX = event.clientX;
+  const measured = (event.currentTarget as HTMLElement).parentElement?.getBoundingClientRect().width ?? 0;
+  const startWidth = measured || pageWidth.value || MIN_PAGE_WIDTH;
+  resizing.value = true;
+  (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+
+  const onMove = (move: PointerEvent) => {
+    // Centred page: the edge follows the cursor when width grows by 2 × delta.
+    const next = startWidth + (move.clientX - startX) * 2;
+    pageWidth.value = Math.round(Math.min(Math.max(next, MIN_PAGE_WIDTH), maxPageWidth()));
+  };
+  const onUp = () => {
+    resizing.value = false;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    storeWidth(pageWidth.value);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+
+/** Double-click the handle to go back to the default width. */
+function resetWidth() {
+  pageWidth.value = null;
+  storeWidth(null);
+}
+
 onMounted(() => {
+  restoreWidth();
   void store.refresh();
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("mousedown", handleWindowMouseDown);
@@ -614,7 +686,17 @@ watch(statusMessage, (value) => {
 
 <template>
   <div class="bm-overlay" @click.self="emit('close')">
-    <div class="bm-page">
+    <div class="bm-page" :class="{ resizing }" :style="pageStyle">
+
+      <div
+        class="bm-resize"
+        :class="{ dragging: resizing }"
+        role="separator"
+        aria-orientation="vertical"
+        :title="$t('bookmarkManager.resizeHint')"
+        @pointerdown.prevent="startResize"
+        @dblclick="resetWidth"
+      />
 
       <header class="bm-head">
         <span class="bm-title">🔖 {{ $t('bookmarkManager.title') }}</span>
