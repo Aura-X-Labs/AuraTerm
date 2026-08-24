@@ -887,6 +887,7 @@ fn build_app_menu(
     let join_assist_item = MenuItem::with_id(app, "menu-join-assist", l("Join Remote Assist…", "加入远程协助…"), true, None::<&str>)?;
 
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
+    let bookmark_manager_item = MenuItem::with_id(app, "menu-bookmark-manager", l("Bookmark Manager…", "书签管理…"), true, None::<&str>)?;
     let command_palette_item = MenuItem::with_id(app, "menu-open-command-palette", l("Command Palette", "命令面板"), true, Some("Cmd+Shift+P"))?;
     let toggle_remote_files_item = MenuItem::with_id(app, "menu-toggle-remote-files", l("Toggle Remote Files", "切换远程文件"), true, None::<&str>)?;
     let toggle_tunnels_item = MenuItem::with_id(app, "menu-toggle-tunnels", l("Port Forwarding…", "端口转发…"), true, None::<&str>)?;
@@ -930,6 +931,7 @@ fn build_app_menu(
         .build()?;
     let view_menu = SubmenuBuilder::new(app, l("View", "视图"))
         .item(&toggle_bookmarks_item)
+        .item(&bookmark_manager_item)
         .item(&command_palette_item)
         .separator()
         .item(&increase_font_size_item)

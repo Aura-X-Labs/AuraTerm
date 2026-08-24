@@ -19,6 +19,7 @@ interface UseAppEventListenersOptions {
   handleOpenConnectionFromMenu: (protocol: ConnectionProtocol) => void;
   handleCloseActiveTab: () => void;
   handleToggleBookmarks: () => void;
+  handleOpenBookmarkManager: () => void;
   handleToggleRemoteFileManager: () => void;
   handleToggleTunnelManager: () => void;
   handleToggleCommandPalette: () => void;
@@ -46,6 +47,7 @@ export function useAppEventListeners({
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
   handleToggleBookmarks,
+  handleOpenBookmarkManager,
   handleToggleRemoteFileManager,
   handleToggleTunnelManager,
   handleToggleCommandPalette,
@@ -127,6 +129,9 @@ export function useAppEventListeners({
         }),
         listen("menu-toggle-bookmarks", () => {
           handleToggleBookmarks();
+        }),
+        listen("menu-bookmark-manager", () => {
+          handleOpenBookmarkManager();
         }),
         listen("menu-toggle-remote-files", () => {
           handleToggleRemoteFileManager();

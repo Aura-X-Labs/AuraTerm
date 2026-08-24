@@ -325,6 +325,7 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
   handleToggleBookmarks,
+  handleOpenBookmarkManager,
   handleToggleRemoteFileManager,
   handleToggleTunnelManager,
   handleToggleCommandPalette,
