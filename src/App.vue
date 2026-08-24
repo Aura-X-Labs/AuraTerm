@@ -3134,6 +3134,16 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             <span class="newtab-option-label">Serial</span>
             <span class="newtab-option-desc">Enumerate and connect to a serial device</span>
           </button>
+          <button class="newtab-option-btn" @click="showNewTabMenu = false; openConnect('rfc2217')">
+            <span class="newtab-option-icon">📡</span>
+            <span class="newtab-option-label">Network Serial</span>
+            <span class="newtab-option-desc">Reach a serial port on a device server (RFC 2217)</span>
+          </button>
+          <button class="newtab-option-btn" @click="showNewTabMenu = false; openConnect('raw-tcp')">
+            <span class="newtab-option-icon">⚡</span>
+            <span class="newtab-option-label">Raw TCP</span>
+            <span class="newtab-option-desc">Open a bare byte pipe to a host and port</span>
+          </button>
         </div>
       </div>
     </div>

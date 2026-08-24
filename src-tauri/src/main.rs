@@ -856,6 +856,8 @@ fn build_app_menu(
     let new_ssh_item = MenuItem::with_id(app, "menu-new-ssh", l("SSH", "SSH"), true, None::<&str>)?;
     let new_telnet_item = MenuItem::with_id(app, "menu-new-telnet", l("Telnet", "Telnet"), true, None::<&str>)?;
     let new_serial_item = MenuItem::with_id(app, "menu-new-serial", l("Serial", "串口"), true, None::<&str>)?;
+    let new_rfc2217_item = MenuItem::with_id(app, "menu-new-rfc2217", l("Network Serial", "网络串口"), true, None::<&str>)?;
+    let new_raw_tcp_item = MenuItem::with_id(app, "menu-new-raw-tcp", l("Raw TCP", "裸 TCP"), true, None::<&str>)?;
     let close_tab_item = MenuItem::with_id(app, "menu-close-tab", l("Close Tab", "关闭标签页"), true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "menu-open-settings", l("Settings", "设置"), true, None::<&str>)?;
 
@@ -913,6 +915,8 @@ fn build_app_menu(
         .item(&new_ssh_item)
         .item(&new_telnet_item)
         .item(&new_serial_item)
+        .item(&new_rfc2217_item)
+        .item(&new_raw_tcp_item)
         .build()?;
 
     let file_menu = SubmenuBuilder::new(app, l("File", "文件"))
