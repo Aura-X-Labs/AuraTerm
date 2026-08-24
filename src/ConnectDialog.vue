@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings, type SerialHistoryItem } from "./settings";
 import { buildDefaultLogPath } from "./logging";
-import { isReconnectEnabled, type AutoLoginRule, type ConnectResult, type ConnectionProtocol, type JumpHostConfig, type ReconnectType, type SerialConfig, type SshAuthType } from "./types";
+import { collectGroupPaths } from "./bookmarks";
+import { isReconnectEnabled, type AutoLoginRule, type ConnectResult, type ConnectionProtocol, type JumpHostConfig, type ReconnectType, type SavedConnection, type SerialConfig, type SshAuthType } from "./types";
 import "./ConnectDialog.css";
 
 interface SerialPortInfo {
@@ -86,7 +87,10 @@ const autoLoginRules = ref<AutoLoginRule[]>([]);
 const postConnectCommands = ref("");
 const saveConnection = ref(true);
 const connectionName = ref("");
-const connectionGroup = ref("");
+const groupSelection = ref("");
+const customGroup = ref("");
+const existingGroups = ref<string[]>([]);
+const customGroupInput = ref<HTMLInputElement | null>(null);
 const telnetPort = ref("23");
 const serialPortName = ref(props.lastSerialConfig?.portName ?? "");
 const serialBaudRate = ref(String(props.lastSerialConfig?.baudRate ?? 9600));
@@ -156,6 +160,33 @@ watch(
   },
   { immediate: true },
 );
+
+/** Sentinel `<select>` value that reveals the free-text field for a brand-new group. */
+const NEW_GROUP_OPTION = "__auraterm_new_group__";
+
+/** True when the group name comes from the text field instead of the dropdown. */
+const useCustomGroup = computed(() => existingGroups.value.length === 0 || groupSelection.value === NEW_GROUP_OPTION);
+const connectionGroup = computed(() => (useCustomGroup.value ? customGroup.value : groupSelection.value).trim());
+
+/** Offer the groups already in use by saved connections in the group dropdown. */
+async function loadConnectionGroups() {
+  try {
+    existingGroups.value = collectGroupPaths(await invoke<SavedConnection[]>("get_connections"));
+  } catch (error) {
+    console.error("Failed to load connection groups", error);
+    existingGroups.value = [];
+  }
+}
+
+onMounted(() => {
+  void loadConnectionGroups();
+});
+
+function handleGroupSelectionChange() {
+  if (groupSelection.value === NEW_GROUP_OPTION) {
+    void nextTick(() => customGroupInput.value?.focus());
+  }
+}
 
 async function loadSerialPorts() {
   loadingSerialPorts.value = true;
@@ -610,15 +641,31 @@ function handleSubmit(event: Event) {
               autocorrect="off"
               spellcheck="false"
             >
-            <input
-              v-model="connectionGroup"
-              type="text"
-              class="save-connection-name"
-              :placeholder="$t('connect.groupPlaceholder')"
-              autocapitalize="none"
-              autocorrect="off"
-              spellcheck="false"
-            >
+            <div class="save-connection-group-field">
+              <select
+                v-if="existingGroups.length > 0"
+                v-model="groupSelection"
+                class="save-connection-name"
+                @change="handleGroupSelectionChange"
+              >
+                <option value="">{{ $t('connect.groupUngrouped') }}</option>
+                <optgroup :label="$t('connect.groupExisting')">
+                  <option v-for="group in existingGroups" :key="group" :value="group">{{ group }}</option>
+                </optgroup>
+                <option :value="NEW_GROUP_OPTION">{{ $t('connect.groupNew') }}</option>
+              </select>
+              <input
+                v-if="useCustomGroup"
+                ref="customGroupInput"
+                v-model="customGroup"
+                type="text"
+                class="save-connection-name"
+                :placeholder="$t('connect.groupPlaceholder')"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
+            </div>
           </div>
         </div>
 

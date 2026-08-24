@@ -1,6 +1,15 @@
 ## Unreleased
 
 ### 新增
+- **书签管理页** —— 「View ▸ 书签管理…」/ 命令面板 / 书签栏 ⚙ 按钮打开的全尺寸管理页：左栏分组树（全部 / 最近使用 / 未分组 + 派生分组树，与书签栏共享折叠态）、中栏可排序表格（名称 / 协议 / 目标 / 认证 / 分组 / 最近使用，密码认证以警告色标出）、右栏内嵌书签编辑器（设计见 `docs/plans/bookmark-manager-design.md`）
+  - 多选：点击勾选框、⌘/Ctrl 点击、Shift 范围选、表头全选；选中后底部操作条可批量「移动到分组」（含新建分组）或删除，删除一律二次确认
+  - 键盘：`/` 或 ⌘/Ctrl+F 聚焦搜索，↑↓ 在列表内移动，Enter 连接，Esc 先清空搜索再关闭；双击行连接
+  - 分组维护：左栏「＋ 新建分组」可建立空分组（记入 `settings.json`，随云同步）；分组右键可重命名、新建子分组、解散（书签与子分组提升一级）或连同书签一并删除；把书签行拖到分组上即可移动
+  - 导入导出：导出全部或所选为 AuraTerm JSON（默认不含凭据，另有一项可导出含密码与私钥的版本）；导入自动识别 OpenSSH config / PuTTY `.reg` / AuraTerm 备份，并可指定落点分组
+  - 克隆：批量复制所选书签，连同凭据一起复制
+  - 行右键菜单：连接 / 克隆 / 导出 / 删除；右键已勾选的行则作用于整个选区
+  - 主密码锁定时顶部提示凭据不可见；删除、克隆、导出凭据需要先解锁，而移动分组与重命名只改元数据，锁定状态下照常可用
+- **分组改为下拉选择** —— 新建会话对话框与书签编辑器的分组字段优先列出已有分组（含 `a/b` 这类嵌套路径的中间层级），选「新建分组…」才展开输入框
 - **远程协助（Remote Assist）——主机侧** —— 生成一个 12 位协助码，让对方用浏览器（`auraxlab.com/assist`）或另一台 AuraTerm 查看、并在你允许后控制当前终端会话（设计见 `docs/plans/remote-assist-design.md`）
   - 协助码 `XXXX-XXXX-XXXX`：前 4 位路由段由 AuraXLab 分配，后 8 位秘密段只存在于本机内存；双方用它跑 SPAKE2（RFC 9382，P-256）互相认证并派生端到端加密密钥——服务器与中继无法读取内容、无法冒充任何一方；错误尝试（含收到 `PAKE_B` 后放弃确认的连接）累计 3 次即锁定并结束
   - 「云服务 ▸ 远程协助…」/ 命令面板「远程协助」打开对话框：选择会话或「跟随当前标签页」、控制策略（仅查看 / 访客可申请 / 自动授予）、加入需确认、多人模式（≤3）、有效期 5–60 分钟；运行中显示大号协助码（有人加入后自动遮罩）、复制码/链接、剩余时间、访客列表（昵称/客户端/角色/会话指纹、授予/收回控制、踢出）、结束协助
@@ -10,7 +19,18 @@
 - **远程协助——续期与短链接**：对话框显示「会话将在 h:mm:ss 后自动结束」（默认 4 小时）并可「延长 1 小时」（服务端记录 `assist.extended`）；复制的链接改为短形式 `https://auraxlab.com/s#码`
 - **终端尺寸转发**：前端每次 fit 后上报当前 cols/rows，Cloud Console 观看者与远程协助访客收到 `RESIZE` 并按主机真实网格渲染（取代原先写死的 80×24）
 
+### 修复
+- 书签保存失败现在会弹出原生错误对话框——此前走 `window.alert`，而它在 macOS WebView 中是静默 no-op，保存失败没有任何反馈
+- 书签栏右键删除加二次确认（此前点下即删，无法撤销）
+- 主密码锁定时保存书签会清空已存的密码与私钥——`get_connections` 在锁定态返回的连接不含凭据，再 `save_connection` 写回等于覆盖密文。现在这类保存会被直接拒绝并提示先解锁
+
 ### 内部
+- 新增 `useBookmarkStore`：书签列表、分组折叠态与增删改/批量操作收敛为一份共享状态，书签栏与管理页共用（此前各自 `invoke`，一侧改动另一侧不刷新）
+- `bookmarks.ts` 补齐 `collectGroupPaths` / `filterConnections` / `sortConnections` / `matchesScope` / `renameGroupPath` 等纯函数并纳入单测；`BookmarkEditor` 新增 `embedded` 模式供管理页内嵌复用
+- 新增 Tauri 命令 `delete_connections` / `move_connections` / `rename_group` / `duplicate_connection` / `export_bookmarks`：批量操作一次读写落盘，取代前端逐条调用（主密码模式下每次 `save_connection` 都会用新盐触发一次 Argon2id 派生）；其中 `move_connections` 与 `rename_group` 只改元数据，不触碰凭据库
+- `import_bookmarks` 支持 AuraTerm 导出格式：id 一律重新分配，文件内含凭据且主密码已解锁时一并写回凭据库，否则跳过并回报警告
+- 新增 `bookmarkTransfer.ts`（格式嗅探 / 导出文件名 / 浏览器下载）与 `bookmarkGroups` 设置项（已加入云同步白名单）
+- 新增 `BookmarkManager.test.ts`：挂载管理页覆盖列表渲染、分组筛选、批量删除、拖拽移动分组、分组重命名、空分组创建、导出与双击连接；Rust 侧补 `renamed_group_path` 与导入导出回环单测
 - `assist_extend` 命令 + 主机测试（进程内假 AuraXLab 应答 `/extend`，校验截止时间更新与范围钳制）
 - `cargo audit`：3 项均为传递依赖——`quick-xml 0.38`（经 `plist` ← `tauri-utils`，构建期配置解析，RUSTSEC-2026-0194/0195，需上游升到 0.41）、`rsa 0.10.0-rc`（经 `russh`，RUSTSEC-2023-0071 Marvin，无修复版本）；其余为 gtk-rs GTK3 绑定"不再维护"类告警（Tauri Linux 依赖）
 - 新增 `pake.rs`（SPAKE2-P256，RFC 向量 + 跨语言 fixture 锁定）、`assist.rs`、`assist_host.rs`；E2EE 信封抽为 `e2ee.rs::PeerCipher`（方向标签进 AAD）

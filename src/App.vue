@@ -6,6 +6,7 @@ import { type as getOsType } from "@tauri-apps/plugin-os";
 import TerminalComponent from "./TerminalComponent.vue";
 import ConnectDialog from "./ConnectDialog.vue";
 import BookmarkSidebar from "./BookmarkSidebar.vue";
+import BookmarkManager from "./BookmarkManager.vue";
 import SettingsDialog from "./SettingsDialog.vue";
 import AboutDialog from "./AboutDialog.vue";
 import TerminalInputBar from "./TerminalInputBar.vue";
@@ -87,6 +88,7 @@ import "./styles/tabs.css";
 import "./styles/workspace.css";
 import "./styles/input-bar.css";
 import "./styles/bookmark-sidebar.css";
+import "./styles/bookmark-manager.css";
 import "./styles/settings.css";
 import "./styles/overlays.css";
 
@@ -137,6 +139,7 @@ const cloudToast = ref<{ text: string; error: boolean } | null>(null);
 let cloudToastTimer: ReturnType<typeof setTimeout> | null = null;
 const showAbout = ref(false);
 const sidebarOpen = ref(false);
+const showBookmarkManager = ref(false);
 const sidebarRefreshToken = ref(0);
 const sidebarExpandGroup = ref<string | undefined>(undefined);
 const showRemoteFileManager = ref(false);
@@ -1699,6 +1702,26 @@ function handleToggleBookmarks() {
   sidebarOpen.value = !sidebarOpen.value;
 }
 
+function handleOpenBookmarkManager() {
+  closeOpenMenus();
+  showBookmarkManager.value = true;
+}
+
+/** "New" in the manager hands off to the regular connect dialog. */
+function handleManagerNewConnection() {
+  showBookmarkManager.value = false;
+  openConnect("ssh");
+}
+
+/** Explicitly created bookmark groups live in settings (see `handleButtonsChange`
+ *  for the same pattern): the component proposes, App.vue owns and persists. */
+async function handleBookmarkGroupsChange(groups: string[]) {
+  const newSettings = prepareSettingsForSave({ ...settings.value, bookmarkGroups: groups });
+  await invoke("save_settings", { settings: newSettings }).catch(console.error);
+  settingsRef.value = newSettings;
+  settings.value = newSettings;
+}
+
 function handleToggleRemoteFileManager() {
   closeOpenMenus();
   toggleRemoteFileManager();
@@ -1970,6 +1993,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "new-telnet", title: t("palette.cmd.newTelnet"), group: t("palette.groups.session"), run: () => openConnect("telnet") },
     { id: "new-serial", title: t("palette.cmd.newSerial"), group: t("palette.groups.session"), keywords: "port com", run: () => openConnect("serial") },
     { id: "close-tab", title: t("menu.closeTab"), group: t("palette.groups.session"), enabled: hasTab, run: () => handleCloseActiveTab() },
+    { id: "bookmark-manager", title: t("menu.bookmarkManager"), group: t("palette.groups.view"), keywords: "bookmarks manage groups batch organize", run: () => handleOpenBookmarkManager() },
     { id: "toggle-bookmarks", title: sidebarOpen.value ? t("menu.hideBookmarks") : t("menu.showBookmarks"), group: t("palette.groups.view"), keywords: "sidebar connections", run: () => handleToggleBookmarks() },
     { id: "tunnels", title: t("palette.cmd.tunnels"), group: t("palette.groups.tools"), keywords: "tunnel forward socks proxy -L -R -D", enabled: hasSsh, run: () => { void handleToggleTunnelManager(); } },
     { id: "remote-files", title: showRemoteFileManager.value ? t("menu.hideRemoteFiles") : t("menu.showRemoteFiles"), group: t("palette.groups.tools"), keywords: "sftp scp files", enabled: hasSsh, run: () => handleToggleRemoteFileManager() },
@@ -2133,6 +2157,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleToggleBookmarks">
                 <span>{{ sidebarOpen ? $t('menu.hideBookmarks') : $t('menu.showBookmarks') }}</span>
+              </button>
+              <button class="titlebar-menu-item" type="button" @click="handleOpenBookmarkManager">
+                <span>{{ $t('menu.bookmarkManager') }}</span>
               </button>
               <button class="titlebar-menu-item" type="button" @click="handleToggleCommandPalette">
                 <span>{{ $t('menu.commandPalette') }}</span>
@@ -2505,7 +2532,14 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     </div>
 
     <div class="workspace">
-      <BookmarkSidebar v-if="sidebarOpen" :refresh-token="sidebarRefreshToken" :expand-group="sidebarExpandGroup" :settings="settings" @connect="handleBookmarkConnect" />
+      <BookmarkSidebar
+        v-if="sidebarOpen"
+        :refresh-token="sidebarRefreshToken"
+        :expand-group="sidebarExpandGroup"
+        :settings="settings"
+        @connect="handleBookmarkConnect"
+        @manage="handleOpenBookmarkManager"
+      />
 
       <div class="terminal-wrapper">
         <div v-if="terminalSearchVisible" class="terminal-searchbar">
@@ -2881,6 +2915,16 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
         </div>
       </div>
     </div>
+
+    <BookmarkManager
+      v-if="showBookmarkManager"
+      :settings="settings"
+      :bookmark-groups="settings.bookmarkGroups"
+      @connect="handleBookmarkConnect"
+      @new-connection="handleManagerNewConnection"
+      @update-groups="handleBookmarkGroupsChange"
+      @close="showBookmarkManager = false"
+    />
 
     <ConnectDialog
       v-if="showConnectDialog"

@@ -309,6 +309,17 @@
   border-color: var(--app-border-accent);
 }
 
+select.save-connection-name {
+  cursor: pointer;
+}
+
+.save-connection-group-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
 @media (max-width: 560px) {
   .dialog-content--wide {
     width: calc(100vw - 24px);

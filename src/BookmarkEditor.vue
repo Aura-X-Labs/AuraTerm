@@ -1,16 +1,23 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { buildConnectionLogContext, buildDefaultLogPath, normalizeOptionalLogPath } from "./logging";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { t } from "./i18n";
-import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection, type SshAuthType } from "./types";
+import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection, type SshAuthType, type TunnelConfig } from "./types";
 
 const props = withDefaults(defineProps<{
   connection: SavedConnection;
   settings?: AppSettings;
+  /** Group paths already in use, offered in the group dropdown. */
+  groups?: string[];
+  /** Render inline (bookmark manager detail column) instead of as a modal:
+   *  no backdrop, no header, and clicking outside does not cancel. */
+  embedded?: boolean;
 }>(), {
   settings: () => DEFAULT_SETTINGS,
+  groups: () => [],
+  embedded: false,
 });
 
 const emit = defineEmits<{
@@ -37,6 +44,34 @@ interface GeneratedSshKeyPair {
 const initialReconnectType = normalizeReconnectType(props.connection);
 editDraft.value.reconnectType = initialReconnectType;
 editDraft.value.autoReconnect = isReconnectEnabled(initialReconnectType);
+
+/** Sentinel `<select>` value that reveals the free-text field for a brand-new group. */
+const NEW_GROUP_OPTION = "__auraterm_new_group__";
+
+const currentGroup = (props.connection.group ?? "").trim();
+const groupSelection = ref(currentGroup && !props.groups.includes(currentGroup) ? NEW_GROUP_OPTION : currentGroup);
+const customGroup = ref(currentGroup);
+const customGroupInput = ref<HTMLInputElement | null>(null);
+
+/** True when the group name comes from the text field instead of the dropdown. */
+const useCustomGroup = computed(() => props.groups.length === 0 || groupSelection.value === NEW_GROUP_OPTION);
+
+function applyGroup() {
+  updateDraft("group", (useCustomGroup.value ? customGroup.value : groupSelection.value).trim() || undefined);
+}
+
+function handleGroupSelectionChange(event: Event) {
+  groupSelection.value = inputValue(event);
+  applyGroup();
+  if (groupSelection.value === NEW_GROUP_OPTION) {
+    void nextTick(() => customGroupInput.value?.focus());
+  }
+}
+
+function handleCustomGroupInput(event: Event) {
+  customGroup.value = inputValue(event);
+  applyGroup();
+}
 
 function inputValue(event: Event) {
   return (event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
@@ -155,6 +190,28 @@ const editDraftDefaultLogPath = computed(() => {
   return buildDefaultLogPath(props.settings, buildConnectionLogContext(editDraft.value));
 });
 
+/** Tunnels are configured from the tunnel manager during a session; the editor
+ *  shows what a bookmark carries so it is not invisible outside one. */
+const savedTunnels = computed(() => editDraft.value.tunnels ?? []);
+
+function tunnelFlag(tunnel: TunnelConfig) {
+  return tunnel.type === "remote" ? "-R" : tunnel.type === "dynamic" ? "-D" : "-L";
+}
+
+function describeTunnel(tunnel: TunnelConfig) {
+  const listen = `${tunnel.bindAddress || "127.0.0.1"}:${tunnel.bindPort}`;
+  if (tunnel.type === "dynamic") {
+    return `${listen} · SOCKS`;
+  }
+  return `${listen} → ${tunnel.destHost ?? ""}:${tunnel.destPort ?? ""}`;
+}
+
+function handleBackdropClick() {
+  if (!props.embedded) {
+    emit("cancel");
+  }
+}
+
 function handleSave() {
   const protocol = editDraft.value.protocol ?? "ssh";
   const reconnectType = protocol === "ssh" ? normalizeReconnectType(editDraft.value) : undefined;
@@ -214,9 +271,9 @@ function handleSave() {
 </script>
 
 <template>
-  <div class="bookmark-editor-overlay" @click="emit('cancel')">
-    <div class="bookmark-editor-dialog" @click.stop>
-      <div class="bookmark-editor-header">
+  <div :class="props.embedded ? 'bookmark-editor-embedded' : 'bookmark-editor-overlay'" @click="handleBackdropClick">
+    <div :class="props.embedded ? 'bookmark-editor-inline' : 'bookmark-editor-dialog'" @click.stop>
+      <div v-if="!props.embedded" class="bookmark-editor-header">
         <div>
           <div class="bookmark-editor-title">{{ $t('bookmarkEditor.title') }}</div>
           <div class="bookmark-editor-subtitle">
@@ -234,15 +291,30 @@ function handleSave() {
           </div>
           <div class="form-group">
             <label>{{ $t('bookmarkEditor.group') }}</label>
-            <input
-              type="text"
-              :value="editDraft.group ?? ''"
-              :placeholder="$t('bookmarkEditor.ungrouped')"
-              @input="updateDraft('group', inputValue($event))"
-              autocapitalize="none"
-              autocorrect="off"
-              spellcheck="false"
-            >
+            <div class="bookmark-group-field">
+              <select
+                v-if="props.groups.length > 0"
+                :value="groupSelection"
+                @change="handleGroupSelectionChange"
+              >
+                <option value="">{{ $t('bookmarkEditor.ungrouped') }}</option>
+                <optgroup :label="$t('bookmarkEditor.groupExisting')">
+                  <option v-for="group in props.groups" :key="group" :value="group">{{ group }}</option>
+                </optgroup>
+                <option :value="NEW_GROUP_OPTION">{{ $t('bookmarkEditor.groupNew') }}</option>
+              </select>
+              <input
+                v-if="useCustomGroup"
+                ref="customGroupInput"
+                type="text"
+                :value="customGroup"
+                :placeholder="$t('bookmarkEditor.ungrouped')"
+                @input="handleCustomGroupInput"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
+            </div>
           </div>
         </div>
 
@@ -458,6 +530,16 @@ function handleSave() {
                 </select>
               </div>
             </div>
+
+            <div v-if="savedTunnels.length" class="form-group bookmark-tunnels">
+              <label>{{ $t('bookmarkEditor.tunnels') }}</label>
+              <div v-for="tunnel in savedTunnels" :key="tunnel.id" class="bookmark-tunnel-row">
+                <span class="bookmark-tunnel-type">{{ tunnelFlag(tunnel) }}</span>
+                <span class="bookmark-tunnel-route">{{ describeTunnel(tunnel) }}</span>
+                <span v-if="tunnel.autoStart" class="bookmark-tunnel-auto">{{ $t('bookmarkEditor.tunnelAutoStart') }}</span>
+              </div>
+              <div class="form-hint">{{ $t('bookmarkEditor.tunnelsHint') }}</div>
+            </div>
           </template>
         </template>
 
@@ -603,6 +685,70 @@ function handleSave() {
 .form-group select:focus,
 .form-group textarea:focus {
   border-color: var(--app-border-accent);
+}
+
+.bookmark-tunnel-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: var(--app-text-secondary);
+}
+
+.bookmark-tunnel-type {
+  color: var(--app-accent);
+}
+
+.bookmark-tunnel-route {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmark-tunnel-auto {
+  color: var(--app-success);
+  font-size: 0.72rem;
+}
+
+.bookmark-editor-embedded {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+}
+
+.bookmark-editor-inline {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.bookmark-editor-inline .bookmark-editor-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+}
+
+/* One column: the detail rail is far narrower than the modal. */
+.bookmark-editor-inline .bookmark-editor-grid {
+  grid-template-columns: 1fr;
+}
+
+.bookmark-editor-inline .bookmark-editor-footer {
+  padding: 10px 14px;
+}
+
+.bookmark-group-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
 .form-group input:disabled {
