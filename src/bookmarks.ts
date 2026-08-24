@@ -1,4 +1,5 @@
 import { normalizeReconnectType, type SavedConnection } from "./types";
+import { isSerialProtocol } from "./serialTransport";
 
 export interface BookmarkFolder {
   name: string;
@@ -49,7 +50,7 @@ export type SortDirection = "asc" | "desc";
 
 /** The connection target as shown in list rows: what you would type to reach it. */
 export function connectionTarget(connection: SavedConnection): string {
-  if (connection.protocol === "serial") {
+  if (isSerialProtocol(connection.protocol)) {
     return `${connection.portName ?? "serial"} @ ${connection.baudRate ?? 9600}`;
   }
   if (connection.protocol === "telnet") {

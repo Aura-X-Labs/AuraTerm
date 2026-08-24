@@ -13,7 +13,7 @@ import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { t } from "./i18n";
 import { useTerminalSearch } from "./composables/useTerminalSearch";
 import { useTerminalSessionCommands } from "./composables/useTerminalSessionCommands";
-import { describeSerialStatus } from "./serialTransport";
+import { describeSerialStatus, isSerialProtocol } from "./serialTransport";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { OutputRuleEngine } from "./outputRules";
 import { decodeControlCharacters } from "./snippets";
@@ -402,7 +402,7 @@ watch(() => props.session, (session) => {
   showHostKeyOverlay.value = false;
   manualReconnectPending.value = false;
   sessionRevision.value += 1;
-  if (session.protocol === "serial") {
+  if (isSerialProtocol(session.protocol)) {
     notifySerialConnectionStateChange("connecting");
   }
 }, { deep: true });
@@ -503,7 +503,7 @@ watch(() => effectiveSettings.value.rendererMode, (mode) => {
 });
 
 function notifySerialConnectionStateChange(state: SerialConnectionState) {
-  if (activeSessionRef.value.protocol === "serial") {
+  if (isSerialProtocol(activeSessionRef.value.protocol)) {
     emit("serialConnectionStateChange", state);
   }
 }
@@ -576,7 +576,9 @@ function sessionContextLabel(): string | undefined {
     case "telnet":
       return `telnet ${session.telnetConfig.host}`;
     case "serial":
-      return `serial ${session.serialConfig.portName}`;
+    case "rfc2217":
+    case "raw-tcp":
+      return `${session.protocol} ${session.serialConfig.portName}`;
     default:
       return effectiveSettings.value.shellPath ?? undefined;
   }
@@ -930,7 +932,9 @@ onMounted(() => {
       case "telnet":
         return `telnet:${s.telnetConfig.host}:${s.telnetConfig.port}:rev:${sessionRevision.value}`;
       case "serial":
-        return `serial:${s.serialConfig.transport ?? "local"}:${s.serialConfig.portName}:${s.serialConfig.host ?? ""}:${s.serialConfig.netPort ?? ""}:${s.serialConfig.adoptServerParams ? "adopt" : "set"}:${s.serialConfig.baudRate}:${s.serialConfig.dataBits}:${s.serialConfig.stopBits}:${s.serialConfig.parity}:${s.serialConfig.flowControl}:rev:${sessionRevision.value}`;
+      case "rfc2217":
+      case "raw-tcp":
+        return `${s.protocol}:${s.serialConfig.transport ?? "local"}:${s.serialConfig.portName}:${s.serialConfig.host ?? ""}:${s.serialConfig.netPort ?? ""}:${s.serialConfig.adoptServerParams ? "adopt" : "set"}:${s.serialConfig.baudRate}:${s.serialConfig.dataBits}:${s.serialConfig.stopBits}:${s.serialConfig.parity}:${s.serialConfig.flowControl}:rev:${sessionRevision.value}`;
       default:
         return "unknown";
     }
@@ -1055,7 +1059,7 @@ onMounted(() => {
           return;
         }
         const message = event.payload.message;
-        if (activeSessionRef.value.protocol === "serial") {
+        if (isSerialProtocol(activeSessionRef.value.protocol)) {
           notifySerialConnectionStateChange("closed");
         }
         if (activeSessionRef.value.protocol === "ssh"
@@ -1157,7 +1161,9 @@ onMounted(() => {
             await startTelnetSession(newId, session.telnetConfig.host, session.telnetConfig.port, cols, rows);
             terminal.writeln("\r\n[Connected]");
             break;
-          case "serial": {
+          case "serial":
+          case "rfc2217":
+          case "raw-tcp": {
             notifySerialConnectionStateChange("connecting");
             const transport = session.serialConfig.transport ?? "local";
             terminal.writeln(
@@ -1200,7 +1206,7 @@ onMounted(() => {
         }
         ptyId.value = null;
         const errorText = String(error);
-        if (session.protocol === "serial") {
+        if (isSerialProtocol(session.protocol)) {
           notifySerialConnectionStateChange("error");
         }
         if (session.protocol === "ssh" && isAuthError(errorText) && usesPasswordAuth(session.sshConfig)) {

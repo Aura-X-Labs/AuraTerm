@@ -35,7 +35,9 @@
 
 .protocol-selector {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* Five categories now; auto-fit keeps them on one row when there is space and
+     wraps cleanly when there is not. */
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 8px;
   margin-bottom: 18px;
 }
@@ -88,6 +90,21 @@
   color: var(--app-text);
   font-size: 14px;
   box-sizing: border-box;
+}
+
+/* Disabled inputs carry an explicit background and colour above, which
+   overrides the browser's own disabled appearance — without this they look
+   fully editable while silently ignoring every keystroke. */
+.form-group input:disabled,
+.form-group select:disabled,
+.form-group textarea:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Dim the label too, so a locked field reads as one unit. */
+.form-group.locked > label {
+  opacity: 0.45;
 }
 
 .form-group input:focus,
@@ -344,11 +361,6 @@ select.save-connection-name {
   }
 }
 
-/* Serial transport picker: same segmented look as the protocol selector, but
-   nested inside a form group so it needs no bottom margin of its own. */
-.serial-transport-selector {
-  margin-bottom: 0;
-}
 
 .serial-adopt-toggle {
   display: flex;

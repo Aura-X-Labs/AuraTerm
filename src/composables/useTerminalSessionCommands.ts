@@ -64,6 +64,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       case "telnet":
         return invoke("write_telnet_input", { id, data });
       case "serial":
+      case "rfc2217":
+      case "raw-tcp":
         return invoke("write_serial_input", { id, data });
       case "local":
         return invoke("write_pty_input", { id, data });
@@ -88,6 +90,9 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       case "telnet":
         return invoke("resize_telnet", { id, cols, rows });
       case "serial":
+      case "rfc2217":
+      case "raw-tcp":
+        // A UART has no window size to report.
         return Promise.resolve();
     }
   }
@@ -99,6 +104,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       case "telnet":
         return invoke("close_telnet_session", { id });
       case "serial":
+      case "rfc2217":
+      case "raw-tcp":
         return invoke("close_serial_session", { id });
       case "local":
         return invoke("close_pty", { id });
@@ -150,6 +157,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       case "telnet":
         return invoke("write_telnet_bytes", { id, data });
       case "serial":
+      case "rfc2217":
+      case "raw-tcp":
         return invoke("write_serial_bytes", { id, data });
       case "local":
         return invoke("write_pty_bytes", { id, data });
