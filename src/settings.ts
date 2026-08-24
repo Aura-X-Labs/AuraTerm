@@ -1,5 +1,6 @@
 import { normalizeBookmarkPath } from "./bookmarks";
 import type { AppLanguage } from "./i18n";
+import type { SerialTransport } from "./types";
 
 export interface TerminalTheme {
   background: string;
@@ -145,6 +146,13 @@ export interface SerialHistoryItem {
   id: string;
   name: string;
   portName: string;
+  /** Absent means a local port, so history saved before network serial existed
+   *  keeps loading. */
+  transport?: SerialTransport;
+  host?: string;
+  netPort?: number;
+  adoptServerParams?: boolean;
+  autoReconnect?: boolean;
   baudRate: number;
   dataBits: 5 | 6 | 7 | 8;
   stopBits: 1 | 2;

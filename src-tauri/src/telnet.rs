@@ -33,10 +33,22 @@ impl TelnetState {
         self.sessions.lock().await.contains_key(id)
     }
 
+    /// Write user data (keystrokes, pastes, ZMODEM payload).
+    ///
+    /// Everything leaving the socket that is not itself a command has to have
+    /// its `0xFF` bytes doubled, or the server reads them as `IAC` and starts
+    /// interpreting the payload as negotiation. Negotiation replies produced by
+    /// the reader go straight to `writer` instead, already framed.
     pub async fn write_bytes(&self, id: &str, data: &[u8]) -> Result<(), String> {
-        let guard = self.sessions.lock().await;
-        let session = guard.get(id).ok_or_else(|| "Telnet session not found".to_string())?;
-        session.writer.send(data.to_vec()).map_err(|_| "Failed to send Telnet bytes".to_string())
+        let (writer, iac) = {
+            let guard = self.sessions.lock().await;
+            let session = guard.get(id).ok_or_else(|| "Telnet session not found".to_string())?;
+            (session.writer.clone(), session.iac.clone())
+        };
+        let binary = iac.lock().await.binary_out();
+        writer
+            .send(crate::util::telnet_escape_outbound(data, binary))
+            .map_err(|_| "Failed to send Telnet bytes".to_string())
     }
 }
 
@@ -96,7 +108,11 @@ pub async fn start_telnet_session(
                         &zmodem_state,
                     );
                     if !response.is_empty() {
-                        let _ = response_tx.send(response);
+                        // ZMODEM replies are payload, not commands, so they need
+                        // the same escaping as anything the user types.
+                        let binary = reader_iac.lock().await.binary_out();
+                        let _ = response_tx
+                            .send(crate::util::telnet_escape_outbound(&response, binary));
                     }
                 }
                 Err(error) => {
@@ -194,15 +210,7 @@ pub async fn write_telnet_input(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let guard = state.sessions.lock().await;
-    let Some(session) = guard.get(&id) else {
-        return Err("Telnet session not found".to_string());
-    };
-
-    session
-        .writer
-        .send(data.into_bytes())
-        .map_err(|_| "Failed to send Telnet input".to_string())
+    state.write_bytes(&id, data.as_bytes()).await
 }
 
 #[tauri::command]

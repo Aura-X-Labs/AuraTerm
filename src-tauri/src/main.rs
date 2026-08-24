@@ -30,7 +30,10 @@ mod connections;
 mod encryption;
 mod keychain;
 mod pty_broker;
+mod rfc2217;
 mod serial;
+mod serial_link;
+mod serial_params;
 mod settings;
 mod ssh;
 mod telnet;
@@ -1197,6 +1200,11 @@ fn main() {
             serial::write_serial_input,
             serial::write_serial_bytes,
             serial::close_serial_session,
+            serial::get_serial_status,
+            serial::set_serial_params,
+            serial::send_serial_break,
+            serial::set_serial_signals,
+            serial::purge_serial_buffers,
             cloud_bridge::cloud_bridge_rotate_credential,
             cloud_bridge::cloud_bridge_share_session,
             cloud_bridge::cloud_bridge_stop_share,

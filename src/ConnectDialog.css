@@ -198,6 +198,11 @@
   line-height: 1.4;
 }
 
+/* A caution the user should read before connecting, not an input error. */
+.form-hint.warning {
+  color: var(--app-warning);
+}
+
 .form-hint.error {
   color: var(--app-danger);
 }
@@ -337,4 +342,21 @@ select.save-connection-name {
   .serial-settings-grid-span-2 {
     grid-column: span 1;
   }
+}
+
+/* Serial transport picker: same segmented look as the protocol selector, but
+   nested inside a form group so it needs no bottom margin of its own. */
+.serial-transport-selector {
+  margin-bottom: 0;
+}
+
+.serial-adopt-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.serial-adopt-toggle input {
+  margin: 0;
 }

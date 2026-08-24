@@ -108,6 +108,18 @@ pub struct SerialHistoryItem {
     pub id: String,
     pub name: String,
     pub port_name: String,
+    /// Absent means a local port, so history written before network serial
+    /// existed still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt_server_params: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_reconnect: Option<bool>,
     pub baud_rate: u32,
     pub data_bits: u8,
     pub stop_bits: u8,

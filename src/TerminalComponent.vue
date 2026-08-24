@@ -13,6 +13,7 @@ import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { t } from "./i18n";
 import { useTerminalSearch } from "./composables/useTerminalSearch";
 import { useTerminalSessionCommands } from "./composables/useTerminalSessionCommands";
+import { describeSerialStatus } from "./serialTransport";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { OutputRuleEngine } from "./outputRules";
 import { decodeControlCharacters } from "./snippets";
@@ -20,6 +21,7 @@ import { ShellIntegration } from "./shellIntegration";
 import type { CommandContext, OutputContext } from "./aiContext";
 import type {
   SerialConnectionState,
+  SerialStatus,
   SessionConfig,
   SshConfig,
   TerminalHandle,
@@ -85,6 +87,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   serialConnectionStateChange: [state: SerialConnectionState];
+  serialStatus: [status: SerialStatus];
   sessionUpdate: [session: SessionConfig];
   sshPasswordUpdated: [];
   searchResultsChange: [results: TerminalSearchResults];
@@ -927,7 +930,7 @@ onMounted(() => {
       case "telnet":
         return `telnet:${s.telnetConfig.host}:${s.telnetConfig.port}:rev:${sessionRevision.value}`;
       case "serial":
-        return `serial:${s.serialConfig.portName}:${s.serialConfig.baudRate}:${s.serialConfig.dataBits}:${s.serialConfig.stopBits}:${s.serialConfig.parity}:${s.serialConfig.flowControl}:rev:${sessionRevision.value}`;
+        return `serial:${s.serialConfig.transport ?? "local"}:${s.serialConfig.portName}:${s.serialConfig.host ?? ""}:${s.serialConfig.netPort ?? ""}:${s.serialConfig.adoptServerParams ? "adopt" : "set"}:${s.serialConfig.baudRate}:${s.serialConfig.dataBits}:${s.serialConfig.stopBits}:${s.serialConfig.parity}:${s.serialConfig.flowControl}:rev:${sessionRevision.value}`;
       default:
         return "unknown";
     }
@@ -943,6 +946,9 @@ onMounted(() => {
     let unlistenReconnectPrompt: UnlistenFn | null = null;
     let unlistenHostKeyMismatch: UnlistenFn | null = null;
     let unlistenSerialConnected: UnlistenFn | null = null;
+    let unlistenSerialStatus: UnlistenFn | null = null;
+    let unlistenSerialReconnecting: UnlistenFn | null = null;
+    let lastSerialStatusSummary = "";
     let unlistenZmodem: UnlistenFn | null = null;
 
     const cleanup = () => {
@@ -955,6 +961,8 @@ onMounted(() => {
       unlistenReconnectPrompt?.();
       unlistenHostKeyMismatch?.();
       unlistenSerialConnected?.();
+      unlistenSerialStatus?.();
+      unlistenSerialReconnecting?.();
       unlistenZmodem?.();
       if (ptyId.value) {
         const id = ptyId.value;
@@ -1079,6 +1087,27 @@ onMounted(() => {
         terminal?.writeln("\r\n[Connected]");
       });
 
+      unlistenSerialReconnecting = await listen(`serial-reconnecting:${props.sessionId}`, () => {
+        // The backend narrates progress into the terminal itself; this only has
+        // to stop the status pill claiming the link is still up.
+        notifySerialConnectionStateChange("connecting");
+        // The next handshake deserves a fresh explanation.
+        lastSerialStatusSummary = "";
+      });
+
+      unlistenSerialStatus = await listen<SerialStatus>(`serial-status:${props.sessionId}`, (event) => {
+        emit("serialStatus", event.payload);
+        // A handshake produces several updates; only narrate what changed.
+        const lines = describeSerialStatus(event.payload);
+        const summary = lines.join("\n");
+        if (summary && summary !== lastSerialStatusSummary) {
+          lastSerialStatusSummary = summary;
+          for (const line of lines) {
+            terminal?.writeln(line);
+          }
+        }
+      });
+
       unlistenMfa = await listen<SshMfaPromptEvent>(`ssh-mfa-prompt:${props.sessionId}`, (event) => {
         mfaEvent.value = event.payload;
         mfaResponses.value = new Array(event.payload.prompts.length).fill("");
@@ -1103,6 +1132,8 @@ onMounted(() => {
         unlistenReconnectPrompt?.();
         unlistenHostKeyMismatch?.();
         unlistenSerialConnected?.();
+        unlistenSerialStatus?.();
+        unlistenSerialReconnecting?.();
         unlistenZmodem?.();
         unlistenAssistState?.();
         return;
@@ -1126,11 +1157,17 @@ onMounted(() => {
             await startTelnetSession(newId, session.telnetConfig.host, session.telnetConfig.port, cols, rows);
             terminal.writeln("\r\n[Connected]");
             break;
-          case "serial":
+          case "serial": {
             notifySerialConnectionStateChange("connecting");
-            terminal.writeln(`Opening serial port ${session.serialConfig.portName} @ ${session.serialConfig.baudRate}...`);
+            const transport = session.serialConfig.transport ?? "local";
+            terminal.writeln(
+              transport === "local"
+                ? `Opening serial port ${session.serialConfig.portName} @ ${session.serialConfig.baudRate}...`
+                : `Connecting to ${transport}://${session.serialConfig.portName} @ ${session.serialConfig.baudRate}...`,
+            );
             await startSerialSession(newId, session.serialConfig);
             break;
+          }
           case "local":
             terminal.writeln("Starting local shell PTY...");
             // Use session cwd, or fall back to startup directory from command line

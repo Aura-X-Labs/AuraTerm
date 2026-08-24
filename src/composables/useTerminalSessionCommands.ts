@@ -4,9 +4,53 @@ import type {
   ReconnectType,
   SavedConnection,
   SerialConfig,
+  SerialParams,
   SessionConfig,
   SshConfig,
 } from "../types";
+
+// ── Serial control surface ───────────────────────────────────────────────────
+//
+// Exported at module scope rather than from the composable: these need none of
+// its closure state, and the status bar and command palette in App.vue drive
+// them directly.
+
+/** Retune a live serial session. No reconnect, so nothing the device printed in
+ *  the meantime is lost — which is the whole point when you are guessing a baud
+ *  rate. */
+export async function setSerialParams(sessionId: string, params: SerialParams) {
+  await invoke("set_serial_params", {
+    id: sessionId,
+    baudRate: params.baudRate,
+    dataBits: params.dataBits,
+    stopBits: params.stopBits,
+    parity: params.parity,
+    flowControl: params.flowControl,
+  });
+}
+
+/** Hold BREAK on the line, then release it. This is how a device that is not
+ *  reading characters — U-Boot, Cisco ROMMON, a Solaris OK prompt — is
+ *  interrupted. */
+export async function sendSerialBreak(sessionId: string, durationMs?: number) {
+  await invoke("send_serial_break", { id: sessionId, durationMs: durationMs ?? null });
+}
+
+/** Drive DTR and/or RTS; omitted lines are left alone. */
+export async function setSerialSignals(sessionId: string, signals: { dtr?: boolean; rts?: boolean }) {
+  await invoke("set_serial_signals", {
+    id: sessionId,
+    dtr: signals.dtr ?? null,
+    rts: signals.rts ?? null,
+  });
+}
+
+export async function purgeSerialBuffers(
+  sessionId: string,
+  target: "input" | "output" | "both" = "both",
+) {
+  await invoke("purge_serial_buffers", { id: sessionId, target });
+}
 
 interface UseTerminalSessionCommandsOptions {
   onSshPasswordUpdated: () => void;
@@ -129,6 +173,13 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       stopBits: serialConfig.stopBits,
       parity: serialConfig.parity,
       flowControl: serialConfig.flowControl,
+      // Omitted by pre-network workspaces, where the backend defaults to a
+      // local port.
+      transport: serialConfig.transport ?? "local",
+      host: serialConfig.host ?? null,
+      netPort: serialConfig.netPort ?? null,
+      adoptServerParams: serialConfig.adoptServerParams ?? false,
+      autoReconnect: serialConfig.autoReconnect ?? true,
     });
   }
 
