@@ -4,7 +4,7 @@ use crate::encryption::{
 use serde::{Deserialize, Serialize};
 use std::fs;
 use tauri::{AppHandle, Manager, State};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn default_protocol() -> String {
     "ssh".to_string()
@@ -438,6 +438,257 @@ pub fn touch_connection(app: AppHandle, id: String, timestamp: u64) -> Result<()
     Ok(())
 }
 
+/// 批量删除。一次性重写元数据与凭据库：前端逐条调用 `delete_connection` 会在
+/// 主密码模式下触发 N 次 Argon2id 派生（每次写入都用新盐，绕开 KDF 缓存）。
+#[tauri::command]
+pub fn delete_connections(
+    app: AppHandle,
+    ids: Vec<String>,
+    master_state: State<'_, MasterPasswordState>,
+) -> Result<usize, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let doomed: HashSet<&str> = ids.iter().map(String::as_str).collect();
+
+    let secret = encryption::resolve_secret(&app, &master_state)?;
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
+        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    credential_store
+        .credentials
+        .retain(|credential| !doomed.contains(credential.connection_id.as_str()));
+    encryption::save_encrypted_credentials(&app, &credential_store, &secret)?;
+
+    let mut connections = load_connections(&app)?;
+    let before = connections.len();
+    connections.retain(|connection| !doomed.contains(connection.id.as_str()));
+    let removed = before - connections.len();
+    write_connections(&app, &connections)?;
+    Ok(removed)
+}
+
+/// 批量移动分组。只改元数据、完全不触碰凭据库——因此主密码锁定时同样安全，
+/// 而走 `save_connection` 重新保存会用前端持有的（已被剥空的）凭据覆盖密文。
+#[tauri::command]
+pub fn move_connections(
+    app: AppHandle,
+    ids: Vec<String>,
+    group: Option<String>,
+) -> Result<usize, String> {
+    let target = group
+        .map(|value| normalize_group_path(&value))
+        .filter(|value| !value.is_empty());
+    let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+
+    let mut connections = load_connections(&app)?;
+    let mut moved = 0;
+    for connection in &mut connections {
+        if !wanted.contains(connection.id.as_str()) {
+            continue;
+        }
+        let current = connection
+            .group
+            .as_deref()
+            .map(normalize_group_path)
+            .filter(|value| !value.is_empty());
+        if current == target {
+            continue;
+        }
+        connection.group = target.clone();
+        moved += 1;
+    }
+    if moved > 0 {
+        write_connections(&app, &connections)?;
+    }
+    Ok(moved)
+}
+
+/// 重命名（或移动）一个分组，子分组随之跟随：`Prod` → `Production` 会把
+/// `Prod/EU` 一并改成 `Production/EU`。`to` 为空表示解散该分组——其下的书签
+/// 变为未分组，子分组提升一级。返回受影响的书签条数。
+#[tauri::command]
+pub fn rename_group(app: AppHandle, from: String, to: String) -> Result<usize, String> {
+    let source = normalize_group_path(&from);
+    if source.is_empty() {
+        return Err("Group path is empty".to_string());
+    }
+    let target = normalize_group_path(&to);
+    if source == target {
+        return Ok(0);
+    }
+    let mut connections = load_connections(&app)?;
+    let mut renamed = 0;
+    for connection in &mut connections {
+        let current = connection
+            .group
+            .as_deref()
+            .map(normalize_group_path)
+            .unwrap_or_default();
+        let Some(next) = renamed_group_path(&current, &source, &target) else {
+            continue;
+        };
+        connection.group = if next.is_empty() { None } else { Some(next) };
+        renamed += 1;
+    }
+    if renamed > 0 {
+        write_connections(&app, &connections)?;
+    }
+    Ok(renamed)
+}
+
+/// Where a bookmark currently in `current` lands when group `source` is renamed
+/// to `target`. `None` means the bookmark is outside the renamed subtree; an
+/// empty target dissolves the group (children are promoted one level).
+fn renamed_group_path(current: &str, source: &str, target: &str) -> Option<String> {
+    if current == source {
+        return Some(target.to_string());
+    }
+    let rest = current.strip_prefix(&format!("{}/", source))?;
+    Some(if target.is_empty() { rest.to_string() } else { format!("{}/{}", target, rest) })
+}
+
+/// 复制一条书签，连同它的凭据。返回新书签的 id。
+#[tauri::command]
+pub fn duplicate_connection(
+    app: AppHandle,
+    id: String,
+    name: Option<String>,
+    master_state: State<'_, MasterPasswordState>,
+) -> Result<String, String> {
+    let mut connections = load_connections(&app)?;
+    let source = connections
+        .iter()
+        .find(|connection| connection.id == id)
+        .ok_or_else(|| "Bookmark not found".to_string())?
+        .clone();
+
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let secret = encryption::resolve_secret(&app, &master_state)?;
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
+        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    if let Some(mut existing) = credential_store
+        .credentials
+        .iter()
+        .find(|credential| credential.connection_id == id)
+        .cloned()
+    {
+        // StoredCredential is ZeroizeOnDrop, so its fields cannot be moved out
+        // with struct-update syntax — retag the clone instead.
+        existing.connection_id = new_id.clone();
+        credential_store.credentials.push(existing);
+        encryption::save_encrypted_credentials(&app, &credential_store, &secret)?;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64);
+    let mut copy = source.clone();
+    copy.id = new_id.clone();
+    copy.name = name.unwrap_or_else(|| format!("{} copy", source.name));
+    copy.created_at = now;
+    copy.last_used = None;
+    connections.push(copy);
+    write_connections(&app, &connections)?;
+    Ok(new_id)
+}
+
+/// AuraTerm 自有的书签交换格式（`export_bookmarks` 产出，`import_bookmarks`
+/// 以 `format = "auraterm"` 读回）。
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookmarkExport {
+    format: String,
+    version: u32,
+    #[serde(default)]
+    exported_at: u64,
+    #[serde(default)]
+    include_secrets: bool,
+    connections: Vec<SavedConnection>,
+}
+
+const BOOKMARK_EXPORT_FORMAT: &str = "auraterm-bookmarks";
+const BOOKMARK_EXPORT_VERSION: u32 = 1;
+
+/// 导出书签为 JSON 字符串。`ids` 为空表示导出全部。
+///
+/// 默认**不含**凭据：磁盘上的元数据本就不带密码/私钥。`include_secrets` 会把
+/// 凭据注水进导出内容，因此要求凭据当前可访问（主密码已解锁）。
+#[tauri::command]
+pub fn export_bookmarks(
+    app: AppHandle,
+    ids: Option<Vec<String>>,
+    include_secrets: bool,
+    master_state: State<'_, MasterPasswordState>,
+) -> Result<String, String> {
+    let mut connections = load_connections(&app)?;
+    if let Some(ids) = ids {
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        connections.retain(|connection| wanted.contains(connection.id.as_str()));
+    }
+
+    if include_secrets {
+        if !encryption::credentials_accessible(&app, &master_state) {
+            return Err("Unlock the master password before exporting credentials".to_string());
+        }
+        let secret = encryption::resolve_secret(&app, &master_state)?;
+        let credential_store = encryption::load_encrypted_credentials(&app, &secret)?;
+        for connection in &mut connections {
+            hydrate_connection_secrets(connection, &credential_store);
+        }
+    }
+
+    let exported_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64);
+    serde_json::to_string_pretty(&BookmarkExport {
+        format: BOOKMARK_EXPORT_FORMAT.to_string(),
+        version: BOOKMARK_EXPORT_VERSION,
+        exported_at,
+        include_secrets,
+        connections,
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 解析 AuraTerm 导出文件。返回待导入的连接（id 一律重新分配，避免覆盖同机
+/// 已存在的书签）。
+fn parse_auraterm_export(content: &str, base_group: &str) -> Result<(Vec<SavedConnection>, Vec<String>), String> {
+    let parsed: BookmarkExport = serde_json::from_str(content)
+        .map_err(|e| format!("Not an AuraTerm bookmark export: {}", e))?;
+    if parsed.format != BOOKMARK_EXPORT_FORMAT {
+        return Err("Not an AuraTerm bookmark export".to_string());
+    }
+    if parsed.version > BOOKMARK_EXPORT_VERSION {
+        return Err(format!(
+            "This file was written by a newer AuraTerm (format v{})",
+            parsed.version
+        ));
+    }
+
+    let warnings = Vec::new();
+    let entries = parsed
+        .connections
+        .into_iter()
+        .map(|mut connection| {
+            connection.id = uuid::Uuid::new_v4().to_string();
+            connection.last_used = None;
+            let own_group = connection
+                .group
+                .as_deref()
+                .map(normalize_group_path)
+                .unwrap_or_default();
+            connection.group = match (base_group.is_empty(), own_group.is_empty()) {
+                (true, true) => None,
+                (true, false) => Some(own_group),
+                (false, true) => Some(base_group.to_string()),
+                (false, false) => Some(format!("{}/{}", base_group, own_group)),
+            };
+            connection
+        })
+        .collect();
+    Ok((entries, warnings))
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookmarkImportResult {
@@ -452,23 +703,57 @@ pub fn import_bookmarks(
     format: String,
     content: String,
     group: Option<String>,
+    master_state: State<'_, MasterPasswordState>,
 ) -> Result<BookmarkImportResult, String> {
+    let is_auraterm = format.eq_ignore_ascii_case("auraterm");
+    // An AuraTerm export already carries its own folder layout, so an unset
+    // target group means "keep it as it was" rather than a synthetic folder.
     let base_group = group
         .map(|value| normalize_group_path(&value))
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("Imported/{}", if format.eq_ignore_ascii_case("putty") { "PuTTY" } else { "OpenSSH" }));
+        .unwrap_or_else(|| if is_auraterm {
+            String::new()
+        } else {
+            format!("Imported/{}", if format.eq_ignore_ascii_case("putty") { "PuTTY" } else { "OpenSSH" })
+        });
     let (candidates, mut warnings) = if format.eq_ignore_ascii_case("putty") {
         parse_putty_registry(&content, &base_group)
     } else if format.eq_ignore_ascii_case("openssh") {
         parse_openssh_config(&content, &base_group)
+    } else if is_auraterm {
+        parse_auraterm_export(&content, &base_group)?
     } else {
         return Err("Unsupported bookmark import format".to_string());
+    };
+
+    // Credentials only travel in AuraTerm exports, and only when the store can
+    // be written; otherwise the bookmarks still import, minus their secrets.
+    let secret = if is_auraterm && candidates.iter().any(connection_carries_secrets) {
+        if encryption::credentials_accessible(&app, &master_state) {
+            Some(encryption::resolve_secret(&app, &master_state)?)
+        } else {
+            warnings.push("Credentials in this file were skipped: unlock the master password first".to_string());
+            None
+        }
+    } else {
+        None
+    };
+    let mut credential_store = match &secret {
+        Some(secret) => Some(
+            encryption::load_encrypted_credentials(&app, secret)
+                .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() }),
+        ),
+        None => None,
     };
 
     let mut connections = load_connections(&app)?;
     let mut imported = 0;
     let mut skipped = 0;
-    for candidate in candidates {
+    for mut candidate in candidates {
+        if let Some(store) = credential_store.as_mut() {
+            persist_connection_secrets(&candidate, store)?;
+        }
+        sanitize_connection_for_storage(&mut candidate);
         let duplicate = connections.iter().any(|existing| {
             existing.protocol == candidate.protocol
                 && existing.host.eq_ignore_ascii_case(&candidate.host)
@@ -486,8 +771,23 @@ pub fn import_bookmarks(
     if imported == 0 && skipped == 0 {
         warnings.push("No concrete hosts were found in the selected file".to_string());
     }
+    if let (Some(secret), Some(store)) = (&secret, &credential_store) {
+        encryption::save_encrypted_credentials(&app, store, secret)?;
+    }
     write_connections(&app, &connections)?;
     Ok(BookmarkImportResult { imported, skipped, warnings })
+}
+
+/// Whether an imported entry brought any secret along that is worth persisting.
+fn connection_carries_secrets(connection: &SavedConnection) -> bool {
+    connection.password.is_some()
+        || connection.private_key.is_some()
+        || connection.passphrase.is_some()
+        || !connection.post_connect_commands.is_empty()
+        || connection.jump_hosts.iter().any(|jump| {
+            jump.password.is_some() || jump.private_key.is_some() || jump.passphrase.is_some()
+        })
+        || connection.auto_login_rules.iter().any(|rule| rule.response.is_some())
 }
 
 fn normalize_group_path(value: &str) -> String {
@@ -739,5 +1039,57 @@ mod import_tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "Prod Router");
         assert_eq!(entries[0].port, 22);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_carries_subfolders_and_leaves_others_alone() {
+        assert_eq!(renamed_group_path("Prod", "Prod", "Production"), Some("Production".to_string()));
+        assert_eq!(renamed_group_path("Prod/EU", "Prod", "Production"), Some("Production/EU".to_string()));
+        assert_eq!(renamed_group_path("Prod/EU/Web", "Prod/EU", "Prod/APAC"), Some("Prod/APAC/Web".to_string()));
+        assert_eq!(renamed_group_path("Production", "Prod", "Production"), None);
+        assert_eq!(renamed_group_path("", "Prod", "Production"), None);
+    }
+
+    #[test]
+    fn empty_target_dissolves_the_group() {
+        assert_eq!(renamed_group_path("Lab", "Lab", ""), Some(String::new()));
+        assert_eq!(renamed_group_path("Lab/Bench", "Lab", ""), Some("Bench".to_string()));
+    }
+
+    #[test]
+    fn export_round_trips_through_the_importer() {
+        let export = BookmarkExport {
+            format: BOOKMARK_EXPORT_FORMAT.to_string(),
+            version: BOOKMARK_EXPORT_VERSION,
+            exported_at: 1,
+            include_secrets: false,
+            connections: vec![imported_connection(
+                "web".to_string(),
+                "Production/EU".to_string(),
+                "ssh",
+                "10.0.0.1".to_string(),
+                22,
+                "ops".to_string(),
+            )],
+        };
+        let json = serde_json::to_string(&export).expect("serialize");
+
+        let (entries, _) = parse_auraterm_export(&json, "").expect("parse");
+        assert_eq!(entries[0].group.as_deref(), Some("Production/EU"));
+        assert_ne!(entries[0].id, export.connections[0].id, "ids are reassigned on import");
+
+        let (nested, _) = parse_auraterm_export(&json, "Restored").expect("parse");
+        assert_eq!(nested[0].group.as_deref(), Some("Restored/Production/EU"));
+    }
+
+    #[test]
+    fn foreign_files_are_rejected() {
+        assert!(parse_auraterm_export("{\"format\":\"other\",\"version\":1,\"connections\":[]}", "").is_err());
+        assert!(parse_auraterm_export("not json", "").is_err());
     }
 }

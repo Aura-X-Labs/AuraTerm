@@ -72,6 +72,8 @@ const SYNCED_SETTINGS_KEYS: &[&str] = &[
     "showInputBar",
     "quickButtons",
     "outputRules",
+    // Explicitly created bookmark folders travel with the bookmarks themselves.
+    "bookmarkGroups",
     "autoOpenSftp",
     "zmodemDownloadPath",
     "restoreTabsOnStartup",

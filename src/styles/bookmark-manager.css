@@ -1,0 +1,614 @@
+/* Bookmark manager page — a full-size overlay "page" (not a dialog) that hosts
+   the group tree, the bookmark table, and the embedded bookmark editor. */
+
+.bm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  background: var(--app-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.bm-page {
+  width: min(1180px, 94vw);
+  height: min(760px, 88vh);
+  background: var(--app-panel-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px var(--app-shadow-strong);
+  color: var(--app-text);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------------ header */
+
+.bm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--app-panel-bg-strong);
+  border-bottom: 1px solid var(--app-border);
+}
+
+.bm-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.bm-search {
+  position: relative;
+  flex: 1;
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+}
+
+.bm-search input {
+  width: 100%;
+  padding: 6px 30px 6px 10px;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  color: var(--app-text);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.bm-search input:focus {
+  border-color: var(--app-border-accent);
+  background: var(--app-input-bg-focus);
+}
+
+.bm-kbd,
+.bm-search-clear {
+  position: absolute;
+  right: 7px;
+  color: var(--app-text-dim);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.bm-kbd {
+  border: 1px solid var(--app-border-strong);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-family: monospace;
+  pointer-events: none;
+}
+
+.bm-search-clear {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-size: 15px;
+  padding: 0 2px;
+}
+
+.bm-search-clear:hover {
+  color: var(--app-text);
+}
+
+.bm-btn {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--app-text-secondary);
+  background: var(--app-panel-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  padding: 5px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bm-btn:hover:not(:disabled) {
+  background: var(--app-surface-3);
+  color: var(--app-text);
+}
+
+.bm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bm-btn--primary {
+  background: var(--app-accent);
+  border-color: var(--app-accent);
+  color: var(--app-accent-contrast);
+  font-weight: 600;
+}
+
+.bm-btn--primary:hover:not(:disabled) {
+  background: var(--app-accent-hover);
+  color: var(--app-accent-contrast);
+}
+
+.bm-btn--danger {
+  color: var(--app-danger);
+  border-color: var(--app-danger-soft-strong);
+}
+
+.bm-btn--danger:hover:not(:disabled) {
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.bm-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+/* Header dropdown (export) and the group context menu share one look. */
+.bm-menu-anchor {
+  position: relative;
+}
+
+.bm-menu,
+.bm-context-menu {
+  position: absolute;
+  z-index: 10;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--app-panel-bg-strong);
+  border: 1px solid var(--app-border-strong);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px var(--app-shadow-strong);
+  display: flex;
+  flex-direction: column;
+}
+
+.bm-menu {
+  top: calc(100% + 4px);
+  right: 0;
+}
+
+.bm-context-menu {
+  position: fixed;
+}
+
+.bm-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--app-text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bm-menu-item:hover:not(:disabled) {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.bm-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.bm-menu-item.danger {
+  color: var(--app-danger);
+}
+
+.bm-menu-item.danger:hover {
+  background: var(--app-danger-soft);
+}
+
+.bm-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--app-border);
+}
+
+.bm-banner,
+.bm-status {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--app-border);
+  font-size: 12.5px;
+}
+
+.bm-banner {
+  background: var(--app-warning-soft);
+  color: var(--app-warning);
+}
+
+.bm-status {
+  background: var(--app-accent-soft);
+  color: var(--app-text-secondary);
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------------- body */
+
+.bm-body {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 320px;
+  min-height: 0;
+}
+
+.bm-tree {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 0;
+  background: var(--app-panel-bg-subtle);
+  border-right: 1px solid var(--app-border);
+}
+
+.bm-tree-row {
+  display: flex;
+  align-items: center;
+}
+
+.bm-tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--app-text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.bm-tree-item:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.bm-tree-item[aria-pressed="true"] {
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+  box-shadow: inset 2px 0 0 var(--app-accent);
+}
+
+.bm-tree-item--folder {
+  padding-left: 2px;
+}
+
+.bm-tree-arrow {
+  border: 0;
+  background: none;
+  color: var(--app-text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 2px;
+  transform: rotate(90deg);
+  transition: transform 0.12s ease;
+}
+
+.bm-tree-arrow.collapsed {
+  transform: rotate(0deg);
+}
+
+.bm-count {
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--app-text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Drop target while dragging bookmarks onto a group. */
+.bm-tree-item.bm-drop-target {
+  background: var(--app-accent-soft-strong);
+  color: var(--app-text);
+  box-shadow: inset 0 0 0 1px var(--app-accent);
+}
+
+.bm-tree-new {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 5px 8px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 5px;
+  background: none;
+  color: var(--app-text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bm-tree-new:hover:not(:disabled) {
+  border-color: var(--app-accent);
+  color: var(--app-text-secondary);
+}
+
+.bm-tree-new:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bm-tree-sep {
+  height: 1px;
+  background: var(--app-border);
+  margin: 8px 10px;
+}
+
+/* ------------------------------------------------------------------- list */
+
+.bm-list {
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+}
+
+.bm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.bm-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--app-panel-bg);
+  text-align: left;
+  font-weight: 500;
+  font-size: 11.5px;
+  color: var(--app-text-dim);
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--app-border);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bm-table thead th:hover {
+  color: var(--app-text-secondary);
+}
+
+.bm-table thead th.sorted {
+  color: var(--app-text);
+}
+
+.bm-sort-arrow {
+  color: var(--app-accent);
+}
+
+.bm-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--app-border);
+  vertical-align: middle;
+}
+
+.bm-col-check {
+  width: 28px;
+  padding-right: 0 !important;
+}
+
+.bm-row {
+  cursor: pointer;
+}
+
+.bm-row:hover td {
+  background: var(--app-hover);
+}
+
+.bm-row[aria-selected="true"] td {
+  background: var(--app-accent-soft);
+}
+
+.bm-row[data-checked="true"] td {
+  background: var(--app-accent-soft-strong);
+}
+
+.bm-row:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: -2px;
+}
+
+.bm-check {
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 3px;
+  display: inline-grid;
+  place-items: center;
+  color: transparent;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bm-check.checked {
+  background: var(--app-accent);
+  border-color: var(--app-accent);
+  color: var(--app-accent-contrast);
+}
+
+.bm-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-text);
+  font-weight: 500;
+}
+
+.bm-chip {
+  font-family: monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--app-border);
+  color: var(--app-text-muted);
+  white-space: nowrap;
+}
+
+.bm-chip--ssh {
+  color: var(--app-accent);
+  border-color: var(--app-border-accent);
+}
+
+.bm-chip--serial {
+  color: var(--app-success);
+  border-color: var(--app-success-soft);
+}
+
+.bm-chip--telnet {
+  color: var(--app-warning);
+  border-color: var(--app-warning-soft);
+}
+
+.bm-chip--persist {
+  color: var(--app-success);
+  border-color: var(--app-success-soft);
+}
+
+.bm-auth.weak {
+  color: var(--app-warning);
+}
+
+.bm-mono {
+  font-family: monospace;
+  font-size: 11.5px;
+  color: var(--app-text-secondary);
+}
+
+.bm-when {
+  color: var(--app-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.bm-dim {
+  color: var(--app-text-dim);
+}
+
+.bm-empty {
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--app-text-dim);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.bm-empty p {
+  margin: 0;
+}
+
+.bm-empty-hint {
+  margin-top: 8px !important;
+  color: var(--app-text-muted);
+}
+
+.bm-empty--detail {
+  padding: 24px 16px;
+}
+
+/* ----------------------------------------------------------------- detail */
+
+.bm-detail {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-panel-bg-subtle);
+  border-left: 1px solid var(--app-border);
+  overflow: hidden;
+}
+
+.bm-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.bm-detail-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bm-detail-head .bm-btn {
+  padding: 4px 8px;
+  font-size: 11.5px;
+}
+
+.bm-detail > .bookmark-editor-embedded {
+  flex: 1;
+  min-height: 0;
+}
+
+.bm-detail-names {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 14px 10px 30px;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+}
+
+.bm-detail-note {
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid var(--app-border);
+  color: var(--app-text-dim);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* ------------------------------------------------------------- batch bar */
+
+.bm-batch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--app-panel-bg-strong);
+  border-top: 1px solid var(--app-border);
+}
+
+.bm-batch-count {
+  font-weight: 600;
+}
+
+.bm-batch-spacer {
+  flex: 1;
+}
+
+.bm-move-select {
+  cursor: pointer;
+}
+
+@media (max-width: 1080px) {
+  .bm-body {
+    grid-template-columns: 170px minmax(0, 1fr) 280px;
+  }
+}
+
+@media (max-width: 860px) {
+  .bm-body {
+    grid-template-columns: minmax(0, 1fr) 260px;
+  }
+
+  .bm-tree {
+    display: none;
+  }
+}

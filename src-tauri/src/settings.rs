@@ -215,6 +215,11 @@ pub struct Settings {
     /// Interface language; `System` follows the OS language.
     #[serde(default)]
     pub language: Language,
+    /// Bookmark groups the user created explicitly. Folders are otherwise
+    /// derived from each bookmark's `group` path, so an empty one would vanish;
+    /// this list is what keeps a freshly created (still empty) folder around.
+    #[serde(default)]
+    pub bookmark_groups: Vec<String>,
     pub font_size: u8,
     pub font_family: String,
     pub scrollback: u32,
@@ -315,6 +320,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             language: Language::System,
+            bookmark_groups: Vec::new(),
             font_size: 15,
             font_family: r#"Consolas, "Courier New", monospace"#.to_string(),
             scrollback: 10000,

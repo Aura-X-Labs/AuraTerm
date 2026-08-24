@@ -1,3 +1,4 @@
+import { normalizeBookmarkPath } from "./bookmarks";
 import type { AppLanguage } from "./i18n";
 
 export interface TerminalTheme {
@@ -187,6 +188,10 @@ export interface AppSettings {
   showInputBar: boolean;
   /** Quick buttons below the terminal */
   quickButtons: QuickButton[];
+  /** Bookmark groups the user created explicitly. Folders are otherwise derived
+   *  from each bookmark's group path, so a freshly created (still empty) one
+   *  would disappear; this list is what keeps it on screen. */
+  bookmarkGroups: string[];
   /** Shared highlight and trigger rules applied to terminal output. */
   outputRules: OutputRule[];
   /** Automatically reveal the SFTP browser after an SSH connection succeeds. */
@@ -536,6 +541,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   middleClickPaste: true,
   showInputBar: true,
   quickButtons: [],
+  bookmarkGroups: [],
   outputRules: [],
   autoOpenSftp: false,
   autoShareToCloud: false,
@@ -625,6 +631,12 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     theme: nextTheme,
     uiThemeMode: normalizeUiThemeMode(value?.uiThemeMode),
     rendererMode: normalizeRendererMode(value?.rendererMode),
+    bookmarkGroups: Array.isArray(value?.bookmarkGroups)
+      ? [...new Set(value.bookmarkGroups
+        .filter((group): group is string => typeof group === "string")
+        .map((group) => normalizeBookmarkPath(group).join("/"))
+        .filter(Boolean))]
+      : [...DEFAULT_SETTINGS.bookmarkGroups],
     quickButtons: (value?.quickButtons ?? DEFAULT_SETTINGS.quickButtons).map((button) => ({
       ...button,
       toolbar: button.toolbar?.trim() || "Default",

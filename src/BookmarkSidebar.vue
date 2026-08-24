@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { normalizeReconnectType, type SavedConnection } from "./types";
-import { buildBookmarkTree, flattenBookmarkTree } from "./bookmarks";
+import { buildBookmarkTree, filterConnections, flattenBookmarkTree } from "./bookmarks";
+import { detectImportFormat } from "./bookmarkTransfer";
+import { CredentialsLockedError, useBookmarkStore } from "./composables/useBookmarkStore";
 import { t } from "./i18n";
+import { alertDialog, confirmDialog } from "./nativeDialogs";
 import BookmarkEditor from "./BookmarkEditor.vue";
 
 const props = withDefaults(defineProps<{
@@ -18,9 +20,20 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   connect: [connection: SavedConnection];
+  /** Open the full bookmark manager page (batch edits, group maintenance). */
+  manage: [];
 }>();
 
+/* Shared with the manager page: an edit made there shows up here immediately. */
+const store = useBookmarkStore();
+const { connections, collapsedGroups, groupPaths } = store;
+
 const RECENTLY_USED_LABEL = computed(() => t("bookmarks.recentlyUsed"));
+
+/** Groups in use plus the explicitly created ones, so the editor's group
+ *  dropdown offers the same list as the manager page. */
+const groupOptions = computed(() => [...new Set([...groupPaths.value, ...props.settings.bookmarkGroups])]
+  .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
 
 function buildSubtitle(connection: SavedConnection) {
   if (connection.protocol === "serial") {
@@ -60,73 +73,15 @@ function reconnectBadgeLabel(badge: "tmux" | "screen") {
   return badge === "tmux" ? "T" : "S";
 }
 
-const connections = ref<SavedConnection[]>([]);
 const contextMenu = ref<{ x: number; y: number; connection: SavedConnection } | null>(null);
 const editingConnection = ref<SavedConnection | null>(null);
 const contextMenuRef = ref<HTMLDivElement | null>(null);
-const collapsedGroups = ref<Set<string>>(new Set());
 const searchQuery = ref("");
 const importFileInput = ref<HTMLInputElement | null>(null);
 const importMessage = ref("");
 
-interface BookmarkImportResult {
-  imported: number;
-  skipped: number;
-  warnings: string[];
-}
-
-const STORAGE_KEY_COLLAPSED = "auraterm:collapsed-groups";
-
-function loadCollapsedState() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY_COLLAPSED);
-    if (saved) {
-      collapsedGroups.value = new Set(JSON.parse(saved));
-    }
-  } catch (error) {
-    console.error("Failed to load collapsed state", error);
-  }
-}
-
-function saveCollapsedState() {
-  localStorage.setItem(STORAGE_KEY_COLLAPSED, JSON.stringify(Array.from(collapsedGroups.value)));
-}
-
-function toggleGroup(group: string) {
-  const next = new Set(collapsedGroups.value);
-  if (next.has(group)) {
-    next.delete(group);
-  } else {
-    next.add(group);
-  }
-  collapsedGroups.value = next;
-  saveCollapsedState();
-}
-
-function isGroupCollapsed(group: string) {
-  return collapsedGroups.value.has(group);
-}
-
-async function loadConnections(expandGroup?: string) {
-  try {
-    connections.value = await invoke<SavedConnection[]>("get_connections");
-    // 自动展开指定分组（如新保存的连接所在分组）
-    // 必须用赋值新 Set 来触发 Vue 响应式，直 .delete() 不会重新渲染
-    if (expandGroup && collapsedGroups.value.has(expandGroup)) {
-      const next = new Set(collapsedGroups.value);
-      next.delete(expandGroup);
-      collapsedGroups.value = next;
-    }
-  } catch (error) {
-    console.error("Failed to load connections", error);
-  }
-}
-
 watch(() => props.refreshToken, () => {
-  // 先同步恢复折叠状态，再异步加载数据并在加载完成后展开目标分组
-  // （顺序不能颠倒：loadCollapsedState 是同步的，必须在 loadConnections 的 await 之前完成）
-  loadCollapsedState();
-  void loadConnections(props.expandGroup);
+  void store.refresh(props.expandGroup);
 }, { immediate: true });
 
 watch(contextMenu, (value, _previous, onCleanup) => {
@@ -146,22 +101,7 @@ watch(contextMenu, (value, _previous, onCleanup) => {
   });
 });
 
-const filteredConnections = computed(() => {
-  const query = searchQuery.value.trim().toLowerCase();
-  if (!query) {
-    return connections.value;
-  }
-  return connections.value.filter((c) => {
-    return (
-      c.name.toLowerCase().includes(query) ||
-      c.host.toLowerCase().includes(query) ||
-      (c.user && c.user.toLowerCase().includes(query)) ||
-      (c.portName && c.portName.toLowerCase().includes(query)) ||
-      (c.group && c.group.toLowerCase().includes(query)) ||
-      (reconnectBadge(c)?.includes(query) ?? false)
-    );
-  });
-});
+const filteredConnections = computed(() => filterConnections(connections.value, searchQuery.value));
 
 const recentlyUsed = computed(() => [...connections.value]
     .filter(c => c.lastUsed)
@@ -174,10 +114,7 @@ const bookmarkRows = computed(() => flattenBookmarkTree(
 ));
 
 async function handleDoubleClick(connection: SavedConnection) {
-  try {
-    await invoke("touch_connection", { id: connection.id, timestamp: Date.now() });
-  } catch {
-  }
+  await store.touch(connection.id);
   emit("connect", connection);
 }
 
@@ -186,14 +123,26 @@ function handleContextMenu(event: MouseEvent, connection: SavedConnection) {
   contextMenu.value = { x: event.clientX, y: event.clientY, connection };
 }
 
-async function handleDelete(id: string) {
+/** Report a failure, naming the master-password lock when that is the cause. */
+async function reportFailure(messageKey: string, error: unknown) {
+  if (error instanceof CredentialsLockedError) {
+    await alertDialog(t("bookmarkManager.lockedBlocked"), "warning");
+    return;
+  }
+  await alertDialog(t(messageKey, { error: String(error) }), "error");
+}
+
+async function handleDelete(connection: SavedConnection) {
+  contextMenu.value = null;
+  if (!await confirmDialog(t("bookmarkManager.confirmDeleteOne", { name: connection.name }))) {
+    return;
+  }
   try {
-    await invoke("delete_connection", { id });
-    connections.value = connections.value.filter((connection) => connection.id !== id);
+    await store.remove(connection.id);
   } catch (error) {
     console.error("Failed to delete connection", error);
+    await reportFailure("bookmarkManager.deleteFailed", error);
   }
-  contextMenu.value = null;
 }
 
 function openEditDialog(connection: SavedConnection) {
@@ -207,38 +156,28 @@ function closeEditDialog() {
 
 async function handleSaveConnection(normalized: SavedConnection) {
   try {
-    await invoke("save_connection", { connection: normalized });
-    connections.value = connections.value.map((connection) => (
-      connection.id === editingConnection.value?.id ? normalized : connection
-    ));
+    await store.save(normalized);
     closeEditDialog();
   } catch (error) {
     console.error("Failed to save connection", error);
-    // Note: Error handling is now partially inside BookmarkEditor, 
-    // but we catch backend errors here.
-    alert(t("bookmarks.saveFailed", { error: String(error) }));
+    // window.alert is a silent no-op in the macOS WebView — use the plugin dialog.
+    await reportFailure("bookmarks.saveFailed", error);
   }
 }
 
 async function handleImportFile(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
+  input.value = "";
   if (!file) return;
   importMessage.value = t("bookmarks.importing");
   try {
-    const format = file.name.toLowerCase().endsWith(".reg") ? "putty" : "openssh";
-    const result = await invoke<BookmarkImportResult>("import_bookmarks", {
-      format,
-      content: await file.text(),
-      group: null,
-    });
+    const content = await file.text();
+    const result = await store.importBookmarks(detectImportFormat(file.name, content), content, undefined);
     importMessage.value = t("bookmarks.importResult", { imported: result.imported, skipped: result.skipped })
       + (result.warnings.length ? `. ${result.warnings.join(" ")}` : "");
-    await loadConnections();
   } catch (error) {
     importMessage.value = t("bookmarks.importFailed", { error: String(error) });
-  } finally {
-    input.value = "";
   }
 }
 </script>
@@ -250,7 +189,8 @@ async function handleImportFile(event: Event) {
       <div class="bookmark-header-actions">
         <input ref="importFileInput" type="file" accept=".reg,.conf,.config,text/plain" hidden @change="handleImportFile">
         <button class="bookmark-refresh-btn" :title="$t('bookmarks.importTitle')" @click="importFileInput?.click()">{{ $t('bookmarks.import') }}</button>
-        <button class="bookmark-refresh-btn" :title="$t('bookmarks.refreshList')" @click="() => loadConnections()">↻</button>
+        <button class="bookmark-refresh-btn" :title="$t('menu.bookmarkManager')" @click="emit('manage')">⚙</button>
+        <button class="bookmark-refresh-btn" :title="$t('bookmarks.refreshList')" @click="store.refresh()">↻</button>
       </div>
     </div>
 
@@ -281,15 +221,15 @@ async function handleImportFile(event: Event) {
     </div>
 
     <div v-else class="bookmark-list">
-      <div v-if="recentlyUsed.length && !searchQuery.trim()" class="bookmark-group" :class="{ collapsed: isGroupCollapsed(RECENTLY_USED_LABEL) }">
-        <div class="bookmark-group-header" @click="toggleGroup(RECENTLY_USED_LABEL)">
+      <div v-if="recentlyUsed.length && !searchQuery.trim()" class="bookmark-group" :class="{ collapsed: store.isGroupCollapsed(RECENTLY_USED_LABEL) }">
+        <div class="bookmark-group-header" @click="store.toggleGroup(RECENTLY_USED_LABEL)">
           <div class="bookmark-group-header-left">
             <span class="bookmark-group-arrow">›</span>
             <span class="bookmark-group-name">{{ RECENTLY_USED_LABEL }}</span>
           </div>
           <span class="bookmark-group-count">{{ recentlyUsed.length }}</span>
         </div>
-        <ul v-if="!isGroupCollapsed(RECENTLY_USED_LABEL)" class="bookmark-group-list">
+        <ul v-if="!store.isGroupCollapsed(RECENTLY_USED_LABEL)" class="bookmark-group-list">
           <li
             v-for="connection in recentlyUsed"
             :key="connection.id"
@@ -318,9 +258,9 @@ async function handleImportFile(event: Event) {
         <div
           v-if="row.kind === 'folder'"
           class="bookmark-group-header bookmark-tree-folder"
-          :class="{ collapsed: isGroupCollapsed(row.folder.path) }"
+          :class="{ collapsed: store.isGroupCollapsed(row.folder.path) }"
           :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
-          @click="toggleGroup(row.folder.path)"
+          @click="store.toggleGroup(row.folder.path)"
         >
           <div class="bookmark-group-header-left">
             <span class="bookmark-group-arrow">›</span>
@@ -359,13 +299,15 @@ async function handleImportFile(event: Event) {
       :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
     >
       <button class="bookmark-context-item" @click="openEditDialog(contextMenu.connection)">✏️ {{ $t('common.edit') }}</button>
-      <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection.id)">🗑 {{ $t('common.delete') }}</button>
+      <button class="bookmark-context-item" @click="contextMenu = null; emit('manage')">🗂 {{ $t('menu.bookmarkManager') }}</button>
+      <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection)">🗑 {{ $t('common.delete') }}</button>
     </div>
 
     <BookmarkEditor
       v-if="editingConnection"
       :connection="editingConnection"
       :settings="props.settings"
+      :groups="groupOptions"
       @save="handleSaveConnection"
       @cancel="closeEditDialog"
     />
