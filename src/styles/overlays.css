@@ -178,6 +178,9 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Six entries now — keep the last one reachable on a short window. */
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
 }
 
 .newtab-option-btn {

@@ -124,6 +124,12 @@ export function useAppEventListeners({
         listen("menu-new-serial", () => {
           handleOpenConnectionFromMenu("serial");
         }),
+        listen("menu-new-rfc2217", () => {
+          handleOpenConnectionFromMenu("rfc2217");
+        }),
+        listen("menu-new-raw-tcp", () => {
+          handleOpenConnectionFromMenu("raw-tcp");
+        }),
         listen("menu-close-tab", () => {
           handleCloseActiveTab();
         }),
