@@ -4,7 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings, type SerialHistoryItem } from "./settings";
 import { buildDefaultLogPath } from "./logging";
 import { collectGroupPaths } from "./bookmarks";
-import { isReconnectEnabled, type AutoLoginRule, type ConnectResult, type ConnectionProtocol, type JumpHostConfig, type ReconnectType, type SavedConnection, type SerialConfig, type SshAuthType } from "./types";
+import { isReconnectEnabled, type AutoLoginRule, type ConnectResult, type ConnectionProtocol, type JumpHostConfig, type ReconnectType, type SavedConnection, type SerialConfig, type SerialTransport, type SshAuthType } from "./types";
+import { isLoopbackHost, isNetworkSerialTransport, parseSerialEndpoint, serialTargetLabel, RFC2217_DEFAULT_PORT } from "./serialTransport";
 import "./ConnectDialog.css";
 
 interface SerialPortInfo {
@@ -26,6 +27,11 @@ interface SerialPresetOption {
   id: string;
   name: string;
   portName?: string;
+  transport?: SerialTransport;
+  host?: string;
+  netPort?: number;
+  adoptServerParams?: boolean;
+  autoReconnect?: boolean;
   baudRate: number;
   dataBits: 5 | 6 | 7 | 8;
   stopBits: 1 | 2;
@@ -58,7 +64,22 @@ const BUILTIN_SERIAL_PRESETS: SerialPresetOption[] = [
   { id: "builtin-9600-7e1", name: "9600 · 7E1", baudRate: 9600, dataBits: 7, stopBits: 1, parity: "even", flowControl: "none" },
 ];
 
-function applySerialOption(option: Pick<SerialPresetOption, "portName" | "baudRate" | "dataBits" | "stopBits" | "parity" | "flowControl">) {
+function applySerialOption(option: Pick<SerialPresetOption, "portName" | "transport" | "host" | "netPort" | "adoptServerParams" | "autoReconnect" | "baudRate" | "dataBits" | "stopBits" | "parity" | "flowControl">) {
+  if (option.transport) {
+    serialTransport.value = option.transport;
+  }
+  if (option.host) {
+    serialHost.value = option.host;
+  }
+  if (option.netPort) {
+    serialNetPort.value = String(option.netPort);
+  }
+  if (option.adoptServerParams !== undefined) {
+    serialAdoptServerParams.value = option.adoptServerParams;
+  }
+  if (option.autoReconnect !== undefined) {
+    serialAutoReconnect.value = option.autoReconnect;
+  }
   if (option.portName) {
     serialPortName.value = option.portName;
   }
@@ -92,6 +113,11 @@ const customGroup = ref("");
 const existingGroups = ref<string[]>([]);
 const customGroupInput = ref<HTMLInputElement | null>(null);
 const telnetPort = ref("23");
+const serialTransport = ref<SerialTransport>(props.lastSerialConfig?.transport ?? "local");
+const serialHost = ref(props.lastSerialConfig?.host ?? "");
+const serialNetPort = ref(String(props.lastSerialConfig?.netPort ?? RFC2217_DEFAULT_PORT));
+const serialAdoptServerParams = ref(props.lastSerialConfig?.adoptServerParams ?? false);
+const serialAutoReconnect = ref(props.lastSerialConfig?.autoReconnect ?? true);
 const serialPortName = ref(props.lastSerialConfig?.portName ?? "");
 const serialBaudRate = ref(String(props.lastSerialConfig?.baudRate ?? 9600));
 const serialDataBits = ref<"5" | "6" | "7" | "8">(String(props.lastSerialConfig?.dataBits ?? 8) as "5" | "6" | "7" | "8");
@@ -109,12 +135,44 @@ const reconnectType = ref<ReconnectType>("manual");
 const isSsh = computed(() => protocol.value === "ssh");
 const isTelnet = computed(() => protocol.value === "telnet");
 const isSerial = computed(() => protocol.value === "serial");
+const isLocalSerial = computed(() => isSerial.value && serialTransport.value === "local");
+const isNetworkSerial = computed(() => isSerial.value && isNetworkSerialTransport(serialTransport.value));
+const isRfc2217 = computed(() => isSerial.value && serialTransport.value === "rfc2217");
+const parsedNetPort = computed(() => parseInt(serialNetPort.value, 10) || RFC2217_DEFAULT_PORT);
+
+/** RFC 2217 has no authentication and no encryption, so anything on the path
+ *  between here and the device server can read the console and type into it.
+ *  Over loopback — the near end of an SSH local forward — that stops being
+ *  true, which is the only sound way to reach one across a network. */
+/** Line settings are not ours to choose on a bare byte pipe, nor when we have
+ *  agreed to adopt the server's. Scoped to the transports they apply to —
+ *  otherwise ticking "adopt" and switching back to a local port left the fields
+ *  greyed out with no explanation. */
+const serialParamsLocked = computed(() => (
+  serialTransport.value === "raw-tcp" || (isRfc2217.value && serialAdoptServerParams.value)
+));
+
+const serialCleartextWarning = computed(() => (
+  isNetworkSerial.value
+  && serialHost.value.trim().length > 0
+  && !isLoopbackHost(serialHost.value)
+));
+
+/** What the session is identified by: a device path locally, `host:port` over
+ *  the network. Stored in `portName` so tab titles, bookmarks and log names all
+ *  keep reading one field. */
+const serialTarget = computed(() => serialTargetLabel(
+  serialTransport.value,
+  serialPortName.value.trim(),
+  serialHost.value,
+  parsedNetPort.value,
+));
 
 const recentPresetOptions = computed<SerialPresetOption[]>(() => {
   const seen = new Set<string>();
   return props.recentSerialConfigs
     .filter((item) => {
-      const key = `${item.portName}|${item.baudRate}|${item.dataBits}|${item.stopBits}|${item.parity}|${item.flowControl}`;
+      const key = `${item.transport ?? "local"}|${item.portName}|${item.baudRate}|${item.dataBits}|${item.stopBits}|${item.parity}|${item.flowControl}`;
       if (seen.has(key)) {
         return false;
       }
@@ -125,6 +183,11 @@ const recentPresetOptions = computed<SerialPresetOption[]>(() => {
       id: item.id,
       name: item.name,
       portName: item.portName,
+      transport: item.transport,
+      host: item.host,
+      netPort: item.netPort,
+      adoptServerParams: item.adoptServerParams,
+      autoReconnect: item.autoReconnect,
       baudRate: item.baudRate,
       dataBits: item.dataBits,
       stopBits: item.stopBits,
@@ -146,10 +209,11 @@ watch(() => props.lastSerialConfig, (lastSerialConfig) => {
 }, { immediate: true });
 
 watch(
-  [serialBaudRate, serialDataBits, serialStopBits, serialParity, serialFlowControl, serialPortName, serialPresetOptions],
+  [serialBaudRate, serialDataBits, serialStopBits, serialParity, serialFlowControl, serialPortName, serialTransport, serialPresetOptions],
   () => {
     const matched = serialPresetOptions.value.find((option) => (
-      (option.portName === undefined || option.portName === serialPortName.value)
+      (option.transport ?? "local") === serialTransport.value
+      && (option.portName === undefined || option.portName === serialPortName.value)
       && option.baudRate === (parseInt(serialBaudRate.value, 10) || 9600)
       && option.dataBits === (parseInt(serialDataBits.value, 10) as 5 | 6 | 7 | 8)
       && option.stopBits === (parseInt(serialStopBits.value, 10) as 1 | 2)
@@ -206,11 +270,27 @@ async function loadSerialPorts() {
   }
 }
 
-watch(isSerial, (value) => {
+watch(isLocalSerial, (value) => {
   if (value) {
     void loadSerialPorts();
   }
 }, { immediate: true });
+
+/** Accept an endpoint URL pasted into the host field.
+ *
+ *  `rfc2217://host:2217` is pyserial's form, which is what people copy out of a
+ *  wiki or a colleague's message; splitting it by hand is pure friction. */
+function handleSerialHostInput(event: Event) {
+  const value = (event.target as HTMLInputElement).value;
+  const parsed = parseSerialEndpoint(value);
+  if (!parsed) {
+    serialHost.value = value;
+    return;
+  }
+  serialTransport.value = parsed.transport;
+  serialHost.value = parsed.host;
+  serialNetPort.value = String(parsed.port);
+}
 
 const defaultName = computed(() => {
   if (isSsh.value) {
@@ -218,6 +298,11 @@ const defaultName = computed(() => {
   }
   if (isTelnet.value) {
     return host.value ? `telnet://${host.value}:${telnetPort.value}` : "";
+  }
+  if (isNetworkSerial.value) {
+    return serialHost.value.trim()
+      ? `${serialTransport.value}://${serialTarget.value}@${serialBaudRate.value}`
+      : "";
   }
   return serialPortName.value ? `serial://${serialPortName.value}@${serialBaudRate.value}` : "";
 });
@@ -228,7 +313,7 @@ const defaultLogPath = computed(() => {
     host: host.value,
     user: user.value,
     port: isSsh.value ? (parseInt(port.value, 10) || 22) : isTelnet.value ? (parseInt(telnetPort.value, 10) || 23) : undefined,
-    serialPort: serialPortName.value,
+    serialPort: serialTarget.value,
     baudRate: parseInt(serialBaudRate.value, 10) || 9600,
     session: defaultName.value,
   });
@@ -245,6 +330,9 @@ const canConnect = computed(() => {
   }
   if (isTelnet.value) {
     return Boolean(host.value.trim());
+  }
+  if (isNetworkSerial.value) {
+    return Boolean(serialHost.value.trim());
   }
   return Boolean(serialPortName.value.trim());
 });
@@ -346,7 +434,10 @@ function handleSubmit(event: Event) {
   if (isSsh.value && authType.value === "key" && !privateKey.value.trim()) {
     return;
   }
-  if (isSerial.value && !serialPortName.value.trim()) {
+  if (isLocalSerial.value && !serialPortName.value.trim()) {
+    return;
+  }
+  if (isNetworkSerial.value && !serialHost.value.trim()) {
     return;
   }
 
@@ -354,7 +445,12 @@ function handleSubmit(event: Event) {
   const customConnectionName = connectionName.value.trim();
 
   const serialConfig: SerialConfig | undefined = isSerial.value ? {
-    portName: serialPortName.value.trim(),
+    transport: serialTransport.value,
+    portName: serialTarget.value,
+    host: isNetworkSerial.value ? serialHost.value.trim() : undefined,
+    netPort: isNetworkSerial.value ? parsedNetPort.value : undefined,
+    adoptServerParams: isRfc2217.value ? serialAdoptServerParams.value : undefined,
+    autoReconnect: isNetworkSerial.value ? serialAutoReconnect.value : undefined,
     baudRate: parseInt(serialBaudRate.value, 10) || 9600,
     dataBits: parseInt(serialDataBits.value, 10) as 5 | 6 | 7 | 8,
     stopBits: parseInt(serialStopBits.value, 10) as 1 | 2,
@@ -450,6 +546,25 @@ function handleSubmit(event: Event) {
         </div>
 
         <template v-else>
+          <div class="form-group">
+            <label>{{ $t('connect.serialTransport') }}</label>
+            <div class="protocol-selector serial-transport-selector">
+              <label :class="{ active: isLocalSerial }">
+                <input v-model="serialTransport" type="radio" name="serial-transport" value="local">
+                {{ $t('connect.serialTransportLocal') }}
+              </label>
+              <label :class="{ active: isRfc2217 }">
+                <input v-model="serialTransport" type="radio" name="serial-transport" value="rfc2217">
+                {{ $t('connect.serialTransportRfc2217') }}
+              </label>
+              <label :class="{ active: serialTransport === 'raw-tcp' }">
+                <input v-model="serialTransport" type="radio" name="serial-transport" value="raw-tcp">
+                {{ $t('connect.serialTransportRawTcp') }}
+              </label>
+            </div>
+            <div v-if="serialTransport === 'raw-tcp'" class="form-hint">{{ $t('connect.serialRawTcpHint') }}</div>
+          </div>
+
           <div class="serial-settings-grid serial-settings-grid--compact">
             <div class="form-group serial-settings-grid-span-2">
               <label>{{ $t('connect.preset') }}</label>
@@ -464,7 +579,7 @@ function handleSubmit(event: Event) {
               </select>
             </div>
 
-            <div class="form-group serial-settings-grid-span-2">
+            <div v-if="isLocalSerial" class="form-group serial-settings-grid-span-2">
               <label>{{ $t('connect.serialPort') }}</label>
               <div class="serial-port-row">
                 <select v-model="serialPortName" class="serial-port-select" required>
@@ -484,13 +599,50 @@ function handleSubmit(event: Event) {
               <div v-else class="form-hint">{{ $t('connect.noSerialPorts') }}</div>
             </div>
 
+            <template v-else>
+              <div class="form-group">
+                <label>{{ $t('connect.host') }}</label>
+                <input
+                  :value="serialHost"
+                  type="text"
+                  :placeholder="$t('connect.serialHostPlaceholder')"
+                  autocapitalize="none"
+                  autocorrect="off"
+                  spellcheck="false"
+                  required
+                  @input="handleSerialHostInput"
+                >
+              </div>
+              <div class="form-group">
+                <label>{{ $t('connect.port') }}</label>
+                <input v-model="serialNetPort" type="number" min="1" max="65535" required>
+              </div>
+              <div v-if="isRfc2217" class="form-group serial-settings-grid-span-2">
+                <label class="serial-adopt-toggle">
+                  <input v-model="serialAdoptServerParams" type="checkbox">
+                  {{ $t('connect.serialAdoptServerParams') }}
+                </label>
+                <div class="form-hint">{{ $t('connect.serialAdoptServerParamsHint') }}</div>
+              </div>
+              <div class="form-group serial-settings-grid-span-2">
+                <label class="serial-adopt-toggle">
+                  <input v-model="serialAutoReconnect" type="checkbox">
+                  {{ $t('connect.serialAutoReconnect') }}
+                </label>
+                <div class="form-hint">{{ $t('connect.serialAutoReconnectHint') }}</div>
+              </div>
+              <div v-if="serialCleartextWarning" class="form-group serial-settings-grid-span-2">
+                <div class="form-hint warning">{{ $t('connect.serialCleartextWarning') }}</div>
+              </div>
+            </template>
+
             <div class="form-group">
               <label>{{ $t('connect.baudRate') }}</label>
-              <input v-model="serialBaudRate" type="number" min="1" required>
+              <input v-model="serialBaudRate" :disabled="serialParamsLocked" type="number" min="1" required>
             </div>
             <div class="form-group">
               <label>{{ $t('connect.dataBits') }}</label>
-              <select v-model="serialDataBits">
+              <select v-model="serialDataBits" :disabled="serialParamsLocked">
                 <option value="5">5</option>
                 <option value="6">6</option>
                 <option value="7">7</option>
@@ -499,14 +651,14 @@ function handleSubmit(event: Event) {
             </div>
             <div class="form-group">
               <label>{{ $t('connect.stopBits') }}</label>
-              <select v-model="serialStopBits">
+              <select v-model="serialStopBits" :disabled="serialParamsLocked">
                 <option value="1">1</option>
                 <option value="2">2</option>
               </select>
             </div>
             <div class="form-group">
               <label>{{ $t('connect.parity') }}</label>
-              <select v-model="serialParity">
+              <select v-model="serialParity" :disabled="serialParamsLocked">
                 <option value="none">{{ $t('connect.none') }}</option>
                 <option value="odd">{{ $t('connect.odd') }}</option>
                 <option value="even">{{ $t('connect.even') }}</option>
@@ -514,7 +666,7 @@ function handleSubmit(event: Event) {
             </div>
             <div class="form-group serial-settings-grid-span-2">
               <label>{{ $t('connect.flowControl') }}</label>
-              <select v-model="serialFlowControl">
+              <select v-model="serialFlowControl" :disabled="serialParamsLocked">
                 <option value="none">{{ $t('connect.none') }}</option>
                 <option value="hardware">{{ $t('connect.hardware') }}</option>
                 <option value="software">{{ $t('connect.software') }}</option>

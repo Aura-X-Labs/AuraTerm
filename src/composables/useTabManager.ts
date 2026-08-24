@@ -1,7 +1,7 @@
 import { nextTick, ref, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { PaneLayoutTab } from "../usePaneLayout";
-import type { SerialConfig, SessionConfig } from "../types";
+import type { SerialParams, SessionConfig } from "../types";
 
 // NATO 字母表，用于生成唯一的标签页后缀
 const NATO_ALPHABET = [
@@ -17,9 +17,10 @@ function stripGeneratedTabSuffix(title: string) {
   return match ? match[1] : title;
 }
 
-export function formatSerialFrame(serialConfig: SerialConfig) {
-  const parity = serialConfig.parity === "none" ? "N" : serialConfig.parity === "even" ? "E" : "O";
-  return `${serialConfig.dataBits}${parity}${serialConfig.stopBits}`;
+/** `8N1` — takes bare params so it works on a live status as well as a config. */
+export function formatSerialFrame(params: SerialParams) {
+  const parity = params.parity === "none" ? "N" : params.parity === "even" ? "E" : "O";
+  return `${params.dataBits}${parity}${params.stopBits}`;
 }
 
 export function buildBaseTabTitle(session: SessionConfig): string {

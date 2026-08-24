@@ -266,3 +266,76 @@
   color: var(--app-status-pill-fg);
 }
 
+
+/* ── Serial control surface in the status bar ─────────────────────────────────
+   Live baud picker, effective frame, modem lines and BREAK. Only rendered for
+   serial sessions whose transport actually has a control channel. */
+.terminal-status-baud {
+  padding: 1px 4px;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.terminal-status-frame {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+/* The server applied something other than what was asked for. Showing the
+   requested value as if it had taken effect is how an afternoon disappears. */
+.terminal-status-frame.clamped {
+  color: var(--app-warning);
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
+.terminal-status-modem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-status-modem-pill {
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  color: var(--app-text-dim);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
+
+.terminal-status-modem-pill.on {
+  border-color: var(--app-border-accent);
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+  opacity: 1;
+}
+
+.terminal-status-lineerror {
+  color: var(--app-warning);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.terminal-status-break {
+  padding: 1px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.terminal-status-break:hover {
+  border-color: var(--app-border-accent);
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+}

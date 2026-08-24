@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { purgeSerialBuffers, sendSerialBreak, setSerialParams, setSerialSignals } from "./composables/useTerminalSessionCommands";
+import { COMMON_BAUD_RATES, formatSerialParams } from "./serialTransport";
 import { listen } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import TerminalComponent from "./TerminalComponent.vue";
@@ -74,6 +76,7 @@ import type {
   SavedConnection,
   SerialConfig,
   SerialConnectionState,
+  SerialStatus,
   SessionConfig,
   SshConfig,
   TerminalHandle,
@@ -165,6 +168,9 @@ const isWindowFocused = ref(true);
 // Immutable Record updates ({ ...obj, [k]: v }) pair best with shallowRef:
 // the whole map is swapped, so shallow reactivity is enough and skips per-key proxies.
 const serialConnectionStates = shallowRef<Record<string, SerialConnectionState>>({});
+// Same immutable-swap pattern as serialConnectionStates: the backend coalesces
+// these to at most one every 50ms, so a plain replace is cheap enough.
+const serialStatuses = shallowRef<Record<string, SerialStatus>>({});
 const suppressTabClick = ref(false);
 const settingsRef = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const uiTheme = computed(() => deriveUiTheme(settings.value.theme, settings.value.uiThemeMode));
@@ -658,6 +664,89 @@ const activeSshConfig = computed<SshConfig | null>(() => (
 const activeSerialConfig = computed<SerialConfig | null>(() => (
   activeTab.value?.session.protocol === "serial" ? activeTab.value.session.serialConfig : null
 ));
+const activeSerialStatus = computed<SerialStatus | null>(() => {
+  if (!activeTab.value || !activeSerialConfig.value) {
+    return null;
+  }
+  return serialStatuses.value[activeTab.value.id] ?? null;
+});
+
+/** True when this session can retune the line, send BREAK and drive DTR/RTS. */
+const serialControllable = computed(() => activeSerialStatus.value?.controllable ?? false);
+
+/** Baud rates offered in the status bar, always including whatever is in use. */
+const serialBaudOptions = computed(() => {
+  const rates = new Set<number>(COMMON_BAUD_RATES);
+  const current = activeSerialStatus.value?.effective.baudRate;
+  if (current) {
+    rates.add(current);
+  }
+  return [...rates].sort((left, right) => left - right);
+});
+
+const serialFrameLabel = computed(() => {
+  const status = activeSerialStatus.value;
+  return status ? formatSerialFrame(status.effective) : "";
+});
+
+/** The server applied something other than what was asked for. */
+const serialParamsClamped = computed(() => {
+  const status = activeSerialStatus.value;
+  if (!status) {
+    return false;
+  }
+  return formatSerialParams(status.effective) !== formatSerialParams(status.requested);
+});
+
+const serialParamsTitle = computed(() => {
+  const status = activeSerialStatus.value;
+  if (!status) {
+    return "";
+  }
+  return serialParamsClamped.value
+    ? t("serial.paramsClamped", {
+      effective: formatSerialParams(status.effective),
+      requested: formatSerialParams(status.requested),
+    })
+    : formatSerialParams(status.effective);
+});
+
+const serialModemPills = computed(() => {
+  const modem = activeSerialStatus.value?.modem;
+  if (!modem) {
+    return [];
+  }
+  return [
+    { name: "CTS", on: modem.cts },
+    { name: "DSR", on: modem.dsr },
+    { name: "CD", on: modem.cd },
+    { name: "RI", on: modem.ri },
+  ];
+});
+
+/** Framing and parity errors are the most direct evidence of a wrong baud rate,
+ *  which is exactly what a person staring at garbage needs told. */
+const serialLineErrorText = computed(() => {
+  const errors = activeSerialStatus.value?.lineErrors;
+  if (!errors) {
+    return "";
+  }
+  const names: string[] = [];
+  if (errors.framing) {
+    names.push(t("serial.errFraming"));
+  }
+  if (errors.parity) {
+    names.push(t("serial.errParity"));
+  }
+  if (errors.overrun) {
+    names.push(t("serial.errOverrun"));
+  }
+  if (errors.breakDetected) {
+    names.push(t("serial.errBreak"));
+  }
+  return names.join(" · ");
+});
+
 const activeSerialConnectionState = computed<SerialConnectionState | null>(() => {
   if (!activeTab.value || !activeSerialConfig.value) {
     return null;
@@ -1271,11 +1360,17 @@ async function handleSaveSettings(newSettings: AppSettings) {
 }
 
 function rememberSerialConfig(serialConfig: SerialConfig) {
-  const configKey = `${serialConfig.portName}|${serialConfig.baudRate}|${serialConfig.dataBits}|${serialConfig.stopBits}|${serialConfig.parity}|${serialConfig.flowControl}`;
+  const transport = serialConfig.transport ?? "local";
+  const configKey = `${transport}|${serialConfig.portName}|${serialConfig.baudRate}|${serialConfig.dataBits}|${serialConfig.stopBits}|${serialConfig.parity}|${serialConfig.flowControl}`;
   const historyItem: SerialHistoryItem = {
     id: crypto.randomUUID(),
     name: `${serialConfig.portName} · ${serialConfig.baudRate} ${formatSerialFrame(serialConfig)}`,
     portName: serialConfig.portName,
+    transport,
+    host: serialConfig.host,
+    netPort: serialConfig.netPort,
+    adoptServerParams: serialConfig.adoptServerParams,
+    autoReconnect: serialConfig.autoReconnect,
     baudRate: serialConfig.baudRate,
     dataBits: serialConfig.dataBits,
     stopBits: serialConfig.stopBits,
@@ -1287,7 +1382,7 @@ function rememberSerialConfig(serialConfig: SerialConfig) {
   const recentSerialConfigs = [
     historyItem,
     ...current.recentSerialConfigs.filter((item) => {
-      const itemKey = `${item.portName}|${item.baudRate}|${item.dataBits}|${item.stopBits}|${item.parity}|${item.flowControl}`;
+      const itemKey = `${item.transport ?? "local"}|${item.portName}|${item.baudRate}|${item.dataBits}|${item.stopBits}|${item.parity}|${item.flowControl}`;
       return itemKey !== configKey;
     }),
   ].slice(0, 8);
@@ -1429,6 +1524,66 @@ async function handleButtonsChange(buttons: QuickButton[]) {
   await invoke("save_settings", { settings: newSettings }).catch(console.error);
   settingsRef.value = newSettings;
   settings.value = newSettings;
+}
+
+function updateSerialStatus(tabId: string, status: SerialStatus) {
+  serialStatuses.value = { ...serialStatuses.value, [tabId]: status };
+}
+
+async function runSerialControl(action: () => Promise<void>, success?: string) {
+  try {
+    await action();
+    if (success) {
+      showCloudToast(success);
+    }
+  } catch (error) {
+    // The backend explains *why* a control is unavailable (raw TCP has no
+    // control channel, the server never accepted option 44); surface that text
+    // rather than a generic failure.
+    showCloudToast(String(error), true);
+  }
+}
+
+async function handleSerialBaudChange(event: Event) {
+  const status = activeSerialStatus.value;
+  const tabId = activeTabId.value;
+  if (!status || !tabId) {
+    return;
+  }
+  const baudRate = parseInt((event.target as HTMLSelectElement).value, 10);
+  if (!Number.isFinite(baudRate) || baudRate <= 0) {
+    return;
+  }
+  await runSerialControl(() => setSerialParams(tabId, { ...status.effective, baudRate }));
+}
+
+async function handleSendSerialBreak() {
+  const tabId = activeTabId.value;
+  if (!tabId) {
+    return;
+  }
+  await runSerialControl(() => sendSerialBreak(tabId), t("serial.breakSent"));
+}
+
+async function handleToggleSerialSignal(line: "dtr" | "rts") {
+  const status = activeSerialStatus.value;
+  const tabId = activeTabId.value;
+  if (!status || !tabId) {
+    return;
+  }
+  const next = !status.signals[line];
+  await runSerialControl(
+    () => setSerialSignals(tabId, { [line]: next }),
+    t(next ? "serial.signalHigh" : "serial.signalLow", { line: line.toUpperCase() }),
+  );
+}
+
+async function handlePurgeSerialBuffers() {
+  const tabId = activeTabId.value;
+  if (!tabId) {
+    return;
+  }
+  await runSerialControl(() => purgeSerialBuffers(tabId), t("serial.purged"));
 }
 
 function updateSerialConnectionState(tabId: string, state: SerialConnectionState) {
@@ -1789,6 +1944,12 @@ function handleCloseTab(id: string) {
 
   handleTabRemoved(id, nextTabs);
 
+  if (id in serialStatuses.value) {
+    const nextStatuses = { ...serialStatuses.value };
+    delete nextStatuses[id];
+    serialStatuses.value = nextStatuses;
+  }
+
   if (id in serialConnectionStates.value) {
     const nextStates = { ...serialConnectionStates.value };
     delete nextStates[id];
@@ -2024,6 +2185,10 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "remote-assist", title: assistState.value ? t("assist.paletteManage") : t("assist.paletteStart"), group: t("palette.groups.app"), keywords: "remote assist help support code invite guest share screen pair", run: () => handleOpenRemoteAssist() },
     { id: "join-assist", title: t("assist.paletteJoin"), group: t("palette.groups.app"), keywords: "join remote assist code guest help someone terminal", run: () => handleOpenJoinAssist() },
     { id: "remote-assist-revoke", title: t("assist.paletteRevoke"), group: t("palette.groups.app"), keywords: "remote assist revoke control kick stop input", run: () => handleRevokeAllAssistControl() },
+    { id: "serial-break", title: t("serial.cmdBreak"), subtitle: t("serial.cmdBreakHint"), group: t("palette.groups.serial"), keywords: "serial break uart u-boot rommon interrupt", enabled: serialControllable.value, run: () => { void handleSendSerialBreak(); } },
+    { id: "serial-dtr", title: t("serial.cmdToggleSignal", { line: "DTR", state: activeSerialStatus.value?.signals.dtr ? t("serial.high") : t("serial.low") }), subtitle: t("serial.cmdDtrHint"), group: t("palette.groups.serial"), keywords: "serial dtr reset esp32 arduino bootloader signal", enabled: serialControllable.value, run: () => { void handleToggleSerialSignal("dtr"); } },
+    { id: "serial-rts", title: t("serial.cmdToggleSignal", { line: "RTS", state: activeSerialStatus.value?.signals.rts ? t("serial.high") : t("serial.low") }), subtitle: t("serial.cmdRtsHint"), group: t("palette.groups.serial"), keywords: "serial rts flow control signal", enabled: serialControllable.value, run: () => { void handleToggleSerialSignal("rts"); } },
+    { id: "serial-purge", title: t("serial.cmdPurge"), subtitle: t("serial.cmdPurgeHint"), group: t("palette.groups.serial"), keywords: "serial purge flush clear buffer stale", enabled: serialControllable.value, run: () => { void handlePurgeSerialBuffers(); } },
     { id: "user-manual", title: t("menu.userManual"), group: t("palette.groups.app"), keywords: "help docs documentation guide manual", run: () => handleOpenUserManual() },
     { id: "about", title: t("menu.about"), group: t("palette.groups.app"), run: () => handleOpenAbout() },
   ];
@@ -2645,6 +2810,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                 @session-update="(session) => updateTabSession(tab.id, session)"
                 @ssh-password-updated="sidebarRefreshToken += 1"
                 @serial-connection-state-change="(state) => updateSerialConnectionState(tab.id, state)"
+                @serial-status="(status) => updateSerialStatus(tab.id, status)"
                 @broadcast-input="(data) => handleBroadcastInput(tab.id, data)"
                 @ssh-connected="handleSshConnectedForTab(tab.id)"
               />
@@ -2779,6 +2945,49 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             <span class="terminal-status-indicator" :class="activeSerialConnectionState ?? 'connected'" />
             <span>{{ activeSerialConfig?.portName ?? activeTab.title }}</span>
             <span class="terminal-status-pill">{{ activeSerialConnectionState ?? activeTab.session.protocol }}</span>
+
+            <template v-if="activeSerialStatus">
+              <select
+                v-if="serialControllable"
+                class="terminal-status-baud"
+                :value="String(activeSerialStatus.effective.baudRate)"
+                :title="$t('serial.changeBaudRate')"
+                :aria-label="$t('serial.changeBaudRate')"
+                @change="handleSerialBaudChange"
+              >
+                <option v-for="rate in serialBaudOptions" :key="rate" :value="String(rate)">{{ rate }}</option>
+              </select>
+              <span v-else class="terminal-status-pill">{{ activeSerialStatus.effective.baudRate }}</span>
+
+              <span
+                class="terminal-status-frame"
+                :class="{ clamped: serialParamsClamped }"
+                :title="serialParamsTitle"
+              >{{ serialFrameLabel }}</span>
+
+              <span class="terminal-status-modem" :title="$t('serial.modemLines')">
+                <span
+                  v-for="pill in serialModemPills"
+                  :key="pill.name"
+                  class="terminal-status-modem-pill"
+                  :class="{ on: pill.on }"
+                >{{ pill.name }}</span>
+              </span>
+
+              <span
+                v-if="serialLineErrorText"
+                class="terminal-status-lineerror"
+                :title="`${serialLineErrorText} — ${$t('serial.lineErrorHint')}`"
+              >⚠ {{ serialLineErrorText }}</span>
+
+              <button
+                v-if="serialControllable"
+                type="button"
+                class="terminal-status-break"
+                :title="$t('serial.cmdBreakHint')"
+                @click="handleSendSerialBreak"
+              >BREAK</button>
+            </template>
           </div>
           <div class="terminal-statusbar-right">
             <button

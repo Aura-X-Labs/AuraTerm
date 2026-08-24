@@ -51,6 +51,18 @@ pub struct SavedConnection {
     pub post_connect_commands: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_name: Option<String>,
+    /// Serial transport: `"local"` (the default when absent), `"rfc2217"` or
+    /// `"raw-tcp"`. Network transports keep their endpoint in `host`/`port`
+    /// above rather than growing a parallel pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_transport: Option<String>,
+    /// RFC 2217 only: negotiate the option but adopt the server's existing port
+    /// settings instead of pushing our own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt_server_params: Option<bool>,
+    /// Network serial only: come back automatically when the link drops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_auto_reconnect: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baud_rate: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -822,6 +834,9 @@ fn imported_connection(name: String, group: String, protocol: &str, host: String
         auto_login_rules: Vec::new(),
         post_connect_commands: Vec::new(),
         port_name: None,
+        serial_transport: None,
+        adopt_server_params: None,
+        serial_auto_reconnect: None,
         baud_rate: None,
         data_bits: None,
         stop_bits: None,
@@ -1045,6 +1060,56 @@ mod import_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A strict serde struct silently drops fields it does not declare, so a
+    /// network serial bookmark would come back as a local port aimed at a
+    /// label. Lock the round-trip down.
+    #[test]
+    fn network_serial_bookmark_survives_a_save_and_load() {
+        let json = serde_json::json!({
+            "id": "b1",
+            "name": "Lab console",
+            "protocol": "serial",
+            "host": "10.0.0.5",
+            "port": 2217,
+            "portName": "10.0.0.5:2217",
+            "serialTransport": "rfc2217",
+            "adoptServerParams": true,
+            "serialAutoReconnect": true,
+            "baudRate": 115200,
+            "dataBits": 8,
+            "stopBits": 1,
+            "parity": "none",
+            "flowControl": "none",
+            "createdAt": 1_700_000_000_u64,
+        });
+
+        let parsed: SavedConnection = serde_json::from_value(json).expect("parse");
+        let reloaded: SavedConnection =
+            serde_json::from_str(&serde_json::to_string(&parsed).expect("encode")).expect("decode");
+
+        assert_eq!(reloaded.serial_transport.as_deref(), Some("rfc2217"));
+        assert_eq!(reloaded.adopt_server_params, Some(true));
+        assert_eq!(reloaded.serial_auto_reconnect, Some(true));
+        assert_eq!(reloaded.host, "10.0.0.5");
+        assert_eq!(reloaded.port, 2217);
+    }
+
+    /// Bookmarks written before network serial existed must still load.
+    #[test]
+    fn local_serial_bookmark_without_a_transport_still_loads() {
+        let json = serde_json::json!({
+            "id": "b2",
+            "name": "USB console",
+            "protocol": "serial",
+            "portName": "/dev/ttyUSB0",
+            "baudRate": 9600,
+            "createdAt": 1_700_000_000_u64,
+        });
+        let parsed: SavedConnection = serde_json::from_value(json).expect("parse");
+        assert_eq!(parsed.serial_transport, None);
+        assert_eq!(parsed.port_name.as_deref(), Some("/dev/ttyUSB0"));
+    }
 
     #[test]
     fn rename_carries_subfolders_and_leaves_others_alone() {

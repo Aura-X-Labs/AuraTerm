@@ -164,13 +164,98 @@ export interface TelnetConfig {
   port: number;
 }
 
-export interface SerialConfig {
-  portName: string;
+/** How a serial session reaches the UART.
+ *
+ *  `local` is a port on this machine. `rfc2217` speaks the Telnet Com Port
+ *  Control Option to a device server, so line parameters actually take effect
+ *  remotely. `raw-tcp` is a bare byte pipe with no parameter control at all. */
+export type SerialTransport = "local" | "rfc2217" | "raw-tcp";
+
+/** The five line parameters, shared by the connect form and the live status. */
+export interface SerialParams {
   baudRate: number;
   dataBits: 5 | 6 | 7 | 8;
   stopBits: 1 | 2;
   parity: "none" | "odd" | "even";
   flowControl: "none" | "hardware" | "software";
+}
+
+export interface SerialConfig extends SerialParams {
+  /** Absent means a local port, so workspaces and bookmarks saved before
+   *  network serial existed keep loading unchanged. */
+  transport?: SerialTransport;
+  /** Local: the device path. Network: a derived `host:port` label, which keeps
+   *  every existing display and log-naming path working as-is. */
+  portName: string;
+  host?: string;
+  netPort?: number;
+  /** RFC 2217 only: negotiate the option but do not push parameters, adopting
+   *  whatever the device server is already configured with. Shared console
+   *  servers need this — otherwise the first client to connect silently
+   *  retunes the port for everyone already on it. */
+  adoptServerParams?: boolean;
+  /** Network transports only: come back automatically when the link drops.
+   *  Defaults to on — a device server rebooting is routine, and a console that
+   *  recovers by itself is the point. */
+  autoReconnect?: boolean;
+}
+
+/** Which line parameters the peer explicitly confirmed. Without this the UI
+ *  cannot tell "the server agreed to 115200" from "nobody ever answered". */
+export interface SerialParamsConfirmed {
+  baudRate: boolean;
+  dataBits: boolean;
+  stopBits: boolean;
+  parity: boolean;
+  flowControl: boolean;
+}
+
+/** Modem status lines reported by the peer. */
+export interface SerialModemLines {
+  cts: boolean;
+  dsr: boolean;
+  cd: boolean;
+  ri: boolean;
+}
+
+/** Line status errors. Framing or parity errors are usually the most direct
+ *  evidence that the baud rate is wrong. */
+export interface SerialLineErrors {
+  breakDetected: boolean;
+  framing: boolean;
+  parity: boolean;
+  overrun: boolean;
+}
+
+/** The two output control lines, as last driven by this session.
+ *
+ *  They are outputs, so a local UART cannot read them back — this is what we
+ *  set. RFC 2217 servers acknowledge them, and those acknowledgements win. */
+export interface SerialSignals {
+  dtr: boolean;
+  rts: boolean;
+}
+
+/** Payload of the `serial-status:<id>` event. */
+export interface SerialStatus {
+  id: string;
+  transport: SerialTransport;
+  rfc2217Negotiated: boolean;
+  /** True once the handshake has a verdict — agreed, refused, or timed out.
+   *  A reconnect passes through "not agreed yet" on its way to a verdict, and
+   *  those two states deserve very different words. */
+  negotiationSettled: boolean;
+  binaryNegotiated: boolean;
+  requested: SerialParams;
+  effective: SerialParams;
+  confirmed: SerialParamsConfirmed;
+  modem: SerialModemLines;
+  signals: SerialSignals;
+  lineErrors: SerialLineErrors;
+  /** Whether this session can retune the line, send BREAK and drive DTR/RTS.
+   *  False for raw TCP, and for RFC 2217 until the option is agreed. */
+  controllable: boolean;
+  signature?: string | null;
 }
 
 export interface ConnectResult {
@@ -201,6 +286,11 @@ export interface SavedConnection {
   autoLoginRules?: AutoLoginRule[];
   postConnectCommands?: string[];
   portName?: string;
+  /** Absent means a local port. Network transports reuse `host`/`port` above
+   *  for the endpoint, so this is the only new bookmark field. */
+  serialTransport?: SerialTransport;
+  adoptServerParams?: boolean;
+  serialAutoReconnect?: boolean;
   baudRate?: number;
   dataBits?: 5 | 6 | 7 | 8;
   stopBits?: 1 | 2;

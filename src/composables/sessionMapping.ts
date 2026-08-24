@@ -6,6 +6,7 @@ import {
   type SavedConnection,
   type SessionConfig,
 } from "../types";
+import { isNetworkSerialTransport, serialTargetLabel } from "../serialTransport";
 
 function resolveConnectionProtocol(connection: SavedConnection): ConnectionProtocol {
   return connection.protocol ?? "ssh";
@@ -60,12 +61,14 @@ export function buildSavedConnectionFromConnectResult(
       ? result.sshConfig?.host || ""
       : protocol === "telnet"
         ? result.telnetConfig?.host || ""
-        : "",
+        // Network serial reuses the existing host/port columns rather than
+        // growing a parallel pair.
+        : result.serialConfig?.host || "",
     port: protocol === "ssh"
       ? result.sshConfig?.port || 22
       : protocol === "telnet"
         ? result.telnetConfig?.port || 23
-        : 0,
+        : result.serialConfig?.netPort || 0,
     user: protocol === "ssh" ? result.sshConfig?.user || "" : "",
     authType: protocol === "ssh"
       ? (result.sshConfig?.authType ?? (result.sshConfig?.privateKey ? "key" : "password"))
@@ -78,6 +81,9 @@ export function buildSavedConnectionFromConnectResult(
     autoLoginRules: protocol === "ssh" ? result.sshConfig?.autoLoginRules : undefined,
     postConnectCommands: protocol === "ssh" ? result.sshConfig?.postConnectCommands : undefined,
     portName: protocol === "serial" ? result.serialConfig?.portName : undefined,
+    serialTransport: protocol === "serial" ? result.serialConfig?.transport : undefined,
+    adoptServerParams: protocol === "serial" ? result.serialConfig?.adoptServerParams : undefined,
+    serialAutoReconnect: protocol === "serial" ? result.serialConfig?.autoReconnect : undefined,
     baudRate: protocol === "serial" ? result.serialConfig?.baudRate : undefined,
     dataBits: protocol === "serial" ? result.serialConfig?.dataBits : undefined,
     stopBits: protocol === "serial" ? result.serialConfig?.stopBits : undefined,
@@ -93,10 +99,20 @@ export function buildSessionFromSavedConnection(connection: SavedConnection): Se
   const protocol = resolveConnectionProtocol(connection);
 
   if (protocol === "serial" && connection.portName && connection.baudRate) {
+    const transport = connection.serialTransport ?? "local";
     return {
       protocol: "serial",
       serialConfig: {
-        portName: connection.portName,
+        transport,
+        // Rebuilt rather than trusted: a bookmark edited to a new host must not
+        // keep connecting to the label it was saved with.
+        portName: isNetworkSerialTransport(transport)
+          ? serialTargetLabel(transport, connection.portName, connection.host, connection.port)
+          : connection.portName,
+        host: isNetworkSerialTransport(transport) ? connection.host : undefined,
+        netPort: isNetworkSerialTransport(transport) ? connection.port : undefined,
+        adoptServerParams: transport === "rfc2217" ? connection.adoptServerParams : undefined,
+        autoReconnect: isNetworkSerialTransport(transport) ? connection.serialAutoReconnect : undefined,
         baudRate: connection.baudRate,
         dataBits: connection.dataBits ?? 8,
         stopBits: connection.stopBits ?? 1,

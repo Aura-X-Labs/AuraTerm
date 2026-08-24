@@ -182,9 +182,9 @@ pub fn emit_pty_exit(app: &AppHandle, id: &str, message: impl Into<String>) {
 
 // ── Telnet IAC (Interpret As Command) stream filter ───────────────────────────
 
-const IAC: u8 = 255; // Interpret As Command
-const SB: u8 = 250; // Subnegotiation begin
-const SE: u8 = 240; // Subnegotiation end
+pub(crate) const IAC: u8 = 255; // Interpret As Command
+pub(crate) const SB: u8 = 250; // Subnegotiation begin
+pub(crate) const SE: u8 = 240; // Subnegotiation end
 const WILL: u8 = 251;
 const WONT: u8 = 252;
 const DO: u8 = 253;
@@ -228,8 +228,17 @@ pub struct TelnetIacFilter {
     subneg_data: Vec<u8>,
     local_enabled: [bool; 256],
     remote_enabled: [bool; 256],
+    /// Options we already volunteered a `WILL` for, so an incoming `DO` is an
+    /// answer and must not be answered again (RFC 854 loop avoidance).
+    local_offered: [bool; 256],
+    /// Options we already asked for with `DO`, for the same reason.
+    remote_requested: [bool; 256],
     cols: u16,
     rows: u16,
+    /// Present only in RFC 2217 mode. Its presence switches the offered option
+    /// set: a serial device server has neither a window nor a terminal type, so
+    /// NAWS and TERMINAL-TYPE are dropped in favour of COM-PORT-OPTION.
+    com_port: Option<crate::rfc2217::ComPortState>,
 }
 
 impl Default for TelnetIacFilter {
@@ -240,8 +249,11 @@ impl Default for TelnetIacFilter {
             subneg_data: Vec::new(),
             local_enabled: [false; 256],
             remote_enabled: [false; 256],
+            local_offered: [false; 256],
+            remote_requested: [false; 256],
             cols: 80,
             rows: 24,
+            com_port: None,
         }
     }
 }
@@ -262,6 +274,54 @@ impl TelnetIacFilter {
 
     pub fn with_window_size(cols: u16, rows: u16) -> Self {
         Self { cols, rows, ..Self::default() }
+    }
+
+    /// Build a filter in RFC 2217 mode, driving `com_port` through the option
+    /// 44 handshake.
+    pub fn with_com_port(com_port: crate::rfc2217::ComPortState) -> Self {
+        Self { com_port: Some(com_port), ..Self::default() }
+    }
+
+    /// Bytes to send immediately after the socket connects.
+    ///
+    /// Only RFC 2217 sessions open with an unsolicited offer: BINARY in both
+    /// directions (a UART stream is 8-bit and must not be mangled by NVT rules),
+    /// SGA (no line-at-a-time turn taking), and COM-PORT-OPTION itself. Plain
+    /// Telnet keeps its purely reactive behaviour.
+    pub fn initial_negotiation(&mut self) -> Vec<u8> {
+        if self.com_port.is_none() {
+            return Vec::new();
+        }
+
+        let mut response = Vec::new();
+        for option in [TELNET_BINARY, TELNET_SGA] {
+            response.extend_from_slice(&[IAC, WILL, option]);
+            self.local_offered[option as usize] = true;
+            response.extend_from_slice(&[IAC, DO, option]);
+            self.remote_requested[option as usize] = true;
+        }
+        response.extend_from_slice(&[IAC, WILL, crate::rfc2217::COM_PORT_OPTION]);
+        self.local_offered[crate::rfc2217::COM_PORT_OPTION as usize] = true;
+        response
+    }
+
+    /// Whether outbound data may travel as raw 8-bit bytes. When false the
+    /// stream is NVT and CR has to be stuffed with NUL.
+    pub fn binary_out(&self) -> bool {
+        self.local_enabled[TELNET_BINARY as usize]
+    }
+
+    /// Whether BINARY is in effect in both directions.
+    pub fn binary_both_ways(&self) -> bool {
+        self.local_enabled[TELNET_BINARY as usize] && self.remote_enabled[TELNET_BINARY as usize]
+    }
+
+    pub fn com_port(&self) -> Option<&crate::rfc2217::ComPortState> {
+        self.com_port.as_ref()
+    }
+
+    pub fn com_port_mut(&mut self) -> Option<&mut crate::rfc2217::ComPortState> {
+        self.com_port.as_mut()
     }
 
     pub fn update_window_size(&mut self, cols: u16, rows: u16) -> Vec<u8> {
@@ -308,25 +368,48 @@ impl TelnetIacFilter {
                 },
                 TelnetParse::Option(verb) => {
                     match verb {
-                        DO if supports_local(byte) => {
-                            if !self.local_enabled[byte as usize] {
-                                self.local_enabled[byte as usize] = true;
+                        DO if self.supports_local(byte) => {
+                            let already_enabled = self.local_enabled[byte as usize];
+                            // A DO that answers our own WILL needs no reply.
+                            let answers_offer = self.local_offered[byte as usize];
+                            self.local_enabled[byte as usize] = true;
+                            self.local_offered[byte as usize] = false;
+                            if !already_enabled && !answers_offer {
                                 response.extend_from_slice(&[IAC, WILL, byte]);
                             }
                             if byte == TELNET_NAWS {
                                 response.extend_from_slice(&self.naws_response());
                             }
+                            if byte == crate::rfc2217::COM_PORT_OPTION {
+                                if let Some(com_port) = self.com_port.as_mut() {
+                                    response.extend_from_slice(&com_port.on_do());
+                                }
+                            }
                         }
                         DO => response.extend_from_slice(&[IAC, WONT, byte]),
-                        DONT => self.local_enabled[byte as usize] = false,
+                        DONT => {
+                            self.local_enabled[byte as usize] = false;
+                            self.local_offered[byte as usize] = false;
+                            if byte == crate::rfc2217::COM_PORT_OPTION {
+                                if let Some(com_port) = self.com_port.as_mut() {
+                                    com_port.on_dont();
+                                }
+                            }
+                        }
                         WILL if supports_remote(byte) => {
-                            if !self.remote_enabled[byte as usize] {
-                                self.remote_enabled[byte as usize] = true;
+                            let already_enabled = self.remote_enabled[byte as usize];
+                            let answers_request = self.remote_requested[byte as usize];
+                            self.remote_enabled[byte as usize] = true;
+                            self.remote_requested[byte as usize] = false;
+                            if !already_enabled && !answers_request {
                                 response.extend_from_slice(&[IAC, DO, byte]);
                             }
                         }
                         WILL => response.extend_from_slice(&[IAC, DONT, byte]),
-                        WONT => self.remote_enabled[byte as usize] = false,
+                        WONT => {
+                            self.remote_enabled[byte as usize] = false;
+                            self.remote_requested[byte as usize] = false;
+                        }
                         _ => {}
                     }
                     self.state = TelnetParse::Data;
@@ -368,6 +451,15 @@ impl TelnetIacFilter {
             response.extend_from_slice(b"xterm-256color");
             response.extend_from_slice(&[IAC, SE]);
         }
+
+        if self.subneg_option == Some(crate::rfc2217::COM_PORT_OPTION) {
+            // `subneg_data` already has `IAC IAC` collapsed back to a single
+            // 0xFF by the parser above, which is what the codec expects.
+            if let Some(com_port) = self.com_port.as_mut() {
+                com_port.handle_subnegotiation(&self.subneg_data);
+            }
+        }
+
         self.subneg_option = None;
         self.subneg_data.clear();
     }
@@ -385,8 +477,71 @@ impl TelnetIacFilter {
     }
 }
 
-fn supports_local(option: u8) -> bool {
-    matches!(option, TELNET_BINARY | TELNET_SGA | TELNET_TERMINAL_TYPE | TELNET_NAWS)
+impl TelnetIacFilter {
+    fn supports_local(&self, option: u8) -> bool {
+        if self.com_port.is_some() {
+            // A device server has no window and no terminal type; offering NAWS
+            // or TERMINAL-TYPE there only puts noise on the wire and confuses
+            // some older firmware.
+            return matches!(
+                option,
+                TELNET_BINARY | TELNET_SGA | crate::rfc2217::COM_PORT_OPTION
+            );
+        }
+        matches!(option, TELNET_BINARY | TELNET_SGA | TELNET_TERMINAL_TYPE | TELNET_NAWS)
+    }
+}
+
+/// Double every literal `0xFF` so the peer reads it as data instead of `IAC`.
+///
+/// Telnet's escape rule applies to *everything* leaving the socket that is not
+/// itself a command. Skipping it is invisible on ordinary text and then
+/// corrupts any 8-bit payload (ZMODEM, a firmware image, a paste of binary
+/// data) the moment a `0xFF` shows up.
+pub(crate) fn telnet_escape_iac(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    for &byte in data {
+        out.push(byte);
+        if byte == IAC {
+            out.push(IAC);
+        }
+    }
+    out
+}
+
+/// Escape user data for a Telnet stream.
+///
+/// In BINARY mode this is just [`telnet_escape_iac`]. Otherwise the stream is
+/// NVT, where a bare CR must be followed by NUL (RFC 854) — without it a peer
+/// may read the CR as a line ending nobody asked for. `CR LF` is already a
+/// complete NVT line ending and passes through untouched.
+pub(crate) fn telnet_escape_outbound(data: &[u8], binary: bool) -> Vec<u8> {
+    if binary {
+        return telnet_escape_iac(data);
+    }
+
+    let mut out = Vec::with_capacity(data.len() + 8);
+    let mut index = 0;
+    while index < data.len() {
+        match data[index] {
+            IAC => out.extend_from_slice(&[IAC, IAC]),
+            b'\r' => {
+                out.push(b'\r');
+                if data.get(index + 1) == Some(&b'\n') {
+                    out.push(b'\n');
+                    index += 1;
+                } else {
+                    // A CR that ends the chunk gets a NUL even if an LF opens
+                    // the next one. Receivers discard NUL, so the worst case is
+                    // one ignored byte.
+                    out.push(0);
+                }
+            }
+            byte => out.push(byte),
+        }
+        index += 1;
+    }
+    out
 }
 
 fn supports_remote(option: u8) -> bool {
@@ -398,9 +553,14 @@ mod tests {
     use super::Utf8StreamDecoder;
     use super::session_event;
     use super::{
-        TelnetIacFilter, DO, DONT, IAC, SB, SE, TELNET_ECHO, TELNET_NAWS,
-        TELNET_TERMINAL_TYPE, TERMINAL_TYPE_SEND, WILL, WONT,
+        telnet_escape_iac, telnet_escape_outbound, TelnetIacFilter, DO, DONT, IAC, SB, SE,
+        TELNET_BINARY, TELNET_ECHO, TELNET_NAWS, TELNET_SGA, TELNET_TERMINAL_TYPE,
+        TERMINAL_TYPE_SEND, WILL, WONT,
     };
+    use crate::rfc2217::{
+        subnegotiation, ComPortState, COM_PORT_OPTION, SET_BAUDRATE, SET_DATASIZE,
+    };
+    use crate::serial_params::{SerialFlowControl, SerialParams, SerialParity};
 
     #[test]
     fn session_event_appends_id_suffix() {
@@ -565,5 +725,169 @@ mod tests {
         expected.extend_from_slice(b"xterm-256color");
         expected.extend_from_slice(&[IAC, SE]);
         assert_eq!(response, expected);
+    }
+    // ── Outbound escaping ────────────────────────────────────────────────────
+
+    #[test]
+    fn escapes_literal_ff_on_the_way_out() {
+        assert_eq!(telnet_escape_iac(&[b'a', 0xFF, b'b']), vec![b'a', IAC, IAC, b'b']);
+    }
+
+    #[test]
+    fn stuffs_bare_cr_with_nul_outside_binary_mode() {
+        // NVT rules: a bare CR needs a following NUL, but CR LF is already a
+        // complete line ending and must pass through untouched.
+        assert_eq!(telnet_escape_outbound(b"a\rb", false), vec![b'a', b'\r', 0, b'b']);
+        assert_eq!(telnet_escape_outbound(b"a\r\nb", false), b"a\r\nb".to_vec());
+        // In binary mode the byte stream is passed through as-is.
+        assert_eq!(telnet_escape_outbound(b"a\rb", true), b"a\rb".to_vec());
+    }
+
+    #[test]
+    fn escapes_ff_in_both_modes() {
+        assert_eq!(telnet_escape_outbound(&[0xFF], true), vec![IAC, IAC]);
+        assert_eq!(telnet_escape_outbound(&[0xFF], false), vec![IAC, IAC]);
+    }
+
+    // ── RFC 2217 (com-port) profile ──────────────────────────────────────────
+
+    fn com_port_filter() -> TelnetIacFilter {
+        TelnetIacFilter::with_com_port(ComPortState::new(
+            SerialParams {
+                baud_rate: 115200,
+                data_bits: 8,
+                stop_bits: 1,
+                parity: SerialParity::None,
+                flow_control: SerialFlowControl::None,
+            },
+            false,
+        ))
+    }
+
+    #[test]
+    fn com_port_opens_with_binary_sga_and_option_44() {
+        let mut filter = com_port_filter();
+        assert_eq!(
+            filter.initial_negotiation(),
+            vec![
+                IAC, WILL, TELNET_BINARY,
+                IAC, DO, TELNET_BINARY,
+                IAC, WILL, TELNET_SGA,
+                IAC, DO, TELNET_SGA,
+                IAC, WILL, COM_PORT_OPTION,
+            ],
+        );
+    }
+
+    #[test]
+    fn com_port_mode_refuses_naws_and_terminal_type() {
+        // A device server has no window and no terminal type; offering them
+        // only puts noise on the wire.
+        let mut filter = com_port_filter();
+        assert_eq!(
+            filter.push(&[IAC, DO, TELNET_NAWS]).response,
+            vec![IAC, WONT, TELNET_NAWS],
+        );
+        assert_eq!(
+            filter.push(&[IAC, DO, TELNET_TERMINAL_TYPE]).response,
+            vec![IAC, WONT, TELNET_TERMINAL_TYPE],
+        );
+    }
+
+    #[test]
+    fn do_answering_our_offer_sends_the_parameter_block_not_another_will() {
+        let mut filter = com_port_filter();
+        filter.initial_negotiation();
+
+        let response = filter.push(&[IAC, DO, COM_PORT_OPTION]).response;
+
+        // The DO answers a WILL we already sent, so repeating it would bounce
+        // negotiation back and forth (RFC 854 loop avoidance).
+        assert!(!response.starts_with(&[IAC, WILL, COM_PORT_OPTION]));
+        assert!(response.starts_with(&subnegotiation(
+            SET_BAUDRATE,
+            &115200u32.to_be_bytes(),
+        )));
+        assert!(filter.com_port().expect("com port").negotiated());
+    }
+
+    #[test]
+    fn binary_flags_track_both_directions() {
+        let mut filter = com_port_filter();
+        filter.initial_negotiation();
+        assert!(!filter.binary_out());
+
+        // Server accepts our WILL BINARY: outbound is now 8-bit clean.
+        filter.push(&[IAC, DO, TELNET_BINARY]);
+        assert!(filter.binary_out());
+        assert!(!filter.binary_both_ways());
+
+        // Server also offers BINARY inbound. It answers our DO, so we must not
+        // send another one.
+        let response = filter.push(&[IAC, WILL, TELNET_BINARY]).response;
+        assert!(response.is_empty());
+        assert!(filter.binary_both_ways());
+    }
+
+    #[test]
+    fn com_port_subnegotiation_survives_a_split_read() {
+        let mut filter = com_port_filter();
+        filter.initial_negotiation();
+        filter.push(&[IAC, DO, COM_PORT_OPTION]);
+
+        // 101 SET-BAUDRATE = 9600, arriving in two chunks.
+        filter.push(&[IAC, SB, COM_PORT_OPTION, SET_BAUDRATE + 100, 0, 0]);
+        let out = filter.push(&[0x25, 0x80, IAC, SE]);
+
+        assert!(out.data.is_empty());
+        let com_port = filter.com_port().expect("com port");
+        assert_eq!(com_port.effective().baud_rate, 9600);
+        assert_eq!(com_port.requested().baud_rate, 115200);
+    }
+
+    #[test]
+    fn com_port_unescapes_doubled_ff_inside_a_subnegotiation() {
+        let mut filter = com_port_filter();
+        filter.initial_negotiation();
+        filter.push(&[IAC, DO, COM_PORT_OPTION]);
+
+        // A server reporting 255 baud has to double the 0xFF; the framing layer
+        // collapses it before the codec sees the value.
+        filter.push(&subnegotiation(SET_BAUDRATE, &255u32.to_be_bytes()));
+        assert_eq!(filter.com_port().expect("com port").effective().baud_rate, 255);
+    }
+
+    #[test]
+    fn dont_on_option_44_degrades_instead_of_failing() {
+        let mut filter = com_port_filter();
+        filter.initial_negotiation();
+
+        let out = filter.push(&[IAC, DONT, COM_PORT_OPTION, b'h', b'i']);
+
+        // Refusing the option must not cost us the data stream.
+        assert_eq!(out.data, b"hi");
+        let com_port = filter.com_port().expect("com port");
+        assert!(com_port.settled());
+        assert!(!com_port.negotiated());
+    }
+
+    #[test]
+    fn plain_telnet_still_offers_naws_and_sends_no_opening_bytes() {
+        // The com-port profile must not leak into ordinary Telnet sessions.
+        let mut filter = TelnetIacFilter::with_window_size(80, 24);
+        assert!(filter.initial_negotiation().is_empty());
+        assert_eq!(
+            filter.push(&[IAC, DO, TELNET_NAWS]).response,
+            vec![IAC, WILL, TELNET_NAWS, IAC, SB, TELNET_NAWS, 0, 80, 0, 24, IAC, SE],
+        );
+    }
+
+    #[test]
+    fn data_size_reply_updates_the_effective_frame() {
+        let mut filter = com_port_filter();
+        filter.initial_negotiation();
+        filter.push(&[IAC, DO, COM_PORT_OPTION]);
+        filter.push(&subnegotiation(SET_DATASIZE + 100, &[7]));
+        assert_eq!(filter.com_port().expect("com port").effective().data_bits, 7);
     }
 }

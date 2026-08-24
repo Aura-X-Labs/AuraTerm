@@ -32,6 +32,10 @@ russh = "0.62.4"
 russh-sftp = "2.1.1"
 zmodem2 = "0.7.1"
 serialport = "4.8.1"
+# TCP keepalive for network serial sessions, portably. Already compiled as a
+# transitive dependency of tokio and reqwest, so this adds no build cost — and a
+# device server that reboots otherwise leaves the socket looking alive forever.
+socket2 = "0.6"
 aes-gcm = "0.10"
 p256 = { version = "0.13", features = ["ecdh"] }
 # Ed25519 device identity + capability verification for Cloud Console
