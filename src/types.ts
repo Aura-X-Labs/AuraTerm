@@ -1,4 +1,11 @@
-export type ConnectionProtocol = "ssh" | "telnet" | "serial";
+export type ConnectionProtocol = "ssh" | "telnet" | "serial" | "rfc2217" | "raw-tcp";
+
+/** The protocols that all drive a UART, local or remote.
+ *
+ *  They share one config shape, one backend command set and one control
+ *  surface; only the connect form differs, which is why they are separate
+ *  entries in the protocol picker rather than a mode buried inside one. */
+export type SerialProtocol = "serial" | "rfc2217" | "raw-tcp";
 
 /** A single action surfaced in the command palette (Ctrl/Cmd+Shift+P). */
 export interface PaletteCommand {
@@ -285,10 +292,9 @@ export interface SavedConnection {
   jumpHosts?: JumpHostConfig[];
   autoLoginRules?: AutoLoginRule[];
   postConnectCommands?: string[];
+  /** Local serial only: the device path. Network protocols keep their endpoint
+   *  in `host`/`port` above rather than growing a parallel pair. */
   portName?: string;
-  /** Absent means a local port. Network transports reuse `host`/`port` above
-   *  for the endpoint, so this is the only new bookmark field. */
-  serialTransport?: SerialTransport;
   adoptServerParams?: boolean;
   serialAutoReconnect?: boolean;
   baudRate?: number;
@@ -319,6 +325,8 @@ export type SessionConfig =
   | { protocol: "ssh"; sshConfig: SshConfig }
   | { protocol: "telnet"; telnetConfig: TelnetConfig }
   | { protocol: "serial"; serialConfig: SerialConfig }
+  | { protocol: "rfc2217"; serialConfig: SerialConfig }
+  | { protocol: "raw-tcp"; serialConfig: SerialConfig }
   | { protocol: "assist"; assistConfig: AssistGuestConfig };
 
 export type SerialConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";

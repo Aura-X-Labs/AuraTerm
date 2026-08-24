@@ -4,8 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { buildConnectionLogContext, buildDefaultLogPath, normalizeOptionalLogPath } from "./logging";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { t } from "./i18n";
-import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection, type SerialTransport, type SshAuthType, type TunnelConfig } from "./types";
-import { isNetworkSerialTransport, serialTargetLabel, RFC2217_DEFAULT_PORT } from "./serialTransport";
+import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection, type SshAuthType, type TunnelConfig } from "./types";
+import { isSerialProtocol, serialTargetLabel, transportForProtocol, RFC2217_DEFAULT_PORT } from "./serialTransport";
 
 const props = withDefaults(defineProps<{
   connection: SavedConnection;
@@ -109,13 +109,6 @@ function toFlowControl(value: string): "none" | "hardware" | "software" {
   return "none";
 }
 
-function toSerialTransport(value: string): SerialTransport {
-  if (value === "rfc2217" || value === "raw-tcp") {
-    return value;
-  }
-  return "local";
-}
-
 function toAuthType(value: string): SshAuthType {
   if (value === "key" || value === "agent" || value === "none") {
     return value;
@@ -190,6 +183,10 @@ function handleLogEnabledChange(event: Event) {
   updateLogEnabled((event.target as HTMLInputElement).checked);
 }
 
+function handleAdoptServerParamsChange(event: Event) {
+  updateDraft("adoptServerParams", (event.target as HTMLInputElement).checked);
+}
+
 function handleSerialAutoReconnectChange(event: Event) {
   updateDraft("serialAutoReconnect", (event.target as HTMLInputElement).checked);
 }
@@ -232,14 +229,14 @@ function handleSave() {
     editError.value = t("bookmarkEditor.errNameEmpty");
     return;
   }
-  if (protocol === "serial") {
-    if (isNetworkSerialTransport(editDraft.value.serialTransport)) {
-      if (!editDraft.value.host.trim()) {
-        editError.value = t("bookmarkEditor.errSerialHostEmpty");
+  if (isSerialProtocol(protocol)) {
+    if (protocol === "serial") {
+      if (!editDraft.value.portName?.trim()) {
+        editError.value = t("bookmarkEditor.errSerialEmpty");
         return;
       }
-    } else if (!editDraft.value.portName?.trim()) {
-      editError.value = t("bookmarkEditor.errSerialEmpty");
+    } else if (!editDraft.value.host.trim()) {
+      editError.value = t("bookmarkEditor.errSerialHostEmpty");
       return;
     }
   } else {
@@ -258,16 +255,14 @@ function handleSave() {
     name: editDraft.value.name.trim(),
     group: editDraft.value.group?.trim() || undefined,
     logPath: normalizeOptionalLogPath(editDraft.value.logPath, editDraftDefaultLogPath.value),
-    host: protocol === "serial" && !isNetworkSerialTransport(editDraft.value.serialTransport)
-      ? ""
-      : editDraft.value.host.trim(),
+    host: protocol === "serial" ? "" : editDraft.value.host.trim(),
     port: protocol === "serial"
-      ? (isNetworkSerialTransport(editDraft.value.serialTransport)
+      ? 0
+      : isSerialProtocol(protocol)
         // The field shows 2217 as a placeholder; without this, saving a draft
         // the user never touched would persist port 0.
         ? editDraft.value.port || RFC2217_DEFAULT_PORT
-        : 0)
-      : editDraft.value.port,
+        : editDraft.value.port,
     user: protocol === "ssh" ? editDraft.value.user.trim() : "",
     authType: protocol === "ssh" ? editDraft.value.authType : "none",
     password: protocol === "ssh" ? editDraft.value.password : undefined,
@@ -283,27 +278,23 @@ function handleSave() {
       : undefined,
     autoReconnect: protocol === "ssh" && reconnectType ? isReconnectEnabled(reconnectType) : undefined,
     reconnectType,
-    portName: protocol === "serial"
+    portName: isSerialProtocol(protocol)
       ? serialTargetLabel(
-        editDraft.value.serialTransport ?? "local",
+        transportForProtocol(protocol),
         editDraft.value.portName?.trim() ?? "",
         editDraft.value.host,
         editDraft.value.port || RFC2217_DEFAULT_PORT,
       )
       : undefined,
-    serialTransport: protocol === "serial" ? editDraft.value.serialTransport ?? "local" : undefined,
-    adoptServerParams: protocol === "serial" && editDraft.value.serialTransport === "rfc2217"
-      ? editDraft.value.adoptServerParams
-      : undefined,
-    serialAutoReconnect: protocol === "serial"
-      && isNetworkSerialTransport(editDraft.value.serialTransport)
+    adoptServerParams: protocol === "rfc2217" ? editDraft.value.adoptServerParams ?? true : undefined,
+    serialAutoReconnect: protocol === "rfc2217" || protocol === "raw-tcp"
       ? editDraft.value.serialAutoReconnect ?? true
       : undefined,
-    baudRate: protocol === "serial" ? editDraft.value.baudRate : undefined,
-    dataBits: protocol === "serial" ? editDraft.value.dataBits : undefined,
-    stopBits: protocol === "serial" ? editDraft.value.stopBits : undefined,
-    parity: protocol === "serial" ? editDraft.value.parity : undefined,
-    flowControl: protocol === "serial" ? editDraft.value.flowControl : undefined,
+    baudRate: isSerialProtocol(protocol) && protocol !== "raw-tcp" ? editDraft.value.baudRate : undefined,
+    dataBits: isSerialProtocol(protocol) && protocol !== "raw-tcp" ? editDraft.value.dataBits : undefined,
+    stopBits: isSerialProtocol(protocol) && protocol !== "raw-tcp" ? editDraft.value.stopBits : undefined,
+    parity: isSerialProtocol(protocol) && protocol !== "raw-tcp" ? editDraft.value.parity : undefined,
+    flowControl: isSerialProtocol(protocol) && protocol !== "raw-tcp" ? editDraft.value.flowControl : undefined,
   };
 
   emit("save", normalized);
@@ -358,21 +349,10 @@ function handleSave() {
           </div>
         </div>
 
-        <template v-if="editDraft.protocol === 'serial'">
+        <template v-if="isSerialProtocol(editDraft.protocol)">
           <div class="bookmark-editor-grid">
-            <div class="form-group bookmark-editor-span-2">
-              <label>{{ $t('bookmarkEditor.serialTransport') }}</label>
-              <select
-                :value="editDraft.serialTransport ?? 'local'"
-                @change="updateDraft('serialTransport', toSerialTransport(inputValue($event)))"
-              >
-                <option value="local">{{ $t('bookmarkEditor.serialTransportLocal') }}</option>
-                <option value="rfc2217">{{ $t('bookmarkEditor.serialTransportRfc2217') }}</option>
-                <option value="raw-tcp">{{ $t('bookmarkEditor.serialTransportRawTcp') }}</option>
-              </select>
-            </div>
             <div
-              v-if="!isNetworkSerialTransport(editDraft.serialTransport)"
+              v-if="editDraft.protocol === 'serial'"
               class="form-group bookmark-editor-span-2"
             >
               <label>{{ $t('bookmarkEditor.serialPort') }}</label>
@@ -406,6 +386,16 @@ function handleSave() {
                   @input="updateDraft('port', toNumber(inputValue($event), RFC2217_DEFAULT_PORT))"
                 >
               </div>
+              <div v-if="editDraft.protocol === 'rfc2217'" class="form-group bookmark-editor-span-2">
+                <label class="bookmark-inline-check">
+                  <input
+                    type="checkbox"
+                    :checked="editDraft.adoptServerParams ?? true"
+                    @change="handleAdoptServerParamsChange"
+                  >
+                  {{ $t('connect.serialAdoptServerParams') }}
+                </label>
+              </div>
               <div class="form-group bookmark-editor-span-2">
                 <label class="bookmark-inline-check">
                   <input
@@ -417,7 +407,7 @@ function handleSave() {
                 </label>
               </div>
             </template>
-            <div class="form-group">
+            <div v-if="editDraft.protocol !== 'raw-tcp'" class="form-group">
               <label>{{ $t('bookmarkEditor.baudRate') }}</label>
               <input
                 type="number"
@@ -425,7 +415,7 @@ function handleSave() {
                 @input="updateDraft('baudRate', toNumber(inputValue($event), 9600))"
               >
             </div>
-            <div class="form-group">
+            <div v-if="editDraft.protocol !== 'raw-tcp'" class="form-group">
               <label>{{ $t('bookmarkEditor.dataBits') }}</label>
               <select :value="String(editDraft.dataBits ?? 8)" @change="updateDraft('dataBits', toDataBits(inputValue($event)))">
                 <option value="5">5</option>
@@ -434,14 +424,14 @@ function handleSave() {
                 <option value="8">8</option>
               </select>
             </div>
-            <div class="form-group">
+            <div v-if="editDraft.protocol !== 'raw-tcp'" class="form-group">
               <label>{{ $t('bookmarkEditor.stopBits') }}</label>
               <select :value="String(editDraft.stopBits ?? 1)" @change="updateDraft('stopBits', toStopBits(inputValue($event)))">
                 <option value="1">1</option>
                 <option value="2">2</option>
               </select>
             </div>
-            <div class="form-group">
+            <div v-if="editDraft.protocol !== 'raw-tcp'" class="form-group">
               <label>{{ $t('bookmarkEditor.parity') }}</label>
               <select :value="editDraft.parity ?? 'none'" @change="updateDraft('parity', toParity(inputValue($event)))">
                 <option value="none">{{ $t('connect.none') }}</option>
@@ -449,7 +439,7 @@ function handleSave() {
                 <option value="even">{{ $t('connect.even') }}</option>
               </select>
             </div>
-            <div class="form-group bookmark-editor-span-2">
+            <div v-if="editDraft.protocol !== 'raw-tcp'" class="form-group bookmark-editor-span-2">
               <label>{{ $t('bookmarkEditor.flowControl') }}</label>
               <select :value="editDraft.flowControl ?? 'none'" @change="updateDraft('flowControl', toFlowControl(inputValue($event)))">
                 <option value="none">{{ $t('connect.none') }}</option>

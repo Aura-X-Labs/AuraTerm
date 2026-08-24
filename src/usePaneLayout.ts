@@ -1,5 +1,7 @@
 import { computed, ref, watch, type Ref } from "vue";
-import type { SessionConfig } from "./types";
+import type { SerialProtocol, SessionConfig } from "./types";
+
+import { isSerialProtocol, transportForProtocol } from "./serialTransport";
 
 export interface PaneLayoutTab {
   id: string;
@@ -201,10 +203,11 @@ function restoreSessionConfig(value: unknown): SessionConfig | null {
     };
   }
 
-  if (value.protocol === "serial" && isRecord(value.serialConfig)) {
+  if (isSerialProtocol(value.protocol as string) && isRecord(value.serialConfig)) {
     const serialConfig = value.serialConfig;
     if (
       typeof serialConfig.portName !== "string"
+      || (value.protocol !== "serial" && typeof serialConfig.host !== "string")
       || typeof serialConfig.baudRate !== "number"
       || (serialConfig.dataBits !== 5 && serialConfig.dataBits !== 6 && serialConfig.dataBits !== 7 && serialConfig.dataBits !== 8)
       || (serialConfig.stopBits !== 1 && serialConfig.stopBits !== 2)
@@ -214,17 +217,26 @@ function restoreSessionConfig(value: unknown): SessionConfig | null {
       return null;
     }
 
+    const protocol = value.protocol as SerialProtocol;
+    const network = protocol !== "serial";
+    // Hardcoding "serial" here would restore a network session as a local port
+    // trying to open a device literally named "10.0.0.5:2217".
     return {
-      protocol: "serial",
+      protocol,
       serialConfig: {
+        transport: transportForProtocol(protocol),
         portName: serialConfig.portName,
+        host: network && typeof serialConfig.host === "string" ? serialConfig.host : undefined,
+        netPort: network && typeof serialConfig.netPort === "number" ? serialConfig.netPort : undefined,
+        adoptServerParams: protocol === "rfc2217" ? serialConfig.adoptServerParams === true : undefined,
+        autoReconnect: network ? serialConfig.autoReconnect !== false : undefined,
         baudRate: serialConfig.baudRate,
         dataBits: serialConfig.dataBits,
         stopBits: serialConfig.stopBits,
         parity: serialConfig.parity,
         flowControl: serialConfig.flowControl,
       },
-    };
+    } as SessionConfig;
   }
 
   return null;
@@ -1070,6 +1082,10 @@ export function usePaneLayout({ tabs, isWindowFocused, terminalContainerRef }: U
         return "Telnet";
       case "serial":
         return "Serial";
+      case "rfc2217":
+        return "RFC 2217";
+      case "raw-tcp":
+        return "Raw TCP";
       case "assist":
         return "Assist";
     }

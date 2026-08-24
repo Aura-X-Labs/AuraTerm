@@ -2,6 +2,7 @@ import { nextTick, ref, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { PaneLayoutTab } from "../usePaneLayout";
 import type { SerialParams, SessionConfig } from "../types";
+import { serialConfigOf } from "../serialTransport";
 
 // NATO 字母表，用于生成唯一的标签页后缀
 const NATO_ALPHABET = [
@@ -24,8 +25,9 @@ export function formatSerialFrame(params: SerialParams) {
 }
 
 export function buildBaseTabTitle(session: SessionConfig): string {
-  if (session.protocol === "serial") {
-    return `${session.serialConfig.portName} @ ${session.serialConfig.baudRate}`;
+  const serialConfig = serialConfigOf(session);
+  if (serialConfig) {
+    return `${serialConfig.portName} @ ${serialConfig.baudRate}`;
   }
   if (session.protocol === "telnet") {
     return `telnet://${session.telnetConfig.host}:${session.telnetConfig.port}`;

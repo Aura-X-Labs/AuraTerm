@@ -1270,7 +1270,6 @@ mod tests {
             auto_login_rules: Vec::new(),
             post_connect_commands: Vec::new(),
             port_name: None,
-            serial_transport: None,
             adopt_server_params: None,
             serial_auto_reconnect: None,
             baud_rate: None,

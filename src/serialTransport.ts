@@ -1,4 +1,12 @@
-import type { SerialConfig, SerialParams, SerialStatus, SerialTransport } from "./types";
+import type {
+  ConnectionProtocol,
+  SerialConfig,
+  SerialParams,
+  SerialProtocol,
+  SerialStatus,
+  SerialTransport,
+  SessionConfig,
+} from "./types";
 
 /** The port IANA assigns to RFC 2217, and what ser2net examples use. */
 export const RFC2217_DEFAULT_PORT = 2217;
@@ -8,6 +16,43 @@ export const RFC2217_DEFAULT_PORT = 2217;
 export const COMMON_BAUD_RATES = [
   1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600,
 ];
+
+export const SERIAL_PROTOCOLS: readonly SerialProtocol[] = ["serial", "rfc2217", "raw-tcp"];
+
+export function isSerialProtocol(protocol: string | undefined): protocol is SerialProtocol {
+  return protocol === "serial" || protocol === "rfc2217" || protocol === "raw-tcp";
+}
+
+/** The wire transport a serial protocol runs on. The protocol is the single
+ *  source of truth; `SerialConfig.transport` is derived from it so the two can
+ *  never disagree. */
+export function transportForProtocol(protocol: SerialProtocol): SerialTransport {
+  return protocol === "serial" ? "local" : protocol;
+}
+
+/** Protocol name the shared-session layer understands.
+ *
+ *  Remote Assist and the cloud bridge index sessions by which backend state map
+ *  holds them, and all three serial protocols live in `SerialState`. Passing
+ *  "rfc2217" through would fail to deserialize on the Rust side. */
+export function sharedSessionProtocol(
+  protocol: Exclude<ConnectionProtocol | "local", "assist">,
+): "serial" | "ssh" | "telnet" | "local" {
+  return isSerialProtocol(protocol) ? "serial" : (protocol as "ssh" | "telnet" | "local");
+}
+
+/** The serial config behind a session, whatever serial protocol it uses. */
+export function serialConfigOf(session: SessionConfig): SerialConfig | null {
+  return isSerialProtocol(session.protocol)
+    ? (session as { serialConfig: SerialConfig }).serialConfig
+    : null;
+}
+
+/** The protocol that runs on a given transport — the inverse of
+ *  `transportForProtocol`, for reading saved history back. */
+export function protocolForTransport(transport: SerialTransport | undefined): SerialProtocol {
+  return transport === undefined || transport === "local" ? "serial" : transport;
+}
 
 export function serialTransportOf(config: Pick<SerialConfig, "transport">): SerialTransport {
   return config.transport ?? "local";

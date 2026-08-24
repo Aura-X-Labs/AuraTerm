@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { normalizeReconnectType, type SavedConnection } from "./types";
+import { isSerialProtocol } from "./serialTransport";
 import { buildBookmarkTree, filterConnections, flattenBookmarkTree } from "./bookmarks";
 import { detectImportFormat } from "./bookmarkTransfer";
 import { CredentialsLockedError, useBookmarkStore } from "./composables/useBookmarkStore";
@@ -39,6 +40,9 @@ function buildSubtitle(connection: SavedConnection) {
   if (connection.protocol === "serial") {
     return `${connection.portName ?? "serial"} · ${connection.baudRate ?? 9600} baud`;
   }
+  if (connection.protocol === "rfc2217" || connection.protocol === "raw-tcp") {
+    return `${connection.protocol}://${connection.host}:${connection.port} · ${connection.baudRate ?? 9600} baud`;
+  }
   if (connection.protocol === "telnet") {
     return `telnet://${connection.host}:${connection.port}`;
   }
@@ -46,7 +50,7 @@ function buildSubtitle(connection: SavedConnection) {
 }
 
 function buildIcon(connection: SavedConnection) {
-  if (connection.protocol === "serial") {
+  if (isSerialProtocol(connection.protocol)) {
     return "🔌";
   }
   if (connection.protocol === "telnet") {
@@ -58,7 +62,7 @@ function buildIcon(connection: SavedConnection) {
 /** Session-persistence badge for SSH bookmarks; null when the bookmark does
  *  not restore its remote session (manual/simple), so plain entries stay clean. */
 function reconnectBadge(connection: SavedConnection): "tmux" | "screen" | null {
-  if (connection.protocol === "serial" || connection.protocol === "telnet") {
+  if (isSerialProtocol(connection.protocol) || connection.protocol === "telnet") {
     return null;
   }
   const type = normalizeReconnectType(connection);

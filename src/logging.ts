@@ -1,6 +1,8 @@
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import type { ConnectionProtocol, SavedConnection } from "./types";
 
+import { isSerialProtocol } from "./serialTransport";
+
 export interface LogTemplateContext {
   protocol: ConnectionProtocol;
   host?: string;
@@ -81,7 +83,7 @@ export function buildDefaultLogPath(settings: AppSettings | undefined, context: 
 
 export function buildConnectionLogContext(connection: SavedConnection): LogTemplateContext {
   const protocol = connection.protocol ?? "ssh";
-  if (protocol === "serial") {
+  if (isSerialProtocol(protocol)) {
     return {
       protocol,
       serialPort: connection.portName,

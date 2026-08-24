@@ -69,6 +69,8 @@ function formatLastUsed(timestamp?: number) {
 
 function protocolLabel(connection: SavedConnection) {
   if (connection.protocol === "serial") return "Serial";
+  if (connection.protocol === "rfc2217") return "RFC 2217";
+  if (connection.protocol === "raw-tcp") return "Raw TCP";
   if (connection.protocol === "telnet") return "Telnet";
   return "SSH";
 }

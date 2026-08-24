@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { purgeSerialBuffers, sendSerialBreak, setSerialParams, setSerialSignals } from "./composables/useTerminalSessionCommands";
-import { COMMON_BAUD_RATES, formatSerialParams } from "./serialTransport";
+import { COMMON_BAUD_RATES, formatSerialParams, isSerialProtocol, serialConfigOf, sharedSessionProtocol } from "./serialTransport";
 import { listen } from "@tauri-apps/api/event";
 import { type as getOsType } from "@tauri-apps/plugin-os";
 import TerminalComponent from "./TerminalComponent.vue";
@@ -662,7 +662,7 @@ const activeSshConfig = computed<SshConfig | null>(() => (
   activeTab.value?.session.protocol === "ssh" ? activeTab.value.session.sshConfig : null
 ));
 const activeSerialConfig = computed<SerialConfig | null>(() => (
-  activeTab.value?.session.protocol === "serial" ? activeTab.value.session.serialConfig : null
+  activeTab.value ? serialConfigOf(activeTab.value.session) : null
 ));
 const activeSerialStatus = computed<SerialStatus | null>(() => {
   if (!activeTab.value || !activeSerialConfig.value) {
@@ -815,8 +815,14 @@ async function refreshAssistState() {
 
 // Only real local sessions can be assisted; a guest tab cannot be re-shared.
 const assistSessionChoices = computed(() => tabs.value
-  .filter((tab): tab is Tab & { session: { protocol: "serial" | "ssh" | "telnet" | "local" } } => tab.session.protocol !== "assist")
-  .map((tab) => ({ id: tab.id, protocol: tab.session.protocol, title: tab.title })));
+  .filter((tab) => tab.session.protocol !== "assist")
+  // The bridge indexes sessions by which backend state map holds them, so the
+  // three serial protocols all report as "serial".
+  .map((tab) => ({
+    id: tab.id,
+    protocol: sharedSessionProtocol(tab.session.protocol as Exclude<typeof tab.session.protocol, "assist">),
+    title: tab.title,
+  })));
 
 function handleOpenJoinAssist() {
   closeOpenMenus();
@@ -877,7 +883,7 @@ watch(activeTabId, (tabId) => {
     assistFollowTimer = null;
     const tab = tabs.value.find((candidate) => candidate.id === tabId);
     if (!tab || tab.session.protocol === "assist") return;
-    void switchAssistSession(tab.id, tab.session.protocol, tab.title)
+    void switchAssistSession(tab.id, sharedSessionProtocol(tab.session.protocol), tab.title)
       .then(() => refreshAssistState())
       .catch(() => {});
   }, 400);
@@ -925,7 +931,7 @@ async function syncAutoShare() {
       // is dropped silently and the next status poll converges.
       await shareSessionToCloud(
         target.id,
-        target.session.protocol,
+        sharedSessionProtocol(target.session.protocol),
         target.title,
         allowTx ? "read_write" : "read_only",
       ).catch(() => {});
@@ -1981,8 +1987,9 @@ async function handleConnectResult(result: ConnectResult) {
 
   tabs.value = [...tabs.value, tab];
 
-  if (session?.protocol === "serial") {
-    rememberSerialConfig(session.serialConfig);
+  const newSerialConfig = session ? serialConfigOf(session) : null;
+  if (newSerialConfig) {
+    rememberSerialConfig(newSerialConfig);
     updateSerialConnectionState(newId, "connecting");
   }
 
@@ -2007,9 +2014,9 @@ async function handleConnectResult(result: ConnectResult) {
       existingConn = existingConns.find(
         c => c.protocol === "telnet" && c.host === host && c.port === (port ?? 23),
       );
-    } else if (result.protocol === "serial" && result.serialConfig) {
+    } else if (isSerialProtocol(result.protocol) && result.serialConfig) {
       existingConn = existingConns.find(
-        c => c.protocol === "serial" && c.portName === result.serialConfig!.portName,
+        c => c.protocol === result.protocol && c.portName === result.serialConfig!.portName,
       );
     }
   } catch {
@@ -2045,8 +2052,9 @@ function handleBookmarkConnect(connection: SavedConnection) {
   const session = buildSessionFromSavedConnection(connection);
   const tab = createSessionTab(newId, session, connection.name, connection.logPath);
 
-  if (session.protocol === "serial") {
-    rememberSerialConfig(session.serialConfig);
+  const bookmarkSerialConfig = serialConfigOf(session);
+  if (bookmarkSerialConfig) {
+    rememberSerialConfig(bookmarkSerialConfig);
     updateSerialConnectionState(newId, "connecting");
   }
 
@@ -2153,7 +2161,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "new-local", title: t("palette.cmd.newLocal"), group: t("palette.groups.session"), keywords: "terminal shell", run: () => handleNewLocalSession() },
     { id: "new-ssh", title: t("palette.cmd.newSsh"), group: t("palette.groups.session"), keywords: "remote", run: () => openConnect("ssh") },
     { id: "new-telnet", title: t("palette.cmd.newTelnet"), group: t("palette.groups.session"), run: () => openConnect("telnet") },
-    { id: "new-serial", title: t("palette.cmd.newSerial"), group: t("palette.groups.session"), keywords: "port com", run: () => openConnect("serial") },
+    { id: "new-serial", title: t("palette.cmd.newSerial"), group: t("palette.groups.session"), keywords: "port com uart", run: () => openConnect("serial") },
+    { id: "new-rfc2217", title: t("palette.cmd.newRfc2217"), group: t("palette.groups.session"), keywords: "rfc2217 network serial ser2net moxa device server console", run: () => openConnect("rfc2217") },
+    { id: "new-raw-tcp", title: t("palette.cmd.newRawTcp"), group: t("palette.groups.session"), keywords: "raw tcp socket byte pipe device server", run: () => openConnect("raw-tcp") },
     { id: "close-tab", title: t("menu.closeTab"), group: t("palette.groups.session"), enabled: hasTab, run: () => handleCloseActiveTab() },
     { id: "bookmark-manager", title: t("menu.bookmarkManager"), group: t("palette.groups.view"), keywords: "bookmarks manage groups batch organize", run: () => handleOpenBookmarkManager() },
     { id: "toggle-bookmarks", title: sidebarOpen.value ? t("menu.hideBookmarks") : t("menu.showBookmarks"), group: t("palette.groups.view"), keywords: "sidebar connections", run: () => handleToggleBookmarks() },
@@ -2198,6 +2208,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     const detail = protocol === "serial"
       ? bookmark.portName ?? ""
       : `${protocol === "ssh" && bookmark.user ? `${bookmark.user}@` : ""}${bookmark.host}${bookmark.port ? `:${bookmark.port}` : ""}`;
+    // rfc2217 / raw-tcp fall through to the host:port form above, which is
+    // exactly what identifies them.
     commands.push({
       id: `bookmark-${bookmark.id}`,
       title: t("palette.cmd.connectBookmark", { name: bookmark.name }),
