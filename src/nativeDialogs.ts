@@ -7,20 +7,34 @@ import { t } from "./i18n";
  * must go through the dialog plugin instead; text input goes through the
  * in-app PromptDialogHost (see promptDialog.ts). */
 
-export function confirmDialog(
+export async function confirmDialog(
   text: string,
   kind: "info" | "warning" | "error" = "warning",
 ): Promise<boolean> {
-  return confirm(text, {
-    kind,
-    okLabel: t("common.ok"),
-    cancelLabel: t("common.cancel"),
-  });
+  try {
+    return await confirm(text, {
+      kind,
+      okLabel: t("common.ok"),
+      cancelLabel: t("common.cancel"),
+    });
+  } catch (error) {
+    // Every caller reads `false` as "the user said no" and returns without a
+    // word, so a broken bridge would otherwise present as a button that does
+    // nothing at all. Say so, then decline: never destroy data unconfirmed.
+    console.error("Confirmation dialog failed", error);
+    await alertDialog(t("common.dialogFailed", { error: String(error) }), "error");
+    return false;
+  }
 }
 
 export async function alertDialog(
   text: string,
   kind: "info" | "warning" | "error" = "info",
 ): Promise<void> {
-  await message(text, { kind });
+  try {
+    await message(text, { kind });
+  } catch (error) {
+    // Nothing left to report the failure with — the console is the last resort.
+    console.error("Message dialog failed", error, text);
+  }
 }

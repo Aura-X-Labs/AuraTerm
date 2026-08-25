@@ -15,6 +15,7 @@ const zhCN: Messages = {
     yes: "是",
     no: "否",
     copy: "复制",
+    dialogFailed: "无法显示确认对话框：{error}",
   },
   language: {
     label: "语言",
