@@ -28,7 +28,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use zeroize::Zeroizing;
 
 pub const ROUTE_LEN: usize = 4;
@@ -36,6 +36,10 @@ pub const SECRET_LEN: usize = 12;
 const SHARE_LINK_BASE: &str = "https://auraxlab.com/b";
 /// Local sidecar for the labels the server deliberately never learns.
 const SHARE_LABELS_FILE: &str = "bookmark_shares.json";
+/// Shares this machine imported and can re-open for updates. Encrypted with
+/// the device-local key, exactly like `sync_config.enc`: it holds share codes,
+/// and a code is a key.
+const SUBSCRIPTIONS_FILE: &str = "bookmark_subscriptions.enc";
 
 pub struct ShareCode {
     pub route: String,
@@ -345,6 +349,186 @@ pub async fn revoke_bookmark_share(app: AppHandle, route: String) -> Result<(), 
     Ok(())
 }
 
+// ── subscriptions ───────────────────────────────────────────────────────────
+// Re-importing a share is how you get its updates: `origin.entryId` makes the
+// second import land as an update rather than a second copy (see
+// `connections.rs` `match_existing`). All that is missing is remembering the
+// code, which is what this does.
+//
+// A stored code grants read access to that one bundle until it expires. The
+// bookmarks it carries are already on this disk and it carries no credentials,
+// so the marginal exposure is small — but a code is still a key, so the file
+// is encrypted under the device-local key and never leaves the machine.
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct StoredSubscription {
+    bundle_id: String,
+    route: String,
+    label: String,
+    /// The full share code. Never handed to the frontend.
+    code: String,
+    imported_at: u64,
+    #[serde(default)]
+    last_checked_at: Option<u64>,
+}
+
+/// What the frontend sees: everything except the code.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionView {
+    bundle_id: String,
+    route: String,
+    label: String,
+    imported_at: u64,
+    last_checked_at: Option<u64>,
+}
+
+impl From<&StoredSubscription> for SubscriptionView {
+    fn from(stored: &StoredSubscription) -> Self {
+        Self {
+            bundle_id: stored.bundle_id.clone(),
+            route: stored.route.clone(),
+            label: stored.label.clone(),
+            imported_at: stored.imported_at,
+            last_checked_at: stored.last_checked_at,
+        }
+    }
+}
+
+fn subscriptions_path<R: Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join(SUBSCRIPTIONS_FILE))
+}
+
+fn load_subscriptions<R: Runtime>(app: &AppHandle<R>) -> Vec<StoredSubscription> {
+    let Ok(path) = subscriptions_path(app) else {
+        return Vec::new();
+    };
+    let Ok(encrypted) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    let Ok(key) = encryption::load_or_create_local_key(app) else {
+        return Vec::new();
+    };
+    encryption::decrypt_data(&encrypted, &key)
+        .ok()
+        .and_then(|plaintext| serde_json::from_slice(&plaintext).ok())
+        .unwrap_or_default()
+}
+
+fn save_subscriptions<R: Runtime>(
+    app: &AppHandle<R>,
+    entries: &[StoredSubscription],
+) -> Result<(), String> {
+    let path = subscriptions_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let key = encryption::load_or_create_local_key(app)?;
+    let plaintext = serde_json::to_vec(entries).map_err(|e| e.to_string())?;
+    let encrypted = encryption::encrypt_data(&plaintext, &key)?;
+    std::fs::write(&path, encrypted).map_err(|e| e.to_string())
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+/// Remember a share the user just imported, so its updates are one click away.
+/// Called after the import actually lands — redeeming alone does not mean the
+/// user kept anything.
+#[tauri::command]
+pub fn remember_bookmark_subscription(
+    app: AppHandle,
+    code: String,
+    bundle_id: String,
+    label: String,
+) -> Result<(), String> {
+    remember_subscription(&app, &code, bundle_id, label)
+}
+
+fn remember_subscription<R: Runtime>(
+    app: &AppHandle<R>,
+    code: &str,
+    bundle_id: String,
+    label: String,
+) -> Result<(), String> {
+    let parsed = parse_code(code)?;
+    if bundle_id.trim().is_empty() {
+        return Err("This share carries no bundle id to track".to_string());
+    }
+    let mut entries = load_subscriptions(app);
+    // One row per bundle: re-importing replaces the code rather than piling up.
+    entries.retain(|entry| entry.bundle_id != bundle_id);
+    // Store the normalised form, so a link or a lower-case paste comes back
+    // out as the code the user would recognise.
+    let code = format_code(&parsed.route, &parsed.secret);
+    entries.push(StoredSubscription {
+        bundle_id,
+        route: parsed.route,
+        label,
+        code,
+        imported_at: now_millis(),
+        last_checked_at: None,
+    });
+    save_subscriptions(app, &entries)
+}
+
+#[tauri::command]
+pub fn list_bookmark_subscriptions(app: AppHandle) -> Result<Vec<SubscriptionView>, String> {
+    Ok(list_subscriptions(&app))
+}
+
+fn list_subscriptions<R: Runtime>(app: &AppHandle<R>) -> Vec<SubscriptionView> {
+    load_subscriptions(app).iter().map(SubscriptionView::from).collect()
+}
+
+#[tauri::command]
+pub fn forget_bookmark_subscription(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    forget_subscription(&app, &bundle_id)
+}
+
+fn forget_subscription<R: Runtime>(app: &AppHandle<R>, bundle_id: &str) -> Result<(), String> {
+    let mut entries = load_subscriptions(app);
+    let before = entries.len();
+    entries.retain(|entry| entry.bundle_id != bundle_id);
+    if entries.len() == before {
+        return Ok(());
+    }
+    save_subscriptions(app, &entries)
+}
+
+/// Re-fetch a subscribed share. The returned bundle goes through the normal
+/// import review, where entries the user already holds default to "update".
+#[tauri::command]
+pub async fn refresh_bookmark_subscription(
+    app: AppHandle,
+    bundle_id: String,
+) -> Result<String, String> {
+    let code = {
+        let entries = load_subscriptions(&app);
+        entries
+            .iter()
+            .find(|entry| entry.bundle_id == bundle_id)
+            .map(|entry| entry.code.clone())
+            .ok_or("That share is no longer tracked on this machine")?
+    };
+    let bundle = redeem_bookmark_share(code).await?;
+
+    let mut entries = load_subscriptions(&app);
+    if let Some(entry) = entries.iter_mut().find(|entry| entry.bundle_id == bundle_id) {
+        entry.last_checked_at = Some(now_millis());
+    }
+    let _ = save_subscriptions(&app, &entries);
+    Ok(bundle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +571,68 @@ mod tests {
         assert!(secret.bytes().all(|b| CODE_ALPHABET.contains(&b)));
         // The whole point of the 12/8 split: a share is attacked offline.
         assert!(SECRET_LEN > crate::assist::SECRET_LEN);
+    }
+
+    /// `tauri::test::mock_app()` resolves to **one shared config directory**,
+    /// so every test that touches the subscription store works on the same
+    /// file. The store is read-modify-write, so two of them running in
+    /// parallel silently drop each other's rows: hold this while touching it,
+    /// own a distinct bundle id, and clean up afterwards.
+    static STORE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn rows_for<'a>(views: &'a [SubscriptionView], bundle: &str) -> Vec<&'a SubscriptionView> {
+        views.iter().filter(|view| view.bundle_id == bundle).collect()
+    }
+
+    #[test]
+    fn subscriptions_round_trip_and_keep_one_row_per_bundle() {
+        let _guard = STORE.lock().unwrap_or_else(|error| error.into_inner());
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let bundle = "bundle-round-trip";
+
+        let first = format_code("BCDF", &generate_secret());
+        remember_subscription(&handle, &first, bundle.into(), "Prod/EU".into())
+            .expect("remember");
+        let listed = list_subscriptions(&handle);
+        let rows = rows_for(&listed, bundle);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Prod/EU");
+
+        // Re-importing the same bundle replaces its row (and its code) rather
+        // than stacking a second one.
+        let second = format_code("GHJK", &generate_secret());
+        remember_subscription(&handle, &second, bundle.into(), "Prod/EU (v2)".into())
+            .expect("re-remember");
+        let listed = list_subscriptions(&handle);
+        let rows = rows_for(&listed, bundle);
+        assert_eq!(rows.len(), 1, "one row per bundle");
+        assert_eq!(rows[0].route, "GHJK");
+        assert_eq!(rows[0].label, "Prod/EU (v2)");
+
+        forget_subscription(&handle, bundle).expect("forget");
+        assert!(rows_for(&list_subscriptions(&handle), bundle).is_empty());
+    }
+
+    #[test]
+    fn the_frontend_never_receives_a_stored_share_code() {
+        let _guard = STORE.lock().unwrap_or_else(|error| error.into_inner());
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let bundle = "bundle-no-code-leak";
+        let code = format_code("BCDF", &generate_secret());
+        remember_subscription(&handle, &code, bundle.into(), "Lab".into())
+            .expect("remember");
+
+        // A code is a key: it stays in the encrypted sidecar and out of the
+        // view type the UI receives.
+        let listed = list_subscriptions(&handle);
+        let view = rows_for(&listed, bundle)[0];
+        let json = serde_json::to_string(view).expect("serialize");
+        assert!(json.contains(bundle));
+        assert!(!json.contains(&code[5..]), "the secret segment must not travel");
+
+        forget_subscription(&handle, bundle).expect("forget");
     }
 
     #[test]

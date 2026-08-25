@@ -85,14 +85,16 @@ pub enum CredentialSecret {
 }
 
 /// Path to the device-local AES key file.
-fn local_key_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+fn local_key_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     Ok(config_dir.join(LOCAL_KEY_FILE))
 }
 
 /// Read the device-local key, generating and persisting a fresh random one on
 /// first use. Used in no-master-password mode.
-pub fn load_or_create_local_key(app: &AppHandle) -> Result<Zeroizing<[u8; 32]>, String> {
+pub fn load_or_create_local_key<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Zeroizing<[u8; 32]>, String> {
     let path = local_key_path(app)?;
 
     if path.exists() {

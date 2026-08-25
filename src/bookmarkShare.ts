@@ -70,6 +70,38 @@ export function revokeBookmarkShare(route: string): Promise<void> {
   return invoke("revoke_bookmark_share", { route });
 }
 
+/** A share this machine imported and can re-open for updates. The code itself
+ *  stays in the backend's encrypted sidecar and never reaches the UI. */
+export interface ShareSubscription {
+  bundleId: string;
+  route: string;
+  label: string;
+  importedAt: number;
+  lastCheckedAt?: number | null;
+}
+
+/** Record a share the user just imported, so its updates are one click away. */
+export function rememberBookmarkSubscription(
+  code: string,
+  bundleId: string,
+  label: string,
+): Promise<void> {
+  return invoke("remember_bookmark_subscription", { code, bundleId, label });
+}
+
+export function listBookmarkSubscriptions(): Promise<ShareSubscription[]> {
+  return invoke<ShareSubscription[]>("list_bookmark_subscriptions");
+}
+
+export function forgetBookmarkSubscription(bundleId: string): Promise<void> {
+  return invoke("forget_bookmark_subscription", { bundleId });
+}
+
+/** Re-fetch a subscribed share; the bundle goes through the usual review. */
+export function refreshBookmarkSubscription(bundleId: string): Promise<string> {
+  return invoke<string>("refresh_bookmark_subscription", { bundleId });
+}
+
 /**
  * Whether `input` could be a share code rather than a file's contents: 16
  * alphanumerics from the code alphabet, however the user separated them. The

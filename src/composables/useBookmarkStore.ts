@@ -270,7 +270,7 @@ async function importWithPreview(
   format: string,
   content: string,
   group?: string,
-): Promise<BookmarkImportResult | null> {
+): Promise<{ result: BookmarkImportResult; plan: ImportPlan } | null> {
   const plan = await previewImport(format, content, group);
   const review = await reviewImport(plan);
   if (!review) {
@@ -284,7 +284,7 @@ async function importWithPreview(
     trust: review.trust,
   });
   await refresh(review.group || undefined);
-  return result;
+  return { result, plan };
 }
 
 async function importBookmarks(format: string, content: string, group: string | undefined): Promise<BookmarkImportResult> {

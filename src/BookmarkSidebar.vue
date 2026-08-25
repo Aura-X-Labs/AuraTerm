@@ -216,11 +216,12 @@ async function handleImportFile(event: Event) {
   importMessage.value = t("bookmarks.importing");
   try {
     const content = await file.text();
-    const result = await store.importWithPreview(detectImportFormat(file.name, content), content);
-    if (!result) {
+    const imported = await store.importWithPreview(detectImportFormat(file.name, content), content);
+    if (!imported) {
       importMessage.value = "";
       return;
     }
+    const { result } = imported;
     importMessage.value = t("bookmarks.importResult", {
       imported: result.imported,
       updated: result.updated,

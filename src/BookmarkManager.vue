@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import BookmarkEditor from "./BookmarkEditor.vue";
 import ShareDialog from "./ShareDialog.vue";
+import ShareListDialog from "./ShareListDialog.vue";
 import BookmarkManagerList from "./BookmarkManagerList.vue";
 import {
   buildBookmarkTree,
@@ -18,7 +19,7 @@ import {
   type SortDirection,
 } from "./bookmarks";
 import { detectImportFormat, downloadText, exportFileName, shareFileName } from "./bookmarkTransfer";
-import { redeemBookmarkShare } from "./bookmarkShare";
+import { redeemBookmarkShare, rememberBookmarkSubscription } from "./bookmarkShare";
 import { useBookmarkStore, CredentialsLockedError } from "./composables/useBookmarkStore";
 import { t } from "./i18n";
 import { alertDialog, confirmDialog } from "./nativeDialogs";
@@ -63,6 +64,7 @@ const exportMenuOpen = ref(false);
 const folderMenu = ref<{ x: number; y: number; path: string } | null>(null);
 /** The group whose share dialog is open, if any. */
 const shareTarget = ref<string | null>(null);
+const shareListOpen = ref(false);
 const rowMenu = ref<{ x: number; y: number; connection: SavedConnection } | null>(null);
 const draggingIds = ref<string[]>([]);
 const dropTarget = ref<string | null>(null);
@@ -612,11 +614,12 @@ async function handleImportFile(event: Event) {
   try {
     // The landing group, the per-entry decisions and the trust gate all live in
     // the review dialog now; the file no longer lands sight-unseen.
-    const result = await store.importWithPreview(format, content, currentGroupPath.value || undefined);
-    if (!result) {
+    const imported = await store.importWithPreview(format, content, currentGroupPath.value || undefined);
+    if (!imported) {
       statusMessage.value = "";
       return;
     }
+    const { result } = imported;
     // Subfolders a share brought along that hold no bookmark: nothing in the
     // connection list can rebuild them, so they have to be recorded explicitly.
     rememberGroups(result.createdGroups);
@@ -685,12 +688,23 @@ async function importShareCode() {
   busy.value = true;
   try {
     const content = await redeemBookmarkShare(code.trim());
-    const result = await store.importWithPreview("auraterm", content, currentGroupPath.value || undefined);
-    if (!result) {
+    const imported = await store.importWithPreview("auraterm", content, currentGroupPath.value || undefined);
+    if (!imported) {
       statusMessage.value = "";
       return;
     }
+    const { result, plan } = imported;
     rememberGroups(result.createdGroups);
+    // Remember the code so the next version of this share is one click away.
+    // Re-importing is what "getting updates" means: `origin.entryId` makes the
+    // second import land as an update rather than a second copy.
+    if (plan.share?.bundleId) {
+      await rememberBookmarkSubscription(
+        code.trim(),
+        plan.share.bundleId,
+        plan.share.label?.trim() || plan.share.rootName,
+      ).catch(() => undefined);
+    }
     statusMessage.value = t("bookmarks.importResult", {
       imported: result.imported,
       updated: result.updated,
@@ -792,6 +806,7 @@ watch(statusMessage, (value) => {
         <input ref="importInput" type="file" accept=".reg,.json,.conf,.config,text/plain" hidden @change="handleImportFile">
         <button class="bm-btn" type="button" :disabled="busy" :title="$t('bookmarkManager.importTitle')" @click="triggerImport">{{ $t('bookmarks.import') }}</button>
         <button class="bm-btn" type="button" :disabled="busy" :title="$t('bookmarkShare.importCodeTitle')" @click="importShareCode">{{ $t('bookmarkShare.importCode') }}</button>
+        <button class="bm-btn" type="button" :disabled="busy" @click="shareListOpen = true">{{ $t('bookmarkShare.myShares') }}</button>
         <div class="bm-menu-anchor">
           <button class="bm-btn" type="button" :disabled="busy" @click="exportMenuOpen = !exportMenuOpen">{{ $t('bookmarkManager.export') }} ▾</button>
           <div v-if="exportMenuOpen" class="bm-menu">
@@ -971,6 +986,12 @@ watch(statusMessage, (value) => {
         <div class="bm-menu-sep" />
         <button class="bm-menu-item danger" type="button" @click="runRowAction(rowMenu.connection, 'delete')">🗑 {{ $t('common.delete') }}</button>
       </div>
+
+      <ShareListDialog
+        v-if="shareListOpen"
+        @close="shareListOpen = false"
+        @created-groups="rememberGroups"
+      />
 
       <ShareDialog
         v-if="shareTarget"

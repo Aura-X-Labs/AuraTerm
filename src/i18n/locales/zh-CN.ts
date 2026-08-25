@@ -743,6 +743,13 @@ const zhCN: Messages = {
     stateExhausted: "次数用尽",
     redeemedCount: "已导入 {count}/{max} 次",
     unnamed: "（未命名）",
+    subscriptions: "已订阅",
+    noSubscriptions: "还没有导入过任何分享码。导入后会记住分享码，随时可以拉取更新。",
+    checkUpdates: "检查更新",
+    forget: "不再跟踪",
+    importedAt: "导入于",
+    lastChecked: "上次检查",
+    refresh: "刷新",
   },
   bookmarkImport: {
     title: "导入书签",
