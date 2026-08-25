@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectImportFormat, exportFileName } from "../bookmarkTransfer";
+import { detectImportFormat, exportFileName, shareFileName } from "../bookmarkTransfer";
 
 describe("bookmark transfer", () => {
   it("recognizes an AuraTerm export by its marker, whatever the file is called", () => {
@@ -19,5 +19,20 @@ describe("bookmark transfer", () => {
     const stamp = new Date(2026, 7, 24, 15, 30);
     expect(exportFileName("all", stamp)).toBe("auraterm-bookmarks-2026-08-24-1530.json");
     expect(exportFileName("selection", stamp)).toBe("auraterm-bookmarks-selection-2026-08-24-1530.json");
+  });
+
+  it("puts the shared group in the file name so the recipient can tell what it is", () => {
+    const stamp = new Date(2026, 7, 24, 15, 30);
+    expect(shareFileName("Prod/EU", stamp)).toBe("auraterm-share-Prod-EU-2026-08-24-1530.json");
+    expect(shareFileName("Prod\\EU\\Web", stamp)).toBe("auraterm-share-Prod-EU-Web-2026-08-24-1530.json");
+  });
+
+  it("keeps share file names legal on Windows", () => {
+    const stamp = new Date(2026, 7, 24, 15, 30);
+    // Reserved characters are dropped, spaces folded, trailing dots removed.
+    expect(shareFileName('Prod: "EU" <1>?', stamp)).toBe("auraterm-share-Prod-EU-1-2026-08-24-1530.json");
+    expect(shareFileName("Lab.", stamp)).toBe("auraterm-share-Lab-2026-08-24-1530.json");
+    // A group made entirely of illegal characters still yields a usable name.
+    expect(shareFileName("??", stamp)).toBe("auraterm-share-2026-08-24-1530.json");
   });
 });

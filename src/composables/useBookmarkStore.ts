@@ -36,6 +36,10 @@ export interface BookmarkImportResult {
   imported: number;
   skipped: number;
   warnings: string[];
+  /** Bookmark-free subfolders a share bundle asked for, as absolute paths.
+   *  They only survive in `settings.bookmarkGroups`, so the caller has to
+   *  merge them there — nothing in `connections.json` can rebuild them. */
+  createdGroups: string[];
 }
 
 function requireUnlocked() {
@@ -213,6 +217,29 @@ async function exportBookmarks(ids: readonly string[] | null, includeSecrets: bo
   });
 }
 
+/**
+ * Pack one group — its subtree plus the subfolders that hold no bookmark —
+ * into a share bundle.
+ *
+ * Unlike `exportBookmarks` this never carries credentials, so it stays
+ * available while the master password is locked: everything it strips
+ * (`connections.rs` `sanitize_connection_for_sharing`) is exactly what a
+ * locked store would not hand out anyway.
+ */
+async function exportGroup(
+  root: string,
+  explicitGroups: readonly string[],
+  label?: string,
+  note?: string,
+): Promise<string> {
+  return invoke<string>("export_group_bookmarks", {
+    root,
+    explicitGroups: [...explicitGroups],
+    label: label ?? null,
+    note: note ?? null,
+  });
+}
+
 async function importBookmarks(format: string, content: string, group: string | undefined): Promise<BookmarkImportResult> {
   const result = await invoke<BookmarkImportResult>("import_bookmarks", {
     format,
@@ -258,6 +285,7 @@ export function useBookmarkStore() {
     renameGroup,
     duplicateMany,
     exportBookmarks,
+    exportGroup,
     importBookmarks,
     touch,
     toggleGroup,

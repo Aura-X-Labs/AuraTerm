@@ -80,6 +80,24 @@ pub struct SavedConnection {
     /// connection metadata — these carry no secrets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tunnels: Vec<SavedTunnel>,
+    /// Set on bookmarks that arrived in a share bundle; see [`BookmarkOrigin`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<BookmarkOrigin>,
+}
+
+/// Where a bookmark came from when it was not created here.
+///
+/// `entry_id` is the *sharer's* connection id and stays the same across
+/// re-exports of that bookmark, so importing an updated share can recognise
+/// entries it already holds. The local `id` cannot serve that purpose: it is
+/// reassigned on every import (see [`parse_auraterm_export`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookmarkOrigin {
+    /// The share bundle this entry was packed into.
+    pub bundle_id: String,
+    /// Stable per-bookmark identity within that bundle.
+    pub entry_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +176,29 @@ fn sanitize_connection_for_storage(connection: &mut SavedConnection) {
         rule.response = None;
     }
     connection.post_connect_commands.clear();
+}
+
+/// Strip everything that is meaningless, misleading or unsafe once a bookmark
+/// leaves this machine, and stamp it with its share identity.
+///
+/// This is deliberately *not* what [`export_bookmarks`] does: a backup of your
+/// own bookmarks should keep its log paths and (opt-in) its credentials. A
+/// share is the other case — the recipient gets the knowledge of *how to reach*
+/// these hosts, never the identity used to reach them, and never a local path
+/// off the sharer's disk.
+fn sanitize_connection_for_sharing(connection: &mut SavedConnection, bundle_id: &str) {
+    connection.origin = Some(BookmarkOrigin {
+        bundle_id: bundle_id.to_string(),
+        entry_id: connection.id.clone(),
+    });
+    // The importer reassigns ids anyway; carrying ours across adds nothing.
+    connection.id = String::new();
+    // A path on our disk, naming our user and our directory layout.
+    connection.log_path = None;
+    // Our habits, not theirs.
+    connection.last_used = None;
+    // Passwords, private keys, auto-login responses and post-connect commands.
+    sanitize_connection_for_storage(connection);
 }
 
 fn hydrate_connection_secrets(
@@ -610,7 +651,39 @@ pub struct BookmarkExport {
     exported_at: u64,
     #[serde(default)]
     include_secrets: bool,
+    /// Present on group shares, absent on plain backups. Optional on purpose:
+    /// the format version stays at 1 so clients that predate sharing can still
+    /// read the file (serde drops fields it does not know).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    share: Option<ShareMeta>,
     connections: Vec<SavedConnection>,
+}
+
+/// Describes a shared group: what it was called, who packed it, and the
+/// subfolders that would otherwise vanish because they hold no bookmark.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareMeta {
+    /// Always `"group"` today; leaves room for other share units later.
+    #[serde(default = "default_share_kind")]
+    pub kind: String,
+    /// The shared group's own path on the sharer's machine (`Prod/EU`). Used as
+    /// the default landing group, never forced on the importer.
+    pub root_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub bundle_id: String,
+    /// Bookmark-free subfolders, relative to the shared root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub empty_groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
+}
+
+fn default_share_kind() -> String {
+    "group".to_string()
 }
 
 const BOOKMARK_EXPORT_FORMAT: &str = "auraterm-bookmarks";
@@ -644,22 +717,125 @@ pub fn export_bookmarks(
         }
     }
 
-    let exported_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as u64);
     serde_json::to_string_pretty(&BookmarkExport {
         format: BOOKMARK_EXPORT_FORMAT.to_string(),
         version: BOOKMARK_EXPORT_VERSION,
-        exported_at,
+        exported_at: now_millis(),
         include_secrets,
+        share: None,
         connections,
     })
     .map_err(|e| e.to_string())
 }
 
-/// 解析 AuraTerm 导出文件。返回待导入的连接（id 一律重新分配，避免覆盖同机
-/// 已存在的书签）。
-fn parse_auraterm_export(content: &str, base_group: &str) -> Result<(Vec<SavedConnection>, Vec<String>), String> {
+/// 把一个分组子树打包成**分享包**。
+///
+/// 与 [`export_bookmarks`] 的三点不同：
+/// 1. 分组路径按根**相对化**（`Prod/EU/Web` → `Web`），接收端因此可以把它挂到
+///    任意位置，也看不到分享者根以上的目录结构；
+/// 2. 空子分组随包出行（见 [`shared_empty_groups`]），否则接收端会丢掉分享者
+///    刻意建出来的层级；
+/// 3. 每条都过一遍 [`sanitize_connection_for_sharing`]：凭据、日志路径、使用
+///    时间一律不外带。分享包**永远不含凭据**，所以没有 `include_secrets` 开关。
+///
+/// `explicit_groups` 是前端的 `settings.bookmarkGroups`（用户显式创建过的分组，
+/// 可能一条书签都没有）。
+#[tauri::command]
+pub fn export_group_bookmarks(
+    app: AppHandle,
+    root: String,
+    explicit_groups: Vec<String>,
+    label: Option<String>,
+    note: Option<String>,
+) -> Result<String, String> {
+    let root = normalize_group_path(&root);
+    if root.is_empty() {
+        return Err("Pick a group to share".to_string());
+    }
+
+    let bundle_id = uuid::Uuid::new_v4().to_string();
+    let connections: Vec<SavedConnection> = load_connections(&app)?
+        .into_iter()
+        .filter_map(|mut connection| {
+            // `None` = outside the shared subtree, so this also does the filtering.
+            let relative =
+                relative_group_path(connection.group.as_deref().unwrap_or_default(), &root)?;
+            connection.group = (!relative.is_empty()).then_some(relative);
+            sanitize_connection_for_sharing(&mut connection, &bundle_id);
+            Some(connection)
+        })
+        .collect();
+
+    let empty_groups = shared_empty_groups(&explicit_groups, &root, &connections);
+    if connections.is_empty() && empty_groups.is_empty() {
+        return Err(format!("Group \"{}\" holds no bookmarks", root));
+    }
+
+    let trimmed = |value: Option<String>| {
+        value.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        })
+    };
+    serde_json::to_string_pretty(&BookmarkExport {
+        format: BOOKMARK_EXPORT_FORMAT.to_string(),
+        version: BOOKMARK_EXPORT_VERSION,
+        exported_at: now_millis(),
+        include_secrets: false,
+        share: Some(ShareMeta {
+            kind: default_share_kind(),
+            root_name: root,
+            label: trimmed(label),
+            note: trimmed(note),
+            bundle_id,
+            empty_groups,
+            source_label: None,
+        }),
+        connections,
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// A bookmark's group path relative to the shared root: `Prod/EU/Web` under
+/// `Prod/EU` becomes `Web`, the root itself becomes `""`, and anything outside
+/// the subtree yields `None` — the same subtree arithmetic a group rename does,
+/// with the root as the source and an empty target.
+fn relative_group_path(path: &str, root: &str) -> Option<String> {
+    renamed_group_path(&normalize_group_path(path), root, "")
+}
+
+/// The subfolders a share has to spell out because no bookmark in it rebuilds
+/// them. Paths come in absolute and go out relative to `root`; `packed` must
+/// already carry relative groups.
+fn shared_empty_groups(
+    explicit_groups: &[String],
+    root: &str,
+    packed: &[SavedConnection],
+) -> Vec<String> {
+    let mut groups: Vec<String> = explicit_groups
+        .iter()
+        .filter_map(|group| relative_group_path(group, root))
+        .filter(|group| !group.is_empty())
+        .filter(|group| {
+            let prefix = format!("{}/", group);
+            !packed.iter().any(|connection| {
+                let current = connection.group.as_deref().unwrap_or_default();
+                current == group || current.starts_with(&prefix)
+            })
+        })
+        .collect();
+    groups.sort();
+    groups.dedup();
+    groups
+}
+
+/// 解析 AuraTerm 导出文件。返回 (待导入的连接, 警告, 需要建出来的空分组)。
+/// id 一律重新分配，避免覆盖同机已存在的书签；`origin` 原样保留，它才是跨机器
+/// 稳定的身份。
+fn parse_auraterm_export(
+    content: &str,
+    base_group: &str,
+) -> Result<(Vec<SavedConnection>, Vec<String>, Vec<String>), String> {
     let parsed: BookmarkExport = serde_json::from_str(content)
         .map_err(|e| format!("Not an AuraTerm bookmark export: {}", e))?;
     if parsed.format != BOOKMARK_EXPORT_FORMAT {
@@ -671,6 +847,38 @@ fn parse_auraterm_export(content: &str, base_group: &str) -> Result<(Vec<SavedCo
             parsed.version
         ));
     }
+
+    // 分享包里的路径是相对于「被分享的那个分组」的，所以在用户没有指定落点时，
+    // 它落在该分组自己的名字下——与普通备份「保持文件中原有的分组」是同一个意思，
+    // 只是备份里的路径本来就是绝对的。
+    let root = parsed
+        .share
+        .as_ref()
+        .map(|share| normalize_group_path(&share.root_name))
+        .unwrap_or_default();
+    let base_group = if base_group.is_empty() { root.as_str() } else { base_group };
+
+    let groups = parsed
+        .share
+        .as_ref()
+        .map(|share| {
+            share
+                .empty_groups
+                .iter()
+                .filter_map(|group| {
+                    let group = normalize_group_path(group);
+                    if group.is_empty() {
+                        return None;
+                    }
+                    Some(if base_group.is_empty() {
+                        group
+                    } else {
+                        format!("{}/{}", base_group, group)
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let warnings = Vec::new();
     let entries = parsed
@@ -693,7 +901,7 @@ fn parse_auraterm_export(content: &str, base_group: &str) -> Result<(Vec<SavedCo
             connection
         })
         .collect();
-    Ok((entries, warnings))
+    Ok((entries, warnings, groups))
 }
 
 #[derive(Debug, Serialize)]
@@ -702,6 +910,11 @@ pub struct BookmarkImportResult {
     imported: usize,
     skipped: usize,
     warnings: Vec<String>,
+    /// Bookmark-free subfolders the share asked for, as absolute paths. The
+    /// frontend merges them into `settings.bookmarkGroups`, which is where
+    /// groups that hold nothing yet are kept alive (they cannot be derived
+    /// from `connections.json`).
+    created_groups: Vec<String>,
 }
 
 #[tauri::command]
@@ -723,10 +936,12 @@ pub fn import_bookmarks(
         } else {
             format!("Imported/{}", if format.eq_ignore_ascii_case("putty") { "PuTTY" } else { "OpenSSH" })
         });
-    let (candidates, mut warnings) = if format.eq_ignore_ascii_case("putty") {
-        parse_putty_registry(&content, &base_group)
+    let (candidates, mut warnings, created_groups) = if format.eq_ignore_ascii_case("putty") {
+        let (entries, warnings) = parse_putty_registry(&content, &base_group);
+        (entries, warnings, Vec::new())
     } else if format.eq_ignore_ascii_case("openssh") {
-        parse_openssh_config(&content, &base_group)
+        let (entries, warnings) = parse_openssh_config(&content, &base_group);
+        (entries, warnings, Vec::new())
     } else if is_auraterm {
         parse_auraterm_export(&content, &base_group)?
     } else {
@@ -782,7 +997,7 @@ pub fn import_bookmarks(
         encryption::save_encrypted_credentials(&app, store, secret)?;
     }
     write_connections(&app, &connections)?;
-    Ok(BookmarkImportResult { imported, skipped, warnings })
+    Ok(BookmarkImportResult { imported, skipped, warnings, created_groups })
 }
 
 /// Whether an imported entry brought any secret along that is worth persisting.
@@ -797,6 +1012,13 @@ fn connection_carries_secrets(connection: &SavedConnection) -> bool {
         || connection.auto_login_rules.iter().any(|rule| rule.response.is_some())
 }
 
+/// Milliseconds since the Unix epoch, 0 if the clock is before it.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
 fn normalize_group_path(value: &str) -> String {
     value
         .replace('\\', "/")
@@ -808,9 +1030,7 @@ fn normalize_group_path(value: &str) -> String {
 }
 
 fn imported_connection(name: String, group: String, protocol: &str, host: String, port: u16, user: String) -> SavedConnection {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as u64);
+    let now = now_millis();
     SavedConnection {
         id: uuid::Uuid::new_v4().to_string(),
         name,
@@ -841,6 +1061,7 @@ fn imported_connection(name: String, group: String, protocol: &str, host: String
         auto_reconnect: false,
         reconnect_type: default_reconnect_type(),
         tunnels: Vec::new(),
+        origin: None,
     }
 }
 
@@ -1126,6 +1347,7 @@ mod tests {
             version: BOOKMARK_EXPORT_VERSION,
             exported_at: 1,
             include_secrets: false,
+            share: None,
             connections: vec![imported_connection(
                 "web".to_string(),
                 "Production/EU".to_string(),
@@ -1137,12 +1359,175 @@ mod tests {
         };
         let json = serde_json::to_string(&export).expect("serialize");
 
-        let (entries, _) = parse_auraterm_export(&json, "").expect("parse");
+        let (entries, _, groups) = parse_auraterm_export(&json, "").expect("parse");
         assert_eq!(entries[0].group.as_deref(), Some("Production/EU"));
         assert_ne!(entries[0].id, export.connections[0].id, "ids are reassigned on import");
+        assert!(groups.is_empty(), "a plain backup carries no explicit groups");
 
-        let (nested, _) = parse_auraterm_export(&json, "Restored").expect("parse");
+        let (nested, _, _) = parse_auraterm_export(&json, "Restored").expect("parse");
         assert_eq!(nested[0].group.as_deref(), Some("Restored/Production/EU"));
+    }
+
+    /// Builds the share bundle `export_group_bookmarks` would write for group
+    /// `root`, without needing an `AppHandle`.
+    fn share_bundle(root: &str, groups: &[&str], empty_groups: &[&str]) -> String {
+        let connections = groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| {
+                let mut connection = imported_connection(
+                    format!("host-{}", index),
+                    group.to_string(),
+                    "ssh",
+                    format!("10.0.0.{}", index),
+                    22,
+                    "ops".to_string(),
+                );
+                connection.id = format!("entry-{}", index);
+                sanitize_connection_for_sharing(&mut connection, "bundle-1");
+                connection
+            })
+            .collect();
+        serde_json::to_string(&BookmarkExport {
+            format: BOOKMARK_EXPORT_FORMAT.to_string(),
+            version: BOOKMARK_EXPORT_VERSION,
+            exported_at: 1,
+            include_secrets: false,
+            share: Some(ShareMeta {
+                kind: default_share_kind(),
+                root_name: root.to_string(),
+                label: None,
+                note: None,
+                bundle_id: "bundle-1".to_string(),
+                empty_groups: empty_groups.iter().map(|group| group.to_string()).collect(),
+                source_label: None,
+            }),
+            connections,
+        })
+        .expect("serialize")
+    }
+
+    #[test]
+    fn relative_paths_are_the_root_rename_with_an_empty_target() {
+        assert_eq!(relative_group_path("Prod/EU/Web", "Prod/EU"), Some("Web".to_string()));
+        assert_eq!(relative_group_path("Prod/EU", "Prod/EU"), Some(String::new()));
+        assert_eq!(relative_group_path("Prod/EUR", "Prod/EU"), None, "prefix, not a parent");
+        assert_eq!(relative_group_path("Lab", "Prod/EU"), None);
+        // Separator and whitespace noise is normalised before the comparison.
+        assert_eq!(relative_group_path("Prod\\EU\\Web ", "Prod/EU"), Some("Web".to_string()));
+    }
+
+    #[test]
+    fn only_subfolders_no_bookmark_rebuilds_travel_with_the_share() {
+        let packed = vec![
+            imported_connection("a".into(), "Web".into(), "ssh", "h".into(), 22, "u".into()),
+            imported_connection("b".into(), "DB/Replicas".into(), "ssh", "h".into(), 22, "u".into()),
+        ];
+        let explicit = [
+            "Prod/EU/Web".to_string(),      // a bookmark sits here
+            "Prod/EU/DB".to_string(),       // rebuilt from DB/Replicas
+            "Prod/EU/Staging".to_string(),  // genuinely empty -> must travel
+            "Prod/EU".to_string(),          // the root itself
+            "Lab".to_string(),              // outside the subtree
+        ];
+        assert_eq!(
+            shared_empty_groups(&explicit, "Prod/EU", &packed),
+            vec!["Staging".to_string()],
+        );
+    }
+
+    #[test]
+    fn a_share_lands_under_its_own_name_and_keeps_empty_subfolders() {
+        let json = share_bundle("Prod/EU", &["Web", ""], &["Staging/Canary"]);
+
+        // No target group: the bundle recreates the group it was cut from.
+        let (entries, _, groups) = parse_auraterm_export(&json, "").expect("parse");
+        assert_eq!(entries[0].group.as_deref(), Some("Prod/EU/Web"));
+        assert_eq!(entries[1].group.as_deref(), Some("Prod/EU"));
+        assert_eq!(groups, vec!["Prod/EU/Staging/Canary".to_string()]);
+
+        // A target group wins, and the sharer's parent folders never appear.
+        let (entries, _, groups) = parse_auraterm_export(&json, "From Bill").expect("parse");
+        assert_eq!(entries[0].group.as_deref(), Some("From Bill/Web"));
+        assert_eq!(entries[1].group.as_deref(), Some("From Bill"));
+        assert_eq!(groups, vec!["From Bill/Staging/Canary".to_string()]);
+    }
+
+    #[test]
+    fn sharing_strips_local_and_secret_fields_but_keeps_a_stable_identity() {
+        let mut connection = imported_connection(
+            "web".into(), "Web".into(), "ssh", "10.0.0.1".into(), 22, "ops".into(),
+        );
+        connection.id = "local-uuid".to_string();
+        connection.log_path = Some("/Users/bill/logs/web.log".to_string());
+        connection.last_used = Some(1_700_000_000_000);
+        connection.password = Some("hunter2".to_string());
+        connection.post_connect_commands = vec!["sudo -i".to_string()];
+        connection.auto_login_rules = vec![SavedAutoLoginRule {
+            expect: "assword:".to_string(),
+            response: Some("hunter2".to_string()),
+            case_sensitive: false,
+            timeout_secs: default_expect_timeout(),
+        }];
+
+        sanitize_connection_for_sharing(&mut connection, "bundle-1");
+
+        assert_eq!(connection.id, "");
+        assert_eq!(connection.log_path, None);
+        assert_eq!(connection.last_used, None);
+        assert_eq!(connection.password, None);
+        assert!(connection.post_connect_commands.is_empty());
+        assert_eq!(connection.auto_login_rules[0].response, None);
+        assert_eq!(connection.auto_login_rules[0].expect, "assword:", "topology survives");
+        let origin = connection.origin.expect("origin is stamped");
+        assert_eq!(origin.bundle_id, "bundle-1");
+        assert_eq!(origin.entry_id, "local-uuid", "identity outlives the reassigned id");
+    }
+
+    #[test]
+    fn the_origin_stamp_survives_the_id_being_reassigned() {
+        let json = share_bundle("Prod", &["Web"], &[]);
+        let (entries, _, _) = parse_auraterm_export(&json, "").expect("parse");
+        let origin = entries[0].origin.as_ref().expect("origin survives the import");
+        assert_eq!(origin.entry_id, "entry-0", "the sharer's identity is what stays put");
+        assert_eq!(origin.bundle_id, "bundle-1");
+        assert!(!entries[0].id.is_empty(), "a fresh local id is handed out");
+    }
+
+    /// The whole reason `version` stays at 1 and `share` is optional: a client
+    /// built before sharing existed must still be able to open a share bundle.
+    /// If this test has to change, older AuraTerm installs just lost the file.
+    #[test]
+    fn a_share_still_opens_in_a_client_that_predates_sharing() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyExport {
+            format: String,
+            version: u32,
+            connections: Vec<LegacyConnection>,
+        }
+        // No `origin`, no `share`: exactly the fields v0.3.3 knew about.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyConnection {
+            id: String,
+            name: String,
+            #[serde(default)]
+            group: Option<String>,
+            host: String,
+        }
+
+        let json = share_bundle("Prod/EU", &["Web"], &["Staging"]);
+        let legacy: LegacyExport = serde_json::from_str(&json).expect("old clients still parse it");
+        assert_eq!(legacy.format, BOOKMARK_EXPORT_FORMAT);
+        assert_eq!(legacy.version, 1, "bumping this locks older clients out of every share");
+        assert_eq!(legacy.connections[0].name, "host-0");
+        assert_eq!(legacy.connections[0].host, "10.0.0.0");
+        assert_eq!(legacy.connections[0].id, "", "cleared, and reassigned by any importer");
+        // Relative paths are what makes the fallback correct rather than merely
+        // parseable: an old importer prefixes its own target group and gets the
+        // subtree in the right shape, only without the share's name.
+        assert_eq!(legacy.connections[0].group.as_deref(), Some("Web"));
     }
 
     #[test]

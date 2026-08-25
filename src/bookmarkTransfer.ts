@@ -19,12 +19,36 @@ export function detectImportFormat(fileName: string, content: string): BookmarkI
   return fileName.toLowerCase().endsWith(".reg") ? "putty" : "openssh";
 }
 
+/** `2026-08-24-1530` — sortable, and without the colons Windows rejects. */
+function timeStamp(now: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    + `-${pad(now.getHours())}${pad(now.getMinutes())}`;
+}
+
 /** `auraterm-bookmarks-2026-08-24-1530.json` — sortable, no colons (Windows). */
 export function exportFileName(scope: "all" | "selection", now = new Date()): string {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-    + `-${pad(now.getHours())}${pad(now.getMinutes())}`;
-  return `auraterm-bookmarks${scope === "selection" ? "-selection" : ""}-${stamp}.json`;
+  return `auraterm-bookmarks${scope === "selection" ? "-selection" : ""}-${timeStamp(now)}.json`;
+}
+
+/**
+ * `auraterm-share-Prod-EU-2026-08-24-1530.json`.
+ *
+ * The shared group's path goes into the file name so the recipient can tell
+ * what they were sent without opening it. Path separators become `-`, and the
+ * characters Windows rejects in a file name are dropped — including a trailing
+ * dot, which it also refuses.
+ */
+export function shareFileName(root: string, now = new Date()): string {
+  const slug = root
+    .split(/[\\/]/)
+    .map((part) => part.replace(/["*:<>?|\x00-\x1f]/g, "").trim())
+    .filter(Boolean)
+    .join("-")
+    .replace(/\s+/g, "-")
+    .slice(0, 60)
+    .replace(/[-.]+$/, "");
+  return `auraterm-share${slug ? `-${slug}` : ""}-${timeStamp(now)}.json`;
 }
 
 /**
