@@ -275,6 +275,17 @@ export interface ConnectResult {
   logPath?: string;
 }
 
+/** Where a bookmark came from when it was not created here.
+ *
+ *  `entryId` is the sharer's connection id and stays stable across re-exports
+ *  of that bookmark; the local `id` is reassigned on every import, so it cannot
+ *  serve as a cross-machine identity. Mirrors `BookmarkOrigin` in
+ *  `connections.rs`. */
+export interface BookmarkOrigin {
+  bundleId: string;
+  entryId: string;
+}
+
 export interface SavedConnection {
   id: string;
   name: string;
@@ -310,6 +321,8 @@ export interface SavedConnection {
   reconnectType?: ReconnectType;
   /** Saved port-forwarding tunnels (SSH only). */
   tunnels?: TunnelConfig[];
+  /** Set on bookmarks that arrived in a share bundle. */
+  origin?: BookmarkOrigin;
 }
 
 /** Remote Assist guest tab: joins another AuraTerm's session with a code.

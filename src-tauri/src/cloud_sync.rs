@@ -1282,6 +1282,7 @@ mod tests {
             auto_reconnect: false,
             reconnect_type: "manual".to_string(),
             tunnels: Vec::new(),
+            origin: None,
         }
     }
 

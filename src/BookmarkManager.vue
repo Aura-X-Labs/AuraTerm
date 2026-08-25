@@ -16,7 +16,7 @@ import {
   type BookmarkSortKey,
   type SortDirection,
 } from "./bookmarks";
-import { detectImportFormat, downloadText, exportFileName } from "./bookmarkTransfer";
+import { detectImportFormat, downloadText, exportFileName, shareFileName } from "./bookmarkTransfer";
 import { useBookmarkStore, CredentialsLockedError } from "./composables/useBookmarkStore";
 import { t } from "./i18n";
 import { alertDialog, confirmDialog } from "./nativeDialogs";
@@ -449,13 +449,19 @@ function handleWindowMouseDown(event: MouseEvent) {
   }
 }
 
-/** Remember a group that holds no bookmark yet, so it survives in the tree. */
-function rememberGroup(path: string) {
-  const normalized = normalizeBookmarkPath(path).join("/");
-  if (!normalized || props.bookmarkGroups.includes(normalized)) {
+/** Remember groups that hold no bookmark yet, so they survive in the tree. */
+function rememberGroups(paths: readonly string[]) {
+  const merged = new Set(props.bookmarkGroups);
+  for (const path of paths) {
+    const normalized = normalizeBookmarkPath(path).join("/");
+    if (normalized) {
+      merged.add(normalized);
+    }
+  }
+  if (merged.size === props.bookmarkGroups.length) {
     return;
   }
-  emit("updateGroups", [...props.bookmarkGroups, normalized]);
+  emit("updateGroups", [...merged].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
 }
 
 async function createGroup(parent = "") {
@@ -469,7 +475,7 @@ async function createGroup(parent = "") {
   if (!path) {
     return;
   }
-  rememberGroup(path);
+  rememberGroups([path]);
   if (parent) {
     store.expandGroup(parent);
   }
@@ -605,6 +611,9 @@ async function handleImportFile(event: Event) {
   busy.value = true;
   try {
     const result = await store.importBookmarks(format, content, target.trim() || undefined);
+    // Subfolders a share brought along that hold no bookmark: nothing in the
+    // connection list can rebuild them, so they have to be recorded explicitly.
+    rememberGroups(result.createdGroups);
     statusMessage.value = t("bookmarks.importResult", { imported: result.imported, skipped: result.skipped })
       + (result.warnings.length ? ` · ${result.warnings.join(" ")}` : "");
   } catch (error) {
@@ -621,6 +630,27 @@ async function exportIds(ids: readonly string[] | null, includeSecrets: boolean)
     const content = await store.exportBookmarks(ids, includeSecrets);
     downloadText(exportFileName(ids ? "selection" : "all"), content);
     statusMessage.value = t("bookmarkManager.exported", { count: ids ? ids.length : connections.value.length });
+  } catch (error) {
+    await reportFailure("bookmarkManager.exportFailed", error);
+  } finally {
+    busy.value = false;
+  }
+}
+
+/**
+ * Pack a whole group — subtree, empty subfolders and all — into a share file.
+ *
+ * Group paths inside are relative to `path`, so the recipient can graft it
+ * anywhere and never sees the folders we keep above it.
+ */
+async function exportFolder(path: string) {
+  folderMenu.value = null;
+  exportMenuOpen.value = false;
+  busy.value = true;
+  try {
+    const content = await store.exportGroup(path, props.bookmarkGroups);
+    downloadText(shareFileName(path), content);
+    statusMessage.value = t("bookmarkManager.groupExported", { group: path });
   } catch (error) {
     await reportFailure("bookmarkManager.exportFailed", error);
   } finally {
@@ -720,6 +750,12 @@ watch(statusMessage, (value) => {
           <button class="bm-btn" type="button" :disabled="busy" @click="exportMenuOpen = !exportMenuOpen">{{ $t('bookmarkManager.export') }} ▾</button>
           <div v-if="exportMenuOpen" class="bm-menu">
             <button class="bm-menu-item" type="button" @click="exportBookmarks('all', false)">{{ $t('bookmarkManager.exportAll') }}</button>
+            <button
+              v-if="currentGroupPath"
+              class="bm-menu-item"
+              type="button"
+              @click="exportFolder(currentGroupPath)"
+            >{{ $t('bookmarkManager.exportGroup', { group: currentGroupPath }) }}</button>
             <button
               class="bm-menu-item"
               type="button"
@@ -897,6 +933,7 @@ watch(statusMessage, (value) => {
       >
         <button class="bm-menu-item" type="button" @click="renameFolder(folderMenu.path)">✏️ {{ $t('bookmarkManager.renameGroup') }}</button>
         <button class="bm-menu-item" type="button" @click="createGroup(folderMenu.path)">📁 {{ $t('bookmarkManager.newSubgroup') }}</button>
+        <button class="bm-menu-item" type="button" @click="exportFolder(folderMenu.path)">⤓ {{ $t('bookmarkManager.shareGroup') }}</button>
         <button class="bm-menu-item" type="button" @click="dissolveFolder(folderMenu.path)">↥ {{ $t('bookmarkManager.dissolveGroup') }}</button>
         <div class="bm-menu-sep" />
         <button class="bm-menu-item danger" type="button" @click="deleteFolder(folderMenu.path)">🗑 {{ $t('bookmarkManager.deleteGroup') }}</button>

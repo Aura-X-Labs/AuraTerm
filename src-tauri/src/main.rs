@@ -1251,6 +1251,7 @@ fn main() {
             connections::touch_connection,
             connections::import_bookmarks,
             connections::export_bookmarks,
+            connections::export_group_bookmarks,
             connections::delete_connections,
             connections::move_connections,
             connections::rename_group,
