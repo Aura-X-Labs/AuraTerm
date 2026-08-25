@@ -1159,6 +1159,7 @@ fn main() {
         .manage(assist_client::AssistClientState::default())
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
+        .manage(connections::ImportPlanState::default())
         .manage(cloud_sync::SyncState::default())
         .manage(ai::AiState::default())
         .invoke_handler(tauri::generate_handler![
@@ -1250,6 +1251,10 @@ fn main() {
             connections::delete_connection,
             connections::touch_connection,
             connections::import_bookmarks,
+            connections::preview_bookmark_import,
+            connections::retarget_bookmark_import,
+            connections::discard_bookmark_import,
+            connections::apply_bookmark_import,
             connections::export_bookmarks,
             connections::export_group_bookmarks,
             connections::delete_connections,

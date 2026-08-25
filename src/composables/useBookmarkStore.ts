@@ -1,6 +1,7 @@
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { collectGroupPaths } from "../bookmarks";
+import { reviewImport, type ImportPlan } from "../importPreview";
 import type { SavedConnection } from "../types";
 
 /**
@@ -31,9 +32,11 @@ export class CredentialsLockedError extends Error {
   }
 }
 
-/** Result of `import_bookmarks`. */
+/** Result of `import_bookmarks` / `apply_bookmark_import`. */
 export interface BookmarkImportResult {
   imported: number;
+  /** Entries that matched a local bookmark and overwrote its topology. */
+  updated: number;
   skipped: number;
   warnings: string[];
   /** Bookmark-free subfolders a share bundle asked for, as absolute paths.
@@ -240,6 +243,50 @@ async function exportGroup(
   });
 }
 
+/** Parse a payload and work out what importing it would do. Writes nothing. */
+function previewImport(format: string, content: string, group?: string): Promise<ImportPlan> {
+  return invoke<ImportPlan>("preview_bookmark_import", { format, content, group: group ?? null });
+}
+
+/** Recompute a plan for a different landing group. The payload already lives in
+ *  the backend, so it does not travel again. */
+function retargetImport(planId: string, group?: string): Promise<ImportPlan> {
+  return invoke<ImportPlan>("retarget_bookmark_import", { planId, group: group ?? null });
+}
+
+/** Drop a plan the user backed out of — its cached payload may be plaintext. */
+function discardImport(planId: string): Promise<void> {
+  return invoke("discard_bookmark_import", { planId });
+}
+
+/**
+ * The whole import flow: parse, show the user what would happen, then write
+ * what they approved. Returns null when they cancelled.
+ *
+ * Both entry points (the manager page and the sidebar) go through here — the
+ * risk in a bookmark file is the same whichever button opened it.
+ */
+async function importWithPreview(
+  format: string,
+  content: string,
+  group?: string,
+): Promise<BookmarkImportResult | null> {
+  const plan = await previewImport(format, content, group);
+  const review = await reviewImport(plan);
+  if (!review) {
+    await discardImport(plan.planId).catch(() => undefined);
+    return null;
+  }
+  const result = await invoke<BookmarkImportResult>("apply_bookmark_import", {
+    planId: plan.planId,
+    group: review.group || null,
+    decisions: review.decisions,
+    trust: review.trust,
+  });
+  await refresh(review.group || undefined);
+  return result;
+}
+
 async function importBookmarks(format: string, content: string, group: string | undefined): Promise<BookmarkImportResult> {
   const result = await invoke<BookmarkImportResult>("import_bookmarks", {
     format,
@@ -287,6 +334,10 @@ export function useBookmarkStore() {
     exportBookmarks,
     exportGroup,
     importBookmarks,
+    previewImport,
+    retargetImport,
+    discardImport,
+    importWithPreview,
     touch,
     toggleGroup,
     expandGroup,
