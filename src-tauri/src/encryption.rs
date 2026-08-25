@@ -1,6 +1,6 @@
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes256Gcm, Nonce,
+    Aes256Gcm,
 };
 use argon2::{password_hash::SaltString, Argon2, ParamsBuilder, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -449,10 +449,9 @@ pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String>
 
     let mut rng = rand::thread_rng();
     let nonce_bytes: [u8; 12] = rng.gen();
-    let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad: b"" })
+        .encrypt((&nonce_bytes).into(), Payload { msg: plaintext, aad: b"" })
         .map_err(|e| format!("Encryption failed: {}", e))?;
 
     let mut result = Vec::new();
@@ -467,13 +466,15 @@ pub fn decrypt_data(encrypted: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String>
         return Err("Encrypted data too short".to_string());
     }
 
-    let nonce = Nonce::from_slice(&encrypted[0..12]);
+    let nonce: [u8; 12] = encrypted[0..12]
+        .try_into()
+        .map_err(|_| "Encrypted data too short".to_string())?;
     let ciphertext = &encrypted[12..];
 
     let cipher = Aes256Gcm::new(key.into());
 
     cipher
-        .decrypt(nonce, Payload { msg: ciphertext, aad: b"" })
+        .decrypt((&nonce).into(), Payload { msg: ciphertext, aad: b"" })
         .map_err(|e| format!("Decryption failed: {}", e))
 }
 

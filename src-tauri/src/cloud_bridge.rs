@@ -1552,7 +1552,7 @@ fn derive_peer_cipher(session_id: &str, connection_id: &str, peer_public_key: &s
     let shared = secret.diffie_hellman(&peer);
     let mut key = [0_u8; 32];
     let info = format!("auraxlab-console|e2ee-v1|{session_id}|{connection_id}");
-    Hkdf::<Sha256>::new(Some(&[0_u8; 32]), shared.raw_secret_bytes().as_slice())
+    Hkdf::<Sha256>::new(Some(&[0_u8; 32]), shared.raw_secret_bytes())
         .expand(info.as_bytes(), &mut key)
         .map_err(|_| "could not derive E2EE key".to_string())?;
     Ok((
@@ -1936,7 +1936,7 @@ mod tests {
         let agent_public = PublicKey::from_sec1_bytes(&URL_SAFE_NO_PAD.decode(agent_public).unwrap()).unwrap();
         let shared = browser_secret.diffie_hellman(&agent_public);
         let mut browser_key = [0_u8; 32];
-        Hkdf::<Sha256>::new(Some(&[0_u8; 32]), shared.raw_secret_bytes().as_slice())
+        Hkdf::<Sha256>::new(Some(&[0_u8; 32]), shared.raw_secret_bytes())
             .expand(b"auraxlab-console|e2ee-v1|session-1|connection-1", &mut browser_key)
             .unwrap();
         assert_eq!(agent_peer.key, browser_key);
