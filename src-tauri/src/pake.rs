@@ -109,7 +109,7 @@ fn scalar_from_bytes(bytes: &[u8; 32]) -> Result<Scalar, PakeError> {
 
 fn scalar_bytes(scalar: &Scalar) -> [u8; 32] {
     let mut out = [0_u8; 32];
-    out.copy_from_slice(scalar.to_bytes().as_slice());
+    out.copy_from_slice(&scalar.to_bytes());
     out
 }
 

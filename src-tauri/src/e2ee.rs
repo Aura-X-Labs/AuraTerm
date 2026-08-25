@@ -9,7 +9,7 @@
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes256Gcm, Nonce,
+    Aes256Gcm,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::Rng;
@@ -66,7 +66,7 @@ impl PeerCipher {
         let plaintext = serde_json::to_vec(frame).map_err(|e| e.to_string())?;
         let ciphertext = cipher
             .encrypt(
-                Nonce::from_slice(&nonce),
+                (&nonce).into(),
                 Payload {
                     msg: &plaintext,
                     aad: aad.as_bytes(),
@@ -99,9 +99,10 @@ impl PeerCipher {
                     .ok_or_else(|| "missing E2EE nonce".to_string())?,
             )
             .map_err(|_| "invalid E2EE nonce".to_string())?;
-        if nonce.len() != 12 {
-            return Err("invalid E2EE nonce length".into());
-        }
+        let nonce: [u8; 12] = nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| "invalid E2EE nonce length".to_string())?;
         let ciphertext = URL_SAFE_NO_PAD
             .decode(
                 envelope
@@ -124,7 +125,7 @@ impl PeerCipher {
         let aad = format!("{session_id}|{connection_id}|{peer_direction}|{counter}");
         let plaintext = cipher
             .decrypt(
-                Nonce::from_slice(&nonce),
+                (&nonce).into(),
                 Payload {
                     msg: &ciphertext,
                     aad: aad.as_bytes(),
