@@ -2716,6 +2716,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
         :refresh-token="sidebarRefreshToken"
         :expand-group="sidebarExpandGroup"
         :settings="settings"
+        :bookmark-groups="settings.bookmarkGroups"
         @connect="handleBookmarkConnect"
         @manage="handleOpenBookmarkManager"
       />

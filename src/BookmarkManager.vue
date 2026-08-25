@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import BookmarkEditor from "./BookmarkEditor.vue";
+import ShareDialog from "./ShareDialog.vue";
 import BookmarkManagerList from "./BookmarkManagerList.vue";
 import {
   buildBookmarkTree,
@@ -17,6 +18,7 @@ import {
   type SortDirection,
 } from "./bookmarks";
 import { detectImportFormat, downloadText, exportFileName, shareFileName } from "./bookmarkTransfer";
+import { redeemBookmarkShare } from "./bookmarkShare";
 import { useBookmarkStore, CredentialsLockedError } from "./composables/useBookmarkStore";
 import { t } from "./i18n";
 import { alertDialog, confirmDialog } from "./nativeDialogs";
@@ -59,6 +61,8 @@ const statusMessage = ref("");
 const busy = ref(false);
 const exportMenuOpen = ref(false);
 const folderMenu = ref<{ x: number; y: number; path: string } | null>(null);
+/** The group whose share dialog is open, if any. */
+const shareTarget = ref<string | null>(null);
 const rowMenu = ref<{ x: number; y: number; connection: SavedConnection } | null>(null);
 const draggingIds = ref<string[]>([]);
 const dropTarget = ref<string | null>(null);
@@ -663,6 +667,42 @@ async function exportFolder(path: string) {
   }
 }
 
+function shareFolder(path: string) {
+  folderMenu.value = null;
+  shareTarget.value = path;
+}
+
+/**
+ * Open a share someone sent us. The decrypted bundle goes through the same
+ * review as a file: a redeemed share is external input like any other.
+ */
+async function importShareCode() {
+  exportMenuOpen.value = false;
+  const code = await promptText(t("bookmarkShare.enterCode"));
+  if (!code?.trim()) {
+    return;
+  }
+  busy.value = true;
+  try {
+    const content = await redeemBookmarkShare(code.trim());
+    const result = await store.importWithPreview("auraterm", content, currentGroupPath.value || undefined);
+    if (!result) {
+      statusMessage.value = "";
+      return;
+    }
+    rememberGroups(result.createdGroups);
+    statusMessage.value = t("bookmarks.importResult", {
+      imported: result.imported,
+      updated: result.updated,
+      skipped: result.skipped,
+    });
+  } catch (error) {
+    await alertDialog(t("bookmarks.importFailed", { error: String(error) }), "error");
+  } finally {
+    busy.value = false;
+  }
+}
+
 async function exportBookmarks(target: "all" | "selection", includeSecrets: boolean) {
   exportMenuOpen.value = false;
   if (includeSecrets && !await confirmDialog(t("bookmarkManager.confirmExportSecrets"), "warning")) {
@@ -751,6 +791,7 @@ watch(statusMessage, (value) => {
         <button class="bm-btn bm-btn--primary" type="button" @click="emit('newConnection')">＋ {{ $t('bookmarkManager.newConnection') }}</button>
         <input ref="importInput" type="file" accept=".reg,.json,.conf,.config,text/plain" hidden @change="handleImportFile">
         <button class="bm-btn" type="button" :disabled="busy" :title="$t('bookmarkManager.importTitle')" @click="triggerImport">{{ $t('bookmarks.import') }}</button>
+        <button class="bm-btn" type="button" :disabled="busy" :title="$t('bookmarkShare.importCodeTitle')" @click="importShareCode">{{ $t('bookmarkShare.importCode') }}</button>
         <div class="bm-menu-anchor">
           <button class="bm-btn" type="button" :disabled="busy" @click="exportMenuOpen = !exportMenuOpen">{{ $t('bookmarkManager.export') }} ▾</button>
           <div v-if="exportMenuOpen" class="bm-menu">
@@ -931,6 +972,13 @@ watch(statusMessage, (value) => {
         <button class="bm-menu-item danger" type="button" @click="runRowAction(rowMenu.connection, 'delete')">🗑 {{ $t('common.delete') }}</button>
       </div>
 
+      <ShareDialog
+        v-if="shareTarget"
+        :root="shareTarget"
+        :bookmark-groups="props.bookmarkGroups"
+        @close="shareTarget = null"
+      />
+
       <div
         v-if="folderMenu"
         class="bm-context-menu"
@@ -939,6 +987,7 @@ watch(statusMessage, (value) => {
         <button class="bm-menu-item" type="button" @click="renameFolder(folderMenu.path)">✏️ {{ $t('bookmarkManager.renameGroup') }}</button>
         <button class="bm-menu-item" type="button" @click="createGroup(folderMenu.path)">📁 {{ $t('bookmarkManager.newSubgroup') }}</button>
         <button class="bm-menu-item" type="button" @click="exportFolder(folderMenu.path)">⤓ {{ $t('bookmarkManager.shareGroup') }}</button>
+        <button class="bm-menu-item" type="button" @click="shareFolder(folderMenu.path)">🔗 {{ $t('bookmarkShare.shareGroup') }}</button>
         <button class="bm-menu-item" type="button" @click="dissolveFolder(folderMenu.path)">↥ {{ $t('bookmarkManager.dissolveGroup') }}</button>
         <div class="bm-menu-sep" />
         <button class="bm-menu-item danger" type="button" @click="deleteFolder(folderMenu.path)">🗑 {{ $t('bookmarkManager.deleteGroup') }}</button>

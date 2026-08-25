@@ -4,19 +4,23 @@ import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { normalizeReconnectType, type SavedConnection } from "./types";
 import { isSerialProtocol } from "./serialTransport";
 import { buildBookmarkTree, filterConnections, flattenBookmarkTree } from "./bookmarks";
-import { detectImportFormat } from "./bookmarkTransfer";
+import { detectImportFormat, downloadText, shareFileName } from "./bookmarkTransfer";
 import { CredentialsLockedError, useBookmarkStore } from "./composables/useBookmarkStore";
 import { t } from "./i18n";
 import { alertDialog, confirmDialog } from "./nativeDialogs";
 import BookmarkEditor from "./BookmarkEditor.vue";
+import ShareDialog from "./ShareDialog.vue";
 
 const props = withDefaults(defineProps<{
   refreshToken?: number;
   settings?: AppSettings;
   expandGroup?: string;
+  /** Explicitly created groups, so empty subfolders travel with a share. */
+  bookmarkGroups?: string[];
 }>(), {
   settings: () => DEFAULT_SETTINGS,
   expandGroup: undefined,
+  bookmarkGroups: () => [],
 });
 
 const emit = defineEmits<{
@@ -78,6 +82,9 @@ function reconnectBadgeLabel(badge: "tmux" | "screen") {
 }
 
 const contextMenu = ref<{ x: number; y: number; connection: SavedConnection } | null>(null);
+/** Group-level right-click: export or share the whole subtree. */
+const folderMenu = ref<{ x: number; y: number; path: string } | null>(null);
+const shareTarget = ref<string | null>(null);
 const editingConnection = ref<SavedConnection | null>(null);
 const contextMenuRef = ref<HTMLDivElement | null>(null);
 const searchQuery = ref("");
@@ -87,6 +94,15 @@ const importMessage = ref("");
 watch(() => props.refreshToken, () => {
   void store.refresh(props.expandGroup);
 }, { immediate: true });
+
+watch(folderMenu, (value, _previous, onCleanup) => {
+  if (!value) {
+    return;
+  }
+  const dismiss = () => { folderMenu.value = null; };
+  document.addEventListener("mousedown", dismiss);
+  onCleanup(() => document.removeEventListener("mousedown", dismiss));
+});
 
 watch(contextMenu, (value, _previous, onCleanup) => {
   if (!value) {
@@ -167,6 +183,29 @@ async function handleSaveConnection(normalized: SavedConnection) {
     // window.alert is a silent no-op in the macOS WebView — use the plugin dialog.
     await reportFailure("bookmarks.saveFailed", error);
   }
+}
+
+function handleFolderContextMenu(event: MouseEvent, path: string) {
+  event.preventDefault();
+  contextMenu.value = null;
+  folderMenu.value = { x: event.clientX, y: event.clientY, path };
+}
+
+/** Write the group out as a share bundle the user can send as a file. */
+async function exportFolder(path: string) {
+  folderMenu.value = null;
+  try {
+    const content = await store.exportGroup(path, props.bookmarkGroups);
+    downloadText(shareFileName(path), content);
+    importMessage.value = t("bookmarkManager.groupExported", { group: path });
+  } catch (error) {
+    importMessage.value = t("bookmarkManager.exportFailed", { error: String(error) });
+  }
+}
+
+function shareFolder(path: string) {
+  folderMenu.value = null;
+  shareTarget.value = path;
 }
 
 async function handleImportFile(event: Event) {
@@ -272,6 +311,7 @@ async function handleImportFile(event: Event) {
           :class="{ collapsed: store.isGroupCollapsed(row.folder.path) }"
           :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
           @click="store.toggleGroup(row.folder.path)"
+          @contextmenu="handleFolderContextMenu($event, row.folder.path)"
         >
           <div class="bookmark-group-header-left">
             <span class="bookmark-group-arrow">›</span>
@@ -301,6 +341,22 @@ async function handleImportFile(event: Event) {
           </div>
         </div>
       </template>
+    </div>
+
+    <ShareDialog
+      v-if="shareTarget"
+      :root="shareTarget"
+      :bookmark-groups="props.bookmarkGroups"
+      @close="shareTarget = null"
+    />
+
+    <div
+      v-if="folderMenu"
+      class="bookmark-context-menu"
+      :style="{ top: `${folderMenu.y}px`, left: `${folderMenu.x}px` }"
+    >
+      <button class="bookmark-context-item" @click="exportFolder(folderMenu.path)">⤓ {{ $t('bookmarkManager.shareGroup') }}</button>
+      <button class="bookmark-context-item" @click="shareFolder(folderMenu.path)">🔗 {{ $t('bookmarkShare.shareGroup') }}</button>
     </div>
 
     <div

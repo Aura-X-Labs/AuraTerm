@@ -26,6 +26,7 @@ mod pake;
 mod assist;
 mod assist_host;
 mod assist_client;
+mod bookmark_share;
 mod connections;
 mod encryption;
 mod keychain;
@@ -1257,6 +1258,10 @@ fn main() {
             connections::apply_bookmark_import,
             connections::export_bookmarks,
             connections::export_group_bookmarks,
+            bookmark_share::create_bookmark_share,
+            bookmark_share::redeem_bookmark_share,
+            bookmark_share::list_bookmark_shares,
+            bookmark_share::revoke_bookmark_share,
             connections::delete_connections,
             connections::move_connections,
             connections::rename_group,
