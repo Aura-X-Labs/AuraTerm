@@ -846,6 +846,8 @@ function handleOpenRemoteAssist() {
   closeOpenMenus();
   showRemoteAssist.value = true;
   void refreshAssistState();
+  // The dialog's sign-in gate reads bridgeStatus.enrolled; make it fresh.
+  void refreshCloudBridgeStatus().catch(() => {});
 }
 
 function handleCloudPillClick() {
@@ -953,17 +955,33 @@ const autoShareConverged = computed(() => {
     : shares.length === 0;
 });
 
+// Turning Cloud Console ON requires a bound device. Every user entry point
+// (menu/palette toggle, settings dialog save) funnels through this guard so
+// an unbound click never persists the switch — a persisted-but-unbound switch
+// would start sharing silently after some future sign-in. Instead the intent
+// is parked for one trip through the account dialog (handleAccountClosed
+// enables the switch once binding actually happened, or drops the intent).
+// The guard is deliberately NOT in the autoShareToCloud watch: that watch
+// also fires when persisted settings are restored at startup, where a
+// legitimately-on switch must survive the bridge still reporting unenrolled.
+let pendingCloudConsoleOn = false;
+
+function guardCloudConsoleOn(): boolean {
+  if (bridgeStatus.value.enrolled) return true;
+  pendingCloudConsoleOn = true;
+  showAccount.value = true;
+  showCloudToast(t("cloudShare.signInFirst"));
+  return false;
+}
+
 // "Cloud Console" in the Cloud menu: one switch that keeps the active session
 // observable (and, if allowed, controllable) from the cloud. Backed by the
 // autoShareToCloud setting so the menu, palette and settings dialog agree.
 function handleToggleCloudConsole() {
   if (!isMainWindow) return; // the menu event broadcasts to every window
   const next = !settings.value.autoShareToCloud;
+  if (next && !guardCloudConsoleOn()) return;
   persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: next });
-  if (next && !bridgeStatus.value.enrolled) {
-    // Binding lives in the account center; monitoring starts once bound.
-    showAccount.value = true;
-  }
 }
 
 function handleToggleRemoteSend() {
@@ -1356,6 +1374,9 @@ function handleMasterPasswordCancel() {
 }
 
 async function handleSaveSettings(newSettings: AppSettings) {
+  if (newSettings.autoShareToCloud && !settings.value.autoShareToCloud && !guardCloudConsoleOn()) {
+    newSettings = { ...newSettings, autoShareToCloud: false };
+  }
   const normalizedSettings = prepareSettingsForSave(newSettings, newSettings.restoreTabsOnStartup);
   await invoke("save_settings", { settings: normalizedSettings }).catch(console.error);
   settingsRef.value = normalizedSettings;
@@ -1841,6 +1862,24 @@ function handleOpenCloudSync() {
 function handleOpenAccount() {
   closeOpenMenus();
   showAccount.value = true;
+}
+
+// The account dialog is where sign-in and device binding happen. On close,
+// settle a parked Cloud Console intent (guardCloudConsoleOn): flip the switch
+// on if the device is now bound, otherwise drop the intent so a later,
+// unrelated sign-in cannot start sharing silently.
+function handleAccountClosed() {
+  showAccount.value = false;
+  refreshSyncViewSilently();
+  void (async () => {
+    await refreshCloudBridgeStatus().catch(() => {});
+    if (!pendingCloudConsoleOn) return;
+    pendingCloudConsoleOn = false;
+    if (bridgeStatus.value.enrolled && !settings.value.autoShareToCloud) {
+      persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: true });
+      showCloudToast(t("cloudShare.consoleOnAfterBind"));
+    }
+  })();
 }
 
 function toggleRemoteFileManager() {
@@ -3089,7 +3128,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     <AccountDialog
       v-if="showAccount"
       :platform="osType"
-      @close="showAccount = false; void refreshCloudBridgeStatus(); refreshSyncViewSilently()"
+      @close="handleAccountClosed"
       @open-cloud-sync="showAccount = false; showCloudSync = true"
     />
     <RemoteAssistDialog
@@ -3097,8 +3136,10 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       :sessions="assistSessionChoices"
       :active-session-id="activeTabId"
       :status="assistState"
+      :enrolled="bridgeStatus.enrolled"
       @close="showRemoteAssist = false"
       @changed="refreshAssistState"
+      @open-account="showRemoteAssist = false; showAccount = true"
     />
     <JoinAssistDialog v-if="showJoinAssist" @close="showJoinAssist = false" @join="handleJoinAssist" />
     <AssistKnockDialog

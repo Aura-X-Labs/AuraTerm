@@ -22,8 +22,12 @@ const props = defineProps<{
   activeSessionId: string | null;
   /** Current status, kept fresh by App.vue; null when no session runs. */
   status: AssistStatus | null;
+  /** Device bound to an AuraXLab account (bridgeStatus.enrolled). Hosting
+   * needs the relay, so an unbound device sees a sign-in gate instead of the
+   * start form; joining someone else stays code-only and is not affected. */
+  enrolled: boolean;
 }>();
-const emit = defineEmits<{ close: []; changed: [] }>();
+const emit = defineEmits<{ close: []; changed: []; openAccount: [] }>();
 
 const sessionId = ref<string>(props.activeSessionId ?? props.sessions[0]?.id ?? "");
 const controlPolicy = ref<AssistControlPolicy>("on_request");
@@ -209,8 +213,18 @@ onBeforeUnmount(() => {
       </header>
 
       <main class="assist-body">
+        <!-- ── not bound: hosting relays via the account, so gate on it ── -->
+        <template v-if="!running && !enrolled">
+          <section class="assist-section">
+            <p class="assist-signin-text">{{ t('assist.signInRequired') }}</p>
+            <div class="assist-actions">
+              <button class="assist-btn primary" type="button" @click="emit('openAccount')">{{ t('assist.goSignIn') }}</button>
+            </div>
+          </section>
+        </template>
+
         <!-- ── not running: configure + mint ───────────────────────────── -->
-        <template v-if="!running">
+        <template v-else-if="!running">
           <section class="assist-section">
             <label class="assist-label">{{ t('assist.sessionLabel') }}</label>
             <select v-model="sessionId" class="assist-input">
@@ -331,6 +345,7 @@ onBeforeUnmount(() => {
 .assist-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--ui-border,#3a3a3a); }
 .assist-title { font-size: 16px; font-weight: 600; }
 .assist-subtitle,.assist-hint { font-size: 12px; opacity: .7; line-height: 1.5; }
+.assist-signin-text { margin: 4px 0 0; font-size: 13px; line-height: 1.6; opacity: .85; }
 .assist-close { border: 0; background: transparent; color: inherit; font-size: 22px; cursor: pointer; }
 .assist-body { padding: 14px 18px; overflow-y: auto; max-height: calc(100vh - 110px); }
 .assist-section { margin-bottom: 16px; }
