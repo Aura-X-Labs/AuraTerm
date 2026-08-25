@@ -755,6 +755,13 @@ const en = {
     stateExhausted: "Used up",
     redeemedCount: "Imported {count}/{max}",
     unnamed: "(unnamed)",
+    subscriptions: "Subscribed",
+    noSubscriptions: "You have not imported a share code yet. Importing one remembers it, so you can pull updates later.",
+    checkUpdates: "Check for updates",
+    forget: "Stop tracking",
+    importedAt: "Imported",
+    lastChecked: "Checked",
+    refresh: "Refresh",
   },
   bookmarkImport: {
     title: "Import bookmarks",
