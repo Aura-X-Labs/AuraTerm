@@ -66,10 +66,10 @@ pub fn parse_code(input: &str) -> Result<AssistCode, String> {
         .map(|c| c.to_ascii_uppercase())
         .collect();
     if normalised.len() != ROUTE_LEN + SECRET_LEN {
-        return Err("assist code must have 12 characters".into());
+        return Err("share code must have 12 characters".into());
     }
     if !normalised.bytes().all(|b| CODE_ALPHABET.contains(&b)) {
-        return Err("assist code contains an invalid character".into());
+        return Err("share code contains an invalid character".into());
     }
     Ok(AssistCode {
         route: normalised[..ROUTE_LEN].to_string(),

@@ -166,7 +166,7 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
         return Err("Too many attempts; please wait a minute and retry.".into());
     }
     if !status.is_success() {
-        return Err("This assist code is invalid, expired, already used, or the host is offline.".into());
+        return Err("This share code is invalid, expired, already used, or the host is offline.".into());
     }
     let grant: JoinGrant = response.json().await.map_err(|e| e.to_string())?;
     if !(grant.relay_url.starts_with("ws://") || grant.relay_url.starts_with("wss://")) {
@@ -214,7 +214,7 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
         let frame = recv_text(&mut stream).await?;
         match frame.get("kind").and_then(|v| v.as_str()) {
             Some("PAKE_B") => break frame,
-            Some("PAKE_FAILED") => return Err("The assist code was not accepted by the host.".into()),
+            Some("PAKE_FAILED") => return Err("The share code was not accepted by the host.".into()),
             Some("SESSION_END") => return Err("The host ended the assist session.".into()),
             _ => continue,
         }
@@ -230,7 +230,7 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
         // Our own check failed: either a typo in the code or a host that
         // does not know it. Drop the connection; the host counts it.
         let _ = sink.close().await;
-        return Err("Assist code mismatch — check the last 8 characters and try again.".into());
+        return Err("Share code mismatch — check the last 8 characters and try again.".into());
     }
     sink.send(Message::Text(
         json!({"kind": "PAKE_CONFIRM", "confirm_a": URL_SAFE_NO_PAD.encode(keys.own_confirmation())})

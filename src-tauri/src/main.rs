@@ -888,8 +888,8 @@ fn build_app_menu(
         model.cloud_remote_send_on,
         None::<&str>,
     )?;
-    let remote_assist_item = MenuItem::with_id(app, "menu-remote-assist", l("Remote Assist…", "远程协助…"), true, None::<&str>)?;
-    let join_assist_item = MenuItem::with_id(app, "menu-join-assist", l("Join Remote Assist…", "加入远程协助…"), true, None::<&str>)?;
+    let remote_assist_item = MenuItem::with_id(app, "menu-remote-assist", l("Live Share…", "Live Share…"), true, None::<&str>)?;
+    let join_assist_item = MenuItem::with_id(app, "menu-join-assist", l("Join Live Share…", "加入 Live Share…"), true, None::<&str>)?;
 
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
     let bookmark_manager_item = MenuItem::with_id(app, "menu-bookmark-manager", l("Bookmark Manager…", "书签管理…"), true, None::<&str>)?;
