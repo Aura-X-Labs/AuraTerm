@@ -18,6 +18,7 @@ const en = {
     yes: "Yes",
     no: "No",
     copy: "Copy",
+    dialogFailed: "Could not show the confirmation dialog: {error}",
   },
   language: {
     label: "Language",
