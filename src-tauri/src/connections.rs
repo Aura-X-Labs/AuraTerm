@@ -748,13 +748,25 @@ pub fn export_group_bookmarks(
     label: Option<String>,
     note: Option<String>,
 ) -> Result<String, String> {
+    build_share_bundle(&app, root, explicit_groups, label, note)
+}
+
+/// The bundle itself, without the Tauri command wrapper — `bookmark_share.rs`
+/// encrypts this same JSON instead of writing it to a file.
+pub(crate) fn build_share_bundle(
+    app: &AppHandle,
+    root: String,
+    explicit_groups: Vec<String>,
+    label: Option<String>,
+    note: Option<String>,
+) -> Result<String, String> {
     let root = normalize_group_path(&root);
     if root.is_empty() {
         return Err("Pick a group to share".to_string());
     }
 
     let bundle_id = uuid::Uuid::new_v4().to_string();
-    let connections: Vec<SavedConnection> = load_connections(&app)?
+    let connections: Vec<SavedConnection> = load_connections(app)?
         .into_iter()
         .filter_map(|mut connection| {
             // `None` = outside the shared subtree, so this also does the filtering.

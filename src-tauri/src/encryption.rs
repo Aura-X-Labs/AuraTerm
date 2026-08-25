@@ -709,22 +709,96 @@ const SYNC_MAGIC: &[u8; 8] = b"AURASYNC";
 const SYNC_BLOB_VERSION: u8 = 1;
 const SYNC_BLOB_PREFIX: usize = 8 + 1 + SALT_SIZE; // magic + version + salt
 
-/// Encrypt `plaintext` under `passphrase`, returning a portable sync blob.
-pub fn encrypt_sync_blob(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
-    if passphrase.is_empty() {
-        return Err("Sync passphrase must not be empty".to_string());
-    }
+/// Bookmark share bundles (`bookmark_share.rs`). Same envelope, different
+/// magic: a share is encrypted under a randomly generated 12-character code
+/// segment rather than a user-chosen passphrase, and the two must not be
+/// interchangeable — the magic is what makes "decrypt this as the other kind"
+/// fail loudly instead of silently.
+const SHARE_MAGIC: &[u8; 8] = b"AURASHAR";
+const SHARE_BLOB_VERSION: u8 = 1;
+
+/// The shared envelope behind [`encrypt_sync_blob`] and [`encrypt_share_blob`].
+///
+/// Format: magic(8) || version(1) || salt(32) || nonce(12)+ciphertext+tag.
+/// Key = Argon2id(passphrase, salt) via the v2 KDF (16 MiB / t=3 / p=1). The
+/// salt is random per blob and travels in the header, so a recipient needs
+/// nothing but the passphrase to open it.
+fn encrypt_envelope(
+    plaintext: &[u8],
+    passphrase: &str,
+    magic: &[u8; 8],
+    version: u8,
+) -> Result<Vec<u8>, String> {
     let mut rng = rand::thread_rng();
     let salt: Vec<u8> = (0..SALT_SIZE).map(|_| rng.gen()).collect();
     let key = derive_key_v2(passphrase, &salt)?;
     let encrypted = encrypt_data(plaintext, &key)?;
 
-    let mut out = Vec::with_capacity(SYNC_BLOB_PREFIX + encrypted.len());
-    out.extend_from_slice(SYNC_MAGIC);
-    out.push(SYNC_BLOB_VERSION);
+    let mut out = Vec::with_capacity(8 + 1 + SALT_SIZE + encrypted.len());
+    out.extend_from_slice(magic);
+    out.push(version);
     out.extend_from_slice(&salt);
     out.extend_from_slice(&encrypted);
     Ok(out)
+}
+
+fn decrypt_envelope(
+    blob: &[u8],
+    passphrase: &str,
+    magic: &[u8; 8],
+    version: u8,
+    kind: &str,
+) -> Result<Vec<u8>, String> {
+    let prefix = 8 + 1 + SALT_SIZE;
+    if blob.len() < prefix {
+        return Err(format!("{kind} is too short or corrupt"));
+    }
+    if &blob[0..8] != magic {
+        return Err(format!("Not an AuraTerm {kind} (bad magic header)"));
+    }
+    if blob[8] != version {
+        return Err(format!(
+            "Unsupported {kind} version: {} (upgrade AuraTerm)",
+            blob[8]
+        ));
+    }
+    let salt = &blob[9..9 + SALT_SIZE];
+    let key = derive_key_v2(passphrase, salt)?;
+    decrypt_data(&blob[prefix..], &key)
+}
+
+/// Encrypt a bookmark share bundle under the share code's secret segment.
+///
+/// The secret never reaches AuraXLab, so the server stores ciphertext it
+/// cannot open. Argon2id is doing real work here: the secret is only ~58 bits
+/// (12 characters of a 28-glyph alphabet), and unlike a Live Share code —
+/// which is proven online, where the server can count failures — a share can
+/// be attacked offline by whoever fetched the blob.
+pub fn encrypt_share_blob(plaintext: &[u8], secret: &str) -> Result<Vec<u8>, String> {
+    if secret.is_empty() {
+        return Err("Share secret must not be empty".to_string());
+    }
+    encrypt_envelope(plaintext, secret, SHARE_MAGIC, SHARE_BLOB_VERSION)
+}
+
+/// Decrypt a share bundle. A wrong code, or any tampering, is one opaque error.
+pub fn decrypt_share_blob(blob: &[u8], secret: &str) -> Result<Vec<u8>, String> {
+    decrypt_envelope(blob, secret, SHARE_MAGIC, SHARE_BLOB_VERSION, "share bundle")
+        .map_err(|error| {
+            if error.contains("magic") || error.contains("version") || error.contains("short") {
+                error
+            } else {
+                "Incorrect share code, or the shared data is corrupt".to_string()
+            }
+        })
+}
+
+/// Encrypt `plaintext` under `passphrase`, returning a portable sync blob.
+pub fn encrypt_sync_blob(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
+    if passphrase.is_empty() {
+        return Err("Sync passphrase must not be empty".to_string());
+    }
+    encrypt_envelope(plaintext, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION)
 }
 
 /// Decrypt a sync blob produced by [`encrypt_sync_blob`] using `passphrase`.
@@ -736,17 +810,13 @@ pub fn decrypt_sync_blob(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, Strin
     if &blob[0..8] != SYNC_MAGIC {
         return Err("Not an AuraTerm sync blob (bad magic header)".to_string());
     }
-    let version = blob[8];
-    if version != SYNC_BLOB_VERSION {
+    if blob[8] != SYNC_BLOB_VERSION {
         return Err(format!(
             "Unsupported sync blob version: {} (upgrade AuraTerm)",
-            version
+            blob[8]
         ));
     }
-    let salt = &blob[9..9 + SALT_SIZE];
-    let ciphertext = &blob[SYNC_BLOB_PREFIX..];
-    let key = derive_key_v2(passphrase, salt)?;
-    decrypt_data(ciphertext, &key)
+    decrypt_envelope(blob, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION, "sync blob")
         .map_err(|_| "Incorrect sync passphrase, or the synced data is corrupt".to_string())
 }
 
