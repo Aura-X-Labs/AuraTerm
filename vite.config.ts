@@ -19,6 +19,9 @@ export default defineConfig(async () => ({
     },
   },
   build: {
+    // Assets ship inside the Tauri binary and load from the local filesystem,
+    // so chunk size costs parse time only — never download time.
+    chunkSizeWarningLimit: 700,
     rollupOptions: {
       output: {
         manualChunks: (id) => {
