@@ -1,4 +1,4 @@
-.PHONY: all build run clean help release upload
+.PHONY: all build run clean help release upload update
 
 all: help
 
@@ -40,6 +40,7 @@ help:
 	@echo "  build     - Build the application"
 	@echo "  run       - Run AuraTerm in development mode"
 	@echo "  clean     - Remove build artifacts"
+	@echo "  update    - Update npm and cargo dependencies to the latest compatible versions"
 	@echo "  release   - Update releases JSON metadata from target artifacts"
 	@echo "  upload    - Run release then upload target artifacts and JSON"
 	@echo "  help      - Show this help message"
@@ -51,3 +52,22 @@ release:
 upload: release
 	@echo "Uploading target artifacts..."
 	$(call run_timed,python scripts/upload.py)
+
+# Bring dependencies up to the newest versions the manifests already allow.
+# `npm install` comes first on purpose: it re-syncs node_modules with
+# package-lock.json. A stale tree silently pairs an old plugin frontend with a
+# new Rust plugin backend, and the mismatched IPC command then fails at runtime
+# rather than at build time.
+update:
+	@echo "==> Updating frontend dependencies"
+	npm install
+	npm update
+	@echo ""
+	@echo "==> Updating Rust dependencies"
+	cd src-tauri && cargo update
+	@echo ""
+	@echo "==> Behind latest, needs a manual manifest bump (breaking majors):"
+	-@npm outdated
+	-@cd src-tauri && cargo update --dry-run --verbose 2>&1 | grep "Unchanged"
+	@echo ""
+	@echo "Verify with: npm run build && cd src-tauri && cargo check"
