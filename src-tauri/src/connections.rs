@@ -829,13 +829,19 @@ fn shared_empty_groups(
     groups
 }
 
-/// 解析 AuraTerm 导出文件。返回 (待导入的连接, 警告, 需要建出来的空分组)。
-/// id 一律重新分配，避免覆盖同机已存在的书签；`origin` 原样保留，它才是跨机器
-/// 稳定的身份。
-fn parse_auraterm_export(
-    content: &str,
-    base_group: &str,
-) -> Result<(Vec<SavedConnection>, Vec<String>, Vec<String>), String> {
+/// 一次导入的解析结果。
+struct ParsedImport {
+    entries: Vec<SavedConnection>,
+    warnings: Vec<String>,
+    /// 需要显式建出来的空分组（绝对路径）。
+    groups: Vec<String>,
+    /// 分享包元数据；普通备份与外部格式为 None。
+    share: Option<ShareMeta>,
+}
+
+/// 解析 AuraTerm 导出文件。id 一律重新分配，避免覆盖同机已存在的书签；`origin`
+/// 原样保留，它才是跨机器稳定的身份。
+fn parse_auraterm_export(content: &str, base_group: &str) -> Result<ParsedImport, String> {
     let parsed: BookmarkExport = serde_json::from_str(content)
         .map_err(|e| format!("Not an AuraTerm bookmark export: {}", e))?;
     if parsed.format != BOOKMARK_EXPORT_FORMAT {
@@ -851,15 +857,14 @@ fn parse_auraterm_export(
     // 分享包里的路径是相对于「被分享的那个分组」的，所以在用户没有指定落点时，
     // 它落在该分组自己的名字下——与普通备份「保持文件中原有的分组」是同一个意思，
     // 只是备份里的路径本来就是绝对的。
-    let root = parsed
-        .share
+    let share = parsed.share;
+    let root = share
         .as_ref()
         .map(|share| normalize_group_path(&share.root_name))
         .unwrap_or_default();
     let base_group = if base_group.is_empty() { root.as_str() } else { base_group };
 
-    let groups = parsed
-        .share
+    let groups = share
         .as_ref()
         .map(|share| {
             share
@@ -901,13 +906,49 @@ fn parse_auraterm_export(
             connection
         })
         .collect();
-    Ok((entries, warnings, groups))
+    Ok(ParsedImport { entries, warnings, groups, share })
+}
+
+/// 落点分组：用户指定的优先；留空时 AuraTerm 包沿用包内分组（分享包即它自己的
+/// 名字，见 [`parse_auraterm_export`]），其它格式落到 `Imported/<格式>`。
+fn import_base_group(format: &str, group: Option<&str>) -> String {
+    if let Some(explicit) = group
+        .map(normalize_group_path)
+        .filter(|value| !value.is_empty())
+    {
+        return explicit;
+    }
+    if format.eq_ignore_ascii_case("auraterm") {
+        String::new()
+    } else {
+        format!(
+            "Imported/{}",
+            if format.eq_ignore_ascii_case("putty") { "PuTTY" } else { "OpenSSH" }
+        )
+    }
+}
+
+fn parse_import(format: &str, content: &str, group: Option<&str>) -> Result<ParsedImport, String> {
+    let base_group = import_base_group(format, group);
+    if format.eq_ignore_ascii_case("putty") {
+        let (entries, warnings) = parse_putty_registry(content, &base_group);
+        Ok(ParsedImport { entries, warnings, groups: Vec::new(), share: None })
+    } else if format.eq_ignore_ascii_case("openssh") {
+        let (entries, warnings) = parse_openssh_config(content, &base_group);
+        Ok(ParsedImport { entries, warnings, groups: Vec::new(), share: None })
+    } else if format.eq_ignore_ascii_case("auraterm") {
+        parse_auraterm_export(content, &base_group)
+    } else {
+        Err("Unsupported bookmark import format".to_string())
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookmarkImportResult {
     imported: usize,
+    /// 命中本地已有条目并被覆盖的数量（拓扑更新，凭据与使用记录保留）。
+    updated: usize,
     skipped: usize,
     warnings: Vec<String>,
     /// Bookmark-free subfolders the share asked for, as absolute paths. The
@@ -917,42 +958,345 @@ pub struct BookmarkImportResult {
     created_groups: Vec<String>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 导入：预览 → 决策 → 落盘
+//
+// 早先 `import_bookmarks` 把「解析 / 去重 / 写盘」焊在一次调用里：用户点完文件，
+// 下一秒东西已经在库里了，只回一个计数。分享场景下导入的是**外部输入**，落盘前
+// 必须能看清楚里面有什么、和本地哪些条目冲突、有没有会自动执行的字段。
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub const ACTION_ADD: &str = "add";
+pub const ACTION_UPDATE: &str = "update";
+pub const ACTION_SKIP: &str = "skip";
+
+/// 后端缓存的待落盘导入。原文留在 Rust 侧，前端只拿展示用摘要——可能含凭据的
+/// 载荷不必在 JS 与 Rust 之间来回搬。
+struct CachedImport {
+    format: String,
+    content: String,
+    created_at: u64,
+}
+
+/// 同时保留的预览份数。一个用户一次只看一份，多留几份只是为了容忍「开着预览
+/// 又去点了别的文件」。
+const MAX_CACHED_IMPORTS: usize = 4;
+
+#[derive(Default)]
+pub struct ImportPlanState(std::sync::Mutex<HashMap<String, CachedImport>>);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPlanEntry {
+    /// 在解析结果中的下标；前端原样回传，作为决策的键。
+    index: usize,
+    name: String,
+    /// 落盘后的分组（已含落点前缀）；None = 未分组。
+    group: Option<String>,
+    protocol: String,
+    /// 展示用目标串：`user@host:port`，串口则是设备与波特率。
+    target: String,
+    /// [`ACTION_ADD`] / [`ACTION_UPDATE`] / [`ACTION_SKIP`] 之一。
+    disposition: String,
+    /// 命中的本地书签名（update / skip 时有值）。
+    matched_name: Option<String>,
+    /// 命中依据：`"origin"`（同一分享包的同一条）或 `"endpoint"`（同一台机器）。
+    matched_by: Option<String>,
+}
+
+/// 外部载荷里会**自动执行或自动发送**的东西。数的是条目数，不是字段数——
+/// 提示要回答的是「这份文件里有多少条书签会替我干事」。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRisks {
+    post_connect_commands: usize,
+    auto_login_responses: usize,
+    jump_host_credentials: usize,
+    passwords: usize,
+    private_keys: usize,
+}
+
+impl ImportRisks {
+    fn survey(entries: &[SavedConnection]) -> Self {
+        let mut risks = Self::default();
+        for entry in entries {
+            if !entry.post_connect_commands.is_empty() {
+                risks.post_connect_commands += 1;
+            }
+            if entry.auto_login_rules.iter().any(|rule| rule.response.is_some()) {
+                risks.auto_login_responses += 1;
+            }
+            if entry.jump_hosts.iter().any(|jump| {
+                jump.password.is_some() || jump.private_key.is_some() || jump.passphrase.is_some()
+            }) {
+                risks.jump_host_credentials += 1;
+            }
+            if entry.password.is_some() {
+                risks.passwords += 1;
+            }
+            if entry.private_key.is_some() {
+                risks.private_keys += 1;
+            }
+        }
+        risks
+    }
+}
+
+/// 用户对外部载荷的信任决定。两项都默认关闭：剥离是默认动作，保留要显式勾。
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTrust {
+    /// 保留登录后命令与自动登录响应——前者连上就执行，后者按提示自动发送
+    /// （而「响应」通常就是密码）。
+    allow_commands: bool,
+    /// 保留文件里带的密码、私钥与跳板机凭据。
+    allow_credentials: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportDecision {
+    index: usize,
+    action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPlan {
+    plan_id: String,
+    format: String,
+    /// 生效的落点分组（空串 = 沿用包内分组）。
+    group: String,
+    share: Option<ShareMeta>,
+    entries: Vec<ImportPlanEntry>,
+    empty_groups: Vec<String>,
+    risks: ImportRisks,
+    warnings: Vec<String>,
+}
+
+/// 同一台机器、同一个登录身份。串口没有 host/user，比的是设备路径。
+fn same_endpoint(left: &SavedConnection, right: &SavedConnection) -> bool {
+    if left.protocol != right.protocol {
+        return false;
+    }
+    if left.protocol == "serial" {
+        return left.port_name.is_some() && left.port_name == right.port_name;
+    }
+    left.host.eq_ignore_ascii_case(&right.host) && left.port == right.port && left.user == right.user
+}
+
+/// 待导入条目与本地已有书签的关系，按优先级回落。返回 (本地下标, 依据)。
+///
+/// 一级用 `origin.entry_id`：它是分享者的连接 id，同一条书签多次导出保持不变，
+/// 因此「同一分享包的同一条」能被认出来并更新，而不是每次导入翻一倍。本机 `id`
+/// 做不到这件事——它在导入时一律重发。
+fn match_existing(
+    candidate: &SavedConnection,
+    existing: &[SavedConnection],
+) -> Option<(usize, &'static str)> {
+    if let Some(origin) = &candidate.origin {
+        if let Some(index) = existing.iter().position(|item| {
+            item.origin
+                .as_ref()
+                .is_some_and(|other| other.entry_id == origin.entry_id)
+        }) {
+            return Some((index, "origin"));
+        }
+    }
+    existing
+        .iter()
+        .position(|item| same_endpoint(item, candidate))
+        .map(|index| (index, "endpoint"))
+}
+
+/// 默认处置：认得出的更新，撞机器的跳过，其余新增。
+fn default_action(matched: Option<(usize, &'static str)>) -> &'static str {
+    match matched {
+        Some((_, "origin")) => ACTION_UPDATE,
+        Some(_) => ACTION_SKIP,
+        None => ACTION_ADD,
+    }
+}
+
+/// 展示用目标串，与前端 `connectionTarget()` 同义。
+fn display_target(connection: &SavedConnection) -> String {
+    match connection.protocol.as_str() {
+        "serial" | "rfc2217" | "raw-tcp" => format!(
+            "{} @ {}",
+            connection.port_name.as_deref().unwrap_or("serial"),
+            connection.baud_rate.unwrap_or(9600)
+        ),
+        "telnet" => format!("{}:{}", connection.host, connection.port),
+        _ => format!("{}@{}:{}", connection.user, connection.host, connection.port),
+    }
+}
+
+/// 默认剥掉外部载荷里会自动执行或自动发送的一切。
+fn apply_trust(connection: &mut SavedConnection, trust: &ImportTrust) {
+    if !trust.allow_commands {
+        connection.post_connect_commands.clear();
+        for rule in &mut connection.auto_login_rules {
+            rule.response = None;
+        }
+    }
+    if !trust.allow_credentials {
+        connection.password = None;
+        connection.private_key = None;
+        connection.passphrase = None;
+        for jump in &mut connection.jump_hosts {
+            jump.password = None;
+            jump.private_key = None;
+            jump.passphrase = None;
+        }
+    }
+}
+
+/// 同一分组里重名时补 `(2)`、`(3)`……，免得列表里出现两条一模一样的名字。
+fn unique_name(name: &str, group: Option<&str>, connections: &[SavedConnection]) -> String {
+    let taken = |candidate: &str| {
+        connections.iter().any(|item| {
+            item.name.eq_ignore_ascii_case(candidate)
+                && item.group.as_deref().unwrap_or_default() == group.unwrap_or_default()
+        })
+    };
+    if !taken(name) {
+        return name.to_string();
+    }
+    (2..)
+        .map(|suffix| format!("{} ({})", name, suffix))
+        .find(|candidate| !taken(candidate))
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn build_plan(app: &AppHandle, plan_id: String, format: &str, content: &str, group: Option<&str>) -> Result<ImportPlan, String> {
+    let parsed = parse_import(format, content, group)?;
+    let existing = load_connections(app)?;
+    let entries = parsed
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let matched = match_existing(candidate, &existing);
+            ImportPlanEntry {
+                index,
+                name: candidate.name.clone(),
+                group: candidate.group.clone(),
+                protocol: candidate.protocol.clone(),
+                target: display_target(candidate),
+                disposition: default_action(matched).to_string(),
+                matched_name: matched.map(|(position, _)| existing[position].name.clone()),
+                matched_by: matched.map(|(_, reason)| reason.to_string()),
+            }
+        })
+        .collect();
+    Ok(ImportPlan {
+        plan_id,
+        format: format.to_string(),
+        group: import_base_group(format, group),
+        share: parsed.share,
+        entries,
+        empty_groups: parsed.groups,
+        risks: ImportRisks::survey(&parsed.entries),
+        warnings: parsed.warnings,
+    })
+}
+
+/// 解析一份待导入的载荷并算出落盘计划——**不写任何东西**。
 #[tauri::command]
-pub fn import_bookmarks(
+pub fn preview_bookmark_import(
     app: AppHandle,
     format: String,
     content: String,
     group: Option<String>,
-    master_state: State<'_, MasterPasswordState>,
-) -> Result<BookmarkImportResult, String> {
-    let is_auraterm = format.eq_ignore_ascii_case("auraterm");
-    // An AuraTerm export already carries its own folder layout, so an unset
-    // target group means "keep it as it was" rather than a synthetic folder.
-    let base_group = group
-        .map(|value| normalize_group_path(&value))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| if is_auraterm {
-            String::new()
-        } else {
-            format!("Imported/{}", if format.eq_ignore_ascii_case("putty") { "PuTTY" } else { "OpenSSH" })
-        });
-    let (candidates, mut warnings, created_groups) = if format.eq_ignore_ascii_case("putty") {
-        let (entries, warnings) = parse_putty_registry(&content, &base_group);
-        (entries, warnings, Vec::new())
-    } else if format.eq_ignore_ascii_case("openssh") {
-        let (entries, warnings) = parse_openssh_config(&content, &base_group);
-        (entries, warnings, Vec::new())
-    } else if is_auraterm {
-        parse_auraterm_export(&content, &base_group)?
-    } else {
-        return Err("Unsupported bookmark import format".to_string());
-    };
+    plans: State<'_, ImportPlanState>,
+) -> Result<ImportPlan, String> {
+    let plan_id = uuid::Uuid::new_v4().to_string();
+    let plan = build_plan(&app, plan_id.clone(), &format, &content, group.as_deref())?;
 
-    // Credentials only travel in AuraTerm exports, and only when the store can
-    // be written; otherwise the bookmarks still import, minus their secrets.
-    let secret = if is_auraterm && candidates.iter().any(connection_carries_secrets) {
-        if encryption::credentials_accessible(&app, &master_state) {
-            Some(encryption::resolve_secret(&app, &master_state)?)
+    let mut cache = plans.0.lock().map_err(|_| "Import plan cache is poisoned".to_string())?;
+    cache.insert(plan_id, CachedImport { format, content, created_at: now_millis() });
+    while cache.len() > MAX_CACHED_IMPORTS {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, cached)| cached.created_at)
+            .map(|(id, _)| id.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+    Ok(plan)
+}
+
+/// 换一个落点分组重算计划。载荷已经在后端，不必让前端再发一遍。
+#[tauri::command]
+pub fn retarget_bookmark_import(
+    app: AppHandle,
+    plan_id: String,
+    group: Option<String>,
+    plans: State<'_, ImportPlanState>,
+) -> Result<ImportPlan, String> {
+    let (format, content) = {
+        let cache = plans.0.lock().map_err(|_| "Import plan cache is poisoned".to_string())?;
+        let cached = cache.get(&plan_id).ok_or("This import preview has expired; pick the file again")?;
+        (cached.format.clone(), cached.content.clone())
+    };
+    build_plan(&app, plan_id, &format, &content, group.as_deref())
+}
+
+/// 丢弃一份预览（用户取消）。缓存里躺着的可能是带凭据的明文，别留着。
+#[tauri::command]
+pub fn discard_bookmark_import(plan_id: String, plans: State<'_, ImportPlanState>) -> Result<(), String> {
+    let mut cache = plans.0.lock().map_err(|_| "Import plan cache is poisoned".to_string())?;
+    cache.remove(&plan_id);
+    Ok(())
+}
+
+/// 按用户的逐条决策落盘。
+#[tauri::command]
+pub fn apply_bookmark_import(
+    app: AppHandle,
+    plan_id: String,
+    group: Option<String>,
+    decisions: Vec<ImportDecision>,
+    trust: ImportTrust,
+    master_state: State<'_, MasterPasswordState>,
+    plans: State<'_, ImportPlanState>,
+) -> Result<BookmarkImportResult, String> {
+    let (format, content) = {
+        let cache = plans.0.lock().map_err(|_| "Import plan cache is poisoned".to_string())?;
+        let cached = cache.get(&plan_id).ok_or("This import preview has expired; pick the file again")?;
+        (cached.format.clone(), cached.content.clone())
+    };
+    let parsed = parse_import(&format, &content, group.as_deref())?;
+    let decisions: HashMap<usize, String> = decisions
+        .into_iter()
+        .map(|decision| (decision.index, decision.action))
+        .collect();
+    let result = apply_import(&app, &master_state, parsed, &decisions, trust)?;
+
+    if let Ok(mut cache) = plans.0.lock() {
+        cache.remove(&plan_id);
+    }
+    Ok(result)
+}
+
+fn apply_import(
+    app: &AppHandle,
+    master_state: &State<'_, MasterPasswordState>,
+    parsed: ParsedImport,
+    decisions: &HashMap<usize, String>,
+    trust: ImportTrust,
+) -> Result<BookmarkImportResult, String> {
+    let ParsedImport { mut entries, mut warnings, groups, .. } = parsed;
+    for candidate in &mut entries {
+        apply_trust(candidate, &trust);
+    }
+
+    // 凭据只在 AuraTerm 包里出现，且需要凭据库可写；否则书签照常导入，只是不带凭据。
+    let secret = if entries.iter().any(connection_carries_secrets) {
+        if encryption::credentials_accessible(app, master_state) {
+            Some(encryption::resolve_secret(app, master_state)?)
         } else {
             warnings.push("Credentials in this file were skipped: unlock the master password first".to_string());
             None
@@ -962,42 +1306,95 @@ pub fn import_bookmarks(
     };
     let mut credential_store = match &secret {
         Some(secret) => Some(
-            encryption::load_encrypted_credentials(&app, secret)
+            encryption::load_encrypted_credentials(app, secret)
                 .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() }),
         ),
         None => None,
     };
 
-    let mut connections = load_connections(&app)?;
+    let mut connections = load_connections(app)?;
     let mut imported = 0;
+    let mut updated = 0;
     let mut skipped = 0;
-    for mut candidate in candidates {
-        if let Some(store) = credential_store.as_mut() {
-            persist_connection_secrets(&candidate, store)?;
-        }
-        sanitize_connection_for_storage(&mut candidate);
-        let duplicate = connections.iter().any(|existing| {
-            existing.protocol == candidate.protocol
-                && existing.host.eq_ignore_ascii_case(&candidate.host)
-                && existing.port == candidate.port
-                && existing.user == candidate.user
-                && existing.name.eq_ignore_ascii_case(&candidate.name)
-        });
-        if duplicate {
-            skipped += 1;
-        } else {
-            connections.push(candidate);
-            imported += 1;
+    for (index, mut candidate) in entries.into_iter().enumerate() {
+        let matched = match_existing(&candidate, &connections);
+        let action = decisions
+            .get(&index)
+            .map(String::as_str)
+            .unwrap_or_else(|| default_action(matched));
+
+        // 「更新」到一半发现本地那条已经没了（另一个窗口删掉了？）——退化为新增，
+        // 比静默丢弃诚实。
+        let position = match (action, matched) {
+            (ACTION_SKIP, _) => {
+                skipped += 1;
+                continue;
+            }
+            (ACTION_UPDATE, Some((position, _))) => Some(position),
+            _ => None,
+        };
+
+        // 只有载荷真的带了凭据才动凭据库：更新一条不带凭据的书签**不能**清掉本地
+        // 已存的密码（凭据库以连接 id 为键，而更新沿用本地 id）。
+        let carries_secrets = connection_carries_secrets(&candidate);
+
+        match position {
+            Some(position) => {
+                let existing = &connections[position];
+                candidate.id = existing.id.clone();
+                candidate.created_at = existing.created_at;
+                candidate.last_used = existing.last_used;
+                if carries_secrets {
+                    if let Some(store) = credential_store.as_mut() {
+                        persist_connection_secrets(&candidate, store)?;
+                    }
+                }
+                sanitize_connection_for_storage(&mut candidate);
+                connections[position] = candidate;
+                updated += 1;
+            }
+            None => {
+                candidate.name = unique_name(&candidate.name, candidate.group.as_deref(), &connections);
+                if carries_secrets {
+                    if let Some(store) = credential_store.as_mut() {
+                        persist_connection_secrets(&candidate, store)?;
+                    }
+                }
+                sanitize_connection_for_storage(&mut candidate);
+                connections.push(candidate);
+                imported += 1;
+            }
         }
     }
-    if imported == 0 && skipped == 0 {
+    if imported == 0 && updated == 0 && skipped == 0 {
         warnings.push("No concrete hosts were found in the selected file".to_string());
     }
     if let (Some(secret), Some(store)) = (&secret, &credential_store) {
-        encryption::save_encrypted_credentials(&app, store, secret)?;
+        encryption::save_encrypted_credentials(app, store, secret)?;
     }
-    write_connections(&app, &connections)?;
-    Ok(BookmarkImportResult { imported, skipped, warnings, created_groups })
+    write_connections(app, &connections)?;
+    Ok(BookmarkImportResult { imported, updated, skipped, warnings, created_groups: groups })
+}
+
+/// 无预览的一步导入，保留给旧调用点。等价于「按默认处置全部接受，且信任载荷」
+/// ——信任是为了不改变既有备份恢复的行为（带凭据的自备份仍然照常还原）。
+/// 分享场景请走 [`preview_bookmark_import`] + [`apply_bookmark_import`]。
+#[tauri::command]
+pub fn import_bookmarks(
+    app: AppHandle,
+    format: String,
+    content: String,
+    group: Option<String>,
+    master_state: State<'_, MasterPasswordState>,
+) -> Result<BookmarkImportResult, String> {
+    let parsed = parse_import(&format, &content, group.as_deref())?;
+    apply_import(
+        &app,
+        &master_state,
+        parsed,
+        &HashMap::new(),
+        ImportTrust { allow_commands: true, allow_credentials: true },
+    )
 }
 
 /// Whether an imported entry brought any secret along that is worth persisting.
@@ -1359,13 +1756,13 @@ mod tests {
         };
         let json = serde_json::to_string(&export).expect("serialize");
 
-        let (entries, _, groups) = parse_auraterm_export(&json, "").expect("parse");
-        assert_eq!(entries[0].group.as_deref(), Some("Production/EU"));
-        assert_ne!(entries[0].id, export.connections[0].id, "ids are reassigned on import");
-        assert!(groups.is_empty(), "a plain backup carries no explicit groups");
+        let parsed = parse_auraterm_export(&json, "").expect("parse");
+        assert_eq!(parsed.entries[0].group.as_deref(), Some("Production/EU"));
+        assert_ne!(parsed.entries[0].id, export.connections[0].id, "ids are reassigned on import");
+        assert!(parsed.groups.is_empty(), "a plain backup carries no explicit groups");
 
-        let (nested, _, _) = parse_auraterm_export(&json, "Restored").expect("parse");
-        assert_eq!(nested[0].group.as_deref(), Some("Restored/Production/EU"));
+        let nested = parse_auraterm_export(&json, "Restored").expect("parse");
+        assert_eq!(nested.entries[0].group.as_deref(), Some("Restored/Production/EU"));
     }
 
     /// Builds the share bundle `export_group_bookmarks` would write for group
@@ -1441,16 +1838,16 @@ mod tests {
         let json = share_bundle("Prod/EU", &["Web", ""], &["Staging/Canary"]);
 
         // No target group: the bundle recreates the group it was cut from.
-        let (entries, _, groups) = parse_auraterm_export(&json, "").expect("parse");
-        assert_eq!(entries[0].group.as_deref(), Some("Prod/EU/Web"));
-        assert_eq!(entries[1].group.as_deref(), Some("Prod/EU"));
-        assert_eq!(groups, vec!["Prod/EU/Staging/Canary".to_string()]);
+        let parsed = parse_auraterm_export(&json, "").expect("parse");
+        assert_eq!(parsed.entries[0].group.as_deref(), Some("Prod/EU/Web"));
+        assert_eq!(parsed.entries[1].group.as_deref(), Some("Prod/EU"));
+        assert_eq!(parsed.groups, vec!["Prod/EU/Staging/Canary".to_string()]);
 
         // A target group wins, and the sharer's parent folders never appear.
-        let (entries, _, groups) = parse_auraterm_export(&json, "From Bill").expect("parse");
-        assert_eq!(entries[0].group.as_deref(), Some("From Bill/Web"));
-        assert_eq!(entries[1].group.as_deref(), Some("From Bill"));
-        assert_eq!(groups, vec!["From Bill/Staging/Canary".to_string()]);
+        let parsed = parse_auraterm_export(&json, "From Bill").expect("parse");
+        assert_eq!(parsed.entries[0].group.as_deref(), Some("From Bill/Web"));
+        assert_eq!(parsed.entries[1].group.as_deref(), Some("From Bill"));
+        assert_eq!(parsed.groups, vec!["From Bill/Staging/Canary".to_string()]);
     }
 
     #[test]
@@ -1487,11 +1884,11 @@ mod tests {
     #[test]
     fn the_origin_stamp_survives_the_id_being_reassigned() {
         let json = share_bundle("Prod", &["Web"], &[]);
-        let (entries, _, _) = parse_auraterm_export(&json, "").expect("parse");
-        let origin = entries[0].origin.as_ref().expect("origin survives the import");
+        let parsed = parse_auraterm_export(&json, "").expect("parse");
+        let origin = parsed.entries[0].origin.as_ref().expect("origin survives the import");
         assert_eq!(origin.entry_id, "entry-0", "the sharer's identity is what stays put");
         assert_eq!(origin.bundle_id, "bundle-1");
-        assert!(!entries[0].id.is_empty(), "a fresh local id is handed out");
+        assert!(!parsed.entries[0].id.is_empty(), "a fresh local id is handed out");
     }
 
     /// The whole reason `version` stays at 1 and `share` is optional: a client
@@ -1528,6 +1925,133 @@ mod tests {
         // parseable: an old importer prefixes its own target group and gets the
         // subtree in the right shape, only without the share's name.
         assert_eq!(legacy.connections[0].group.as_deref(), Some("Web"));
+    }
+
+    // ── 导入：匹配、处置与信任闸门 ────────────────────────────────────────────
+
+    fn ssh(name: &str, host: &str, user: &str) -> SavedConnection {
+        imported_connection(
+            name.to_string(), String::new(), "ssh", host.to_string(), 22, user.to_string(),
+        )
+    }
+
+    #[test]
+    fn the_share_identity_outranks_the_endpoint_match() {
+        let mut local = ssh("prod-web", "10.0.0.1", "ops");
+        local.origin = Some(BookmarkOrigin {
+            bundle_id: "bundle-1".to_string(),
+            entry_id: "entry-1".to_string(),
+        });
+        // A second local bookmark pointing at the same machine, without an origin.
+        let plain = ssh("prod-web-copy", "10.0.0.1", "ops");
+        let existing = vec![plain, local];
+
+        // The incoming entry moved to a new host but kept its share identity:
+        // it must still resolve to the bookmark it updates, not to the endpoint.
+        let mut candidate = ssh("prod-web", "10.0.0.9", "ops");
+        candidate.origin = Some(BookmarkOrigin {
+            bundle_id: "bundle-2".to_string(),
+            entry_id: "entry-1".to_string(),
+        });
+        assert_eq!(match_existing(&candidate, &existing), Some((1, "origin")));
+        assert_eq!(default_action(match_existing(&candidate, &existing)), ACTION_UPDATE);
+    }
+
+    #[test]
+    fn an_unknown_bookmark_on_a_known_machine_defaults_to_skip() {
+        let existing = vec![ssh("prod-web", "10.0.0.1", "ops")];
+        // Renaming is not enough to make it a different bookmark — the old key
+        // included the name, so this used to import as a second copy.
+        let candidate = ssh("web-1", "10.0.0.1", "ops");
+        assert_eq!(match_existing(&candidate, &existing), Some((0, "endpoint")));
+        assert_eq!(default_action(match_existing(&candidate, &existing)), ACTION_SKIP);
+
+        let elsewhere = ssh("prod-web", "10.0.0.2", "ops");
+        assert_eq!(match_existing(&elsewhere, &existing), None);
+        assert_eq!(default_action(None), ACTION_ADD);
+    }
+
+    #[test]
+    fn serial_bookmarks_match_on_the_device_not_the_empty_host() {
+        let mut left = imported_connection(
+            "uart".into(), String::new(), "serial", String::new(), 0, String::new(),
+        );
+        left.port_name = Some("/dev/ttyUSB0".to_string());
+        let mut right = left.clone();
+        right.port_name = Some("/dev/ttyUSB1".to_string());
+        // Both have an empty host/user; comparing those would make every serial
+        // bookmark a duplicate of every other.
+        assert!(!same_endpoint(&left, &right));
+        assert!(same_endpoint(&left, &left.clone()));
+
+        let mut unnamed = left.clone();
+        unnamed.port_name = None;
+        assert!(!same_endpoint(&unnamed, &unnamed.clone()), "no device path, no match");
+    }
+
+    #[test]
+    fn the_trust_gate_strips_what_runs_on_connect_unless_it_is_allowed() {
+        let mut connection = ssh("web", "10.0.0.1", "ops");
+        connection.password = Some("hunter2".to_string());
+        connection.post_connect_commands = vec!["sudo -i".to_string()];
+        connection.auto_login_rules = vec![SavedAutoLoginRule {
+            expect: "assword:".to_string(),
+            response: Some("hunter2".to_string()),
+            case_sensitive: false,
+            timeout_secs: default_expect_timeout(),
+        }];
+        connection.jump_hosts = vec![SavedJumpHost {
+            id: "j1".to_string(),
+            host: "bastion".to_string(),
+            port: 22,
+            user: "ops".to_string(),
+            auth_type: "password".to_string(),
+            password: Some("bastion-pw".to_string()),
+            private_key: None,
+            passphrase: None,
+        }];
+
+        let risks = ImportRisks::survey(std::slice::from_ref(&connection));
+        assert_eq!(risks.post_connect_commands, 1);
+        assert_eq!(risks.auto_login_responses, 1);
+        assert_eq!(risks.jump_host_credentials, 1);
+        assert_eq!(risks.passwords, 1);
+
+        let mut stripped = connection.clone();
+        apply_trust(&mut stripped, &ImportTrust::default());
+        assert!(stripped.post_connect_commands.is_empty());
+        assert_eq!(stripped.auto_login_rules[0].response, None);
+        assert_eq!(stripped.auto_login_rules[0].expect, "assword:", "the topology stays");
+        assert_eq!(stripped.password, None);
+        assert_eq!(stripped.jump_hosts[0].password, None);
+        assert_eq!(stripped.jump_hosts[0].host, "bastion", "the hop itself stays");
+
+        let mut trusted = connection.clone();
+        apply_trust(&mut trusted, &ImportTrust { allow_commands: true, allow_credentials: true });
+        assert_eq!(trusted.post_connect_commands, vec!["sudo -i".to_string()]);
+        assert_eq!(trusted.password.as_deref(), Some("hunter2"));
+
+        // The two switches are independent: commands can be kept without
+        // adopting somebody else's passwords.
+        let mut half = connection.clone();
+        apply_trust(&mut half, &ImportTrust { allow_commands: true, allow_credentials: false });
+        assert_eq!(half.post_connect_commands, vec!["sudo -i".to_string()]);
+        assert_eq!(half.password, None);
+        assert_eq!(half.auto_login_rules[0].response.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn added_bookmarks_do_not_collide_by_name_inside_one_group() {
+        let mut first = ssh("web", "10.0.0.1", "ops");
+        first.group = Some("Prod".to_string());
+        let mut second = ssh("web (2)", "10.0.0.2", "ops");
+        second.group = Some("Prod".to_string());
+        let existing = vec![first, second];
+
+        assert_eq!(unique_name("web", Some("Prod"), &existing), "web (3)");
+        // A different group is a different namespace.
+        assert_eq!(unique_name("web", Some("Lab"), &existing), "web");
+        assert_eq!(unique_name("db", Some("Prod"), &existing), "db");
     }
 
     #[test]

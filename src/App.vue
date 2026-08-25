@@ -33,6 +33,7 @@ import {
 } from "./assist";
 import AiAssistantPanel from "./AiAssistantPanel.vue";
 import PromptDialogHost from "./PromptDialogHost.vue";
+import ImportPreviewHost from "./ImportPreviewHost.vue";
 import { aiHasApiKey } from "./ai";
 import {
   cloudBridgeStatus,
@@ -3169,5 +3170,6 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     />
 
     <PromptDialogHost />
+    <ImportPreviewHost />
   </div>
 </template>

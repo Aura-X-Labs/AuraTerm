@@ -177,9 +177,16 @@ async function handleImportFile(event: Event) {
   importMessage.value = t("bookmarks.importing");
   try {
     const content = await file.text();
-    const result = await store.importBookmarks(detectImportFormat(file.name, content), content, undefined);
-    importMessage.value = t("bookmarks.importResult", { imported: result.imported, skipped: result.skipped })
-      + (result.warnings.length ? `. ${result.warnings.join(" ")}` : "");
+    const result = await store.importWithPreview(detectImportFormat(file.name, content), content);
+    if (!result) {
+      importMessage.value = "";
+      return;
+    }
+    importMessage.value = t("bookmarks.importResult", {
+      imported: result.imported,
+      updated: result.updated,
+      skipped: result.skipped,
+    }) + (result.warnings.length ? `. ${result.warnings.join(" ")}` : "");
   } catch (error) {
     importMessage.value = t("bookmarks.importFailed", { error: String(error) });
   }

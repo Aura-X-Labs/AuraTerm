@@ -603,19 +603,24 @@ async function handleImportFile(event: Event) {
   }
   const content = await file.text();
   const format = detectImportFormat(file.name, content);
-  const target = await promptText(t("bookmarkManager.importGroupPrompt"), currentGroupPath.value);
-  if (target === null) {
-    return;
-  }
 
   busy.value = true;
   try {
-    const result = await store.importBookmarks(format, content, target.trim() || undefined);
+    // The landing group, the per-entry decisions and the trust gate all live in
+    // the review dialog now; the file no longer lands sight-unseen.
+    const result = await store.importWithPreview(format, content, currentGroupPath.value || undefined);
+    if (!result) {
+      statusMessage.value = "";
+      return;
+    }
     // Subfolders a share brought along that hold no bookmark: nothing in the
     // connection list can rebuild them, so they have to be recorded explicitly.
     rememberGroups(result.createdGroups);
-    statusMessage.value = t("bookmarks.importResult", { imported: result.imported, skipped: result.skipped })
-      + (result.warnings.length ? ` · ${result.warnings.join(" ")}` : "");
+    statusMessage.value = t("bookmarks.importResult", {
+      imported: result.imported,
+      updated: result.updated,
+      skipped: result.skipped,
+    }) + (result.warnings.length ? ` · ${result.warnings.join(" ")}` : "");
   } catch (error) {
     await alertDialog(t("bookmarks.importFailed", { error: String(error) }), "error");
   } finally {
