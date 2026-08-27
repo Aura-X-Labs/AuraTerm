@@ -1,6 +1,13 @@
-## 0.3.4-alpha
+## 0.3.4
 
 ### 新增
+- **网络串口（RFC 2217）与裸 TCP** —— 串口会话此前只能连本机插着的那个口。协议选择器从三个增加到五个（SSH / Telnet / 串口 / 网络串口 / 裸 TCP），实验室里的板子从哪里都能接上
+  - `rfc2217` 走 Telnet Com Port Control Option（option 44）：波特率、数据位、校验、停止位与流控真的会作用到设备服务器上，已对 ser2net、Moxa NPort、Digi、Lantronix 验证。对端拒绝或忽略 COM-PORT-OPTION 时降级成纯字节管道并说明原因，而不是直接失败
+  - `raw-tcp` 是裸字节管道，给只暴露这一种接法的设备服务器；它控制不了线路参数，因此对话框里这些字段一并不显示
+  - 控制面对本机串口同样生效：不断开就改线路参数、发送 BREAK、驱动 DTR/RTS、读调制解调器状态线，以及看到帧错误与校验错误——波特率配错时最直接的证据
+  - 「沿用设备服务器上的现有端口设置」默认勾选，并移到它管辖的那组参数上方：共享的 console server 保持原样是更安全的默认。勾选时这些参数真的锁住了（此前预设下拉仍然可用，会改写灰掉的字段）
+  - 网络会话带 TCP keepalive 与可选的退避重连——设备服务器重启是常态
+  - 四个新建入口都有：连接对话框、命令面板、File ▸ 新建会话（原生菜单）、标签栏 + 号的弹出层
 - **书签分组分享（P0：文件通道）** —— 书签管理页分组右键「⤓ 导出此分组（可分享）…」或顶栏「导出 ▾ ▸ 导出分组「X」」，把整棵分组子树打包成一个分享包（设计见 `docs/plans/bookmark-share-design.md`）
   - 分组路径按被分享的根**相对化**：对方可以把它挂到任意分组下，也不会看到分享者根以上的目录结构（此前只能勾选条目导出，且分组以绝对路径出行）
   - 空子分组随包出行并在导入后写回 `settings.bookmarkGroups`，刻意建出来的层级不会丢
@@ -18,6 +25,13 @@
   - 分享包永不含凭据；收到的分享码同样要过预览与信任闸门
 - **订阅式更新** —— 导入过的分享码会被记住（以设备本地密钥加密存放），「我的分享 ▸ 已订阅」里一键「检查更新」重新拉取；因为 `origin.entryId` 认得出同一条，更新落在原地而不是翻倍
 
+### 修复
+- **所有确认对话框此前全线失效** —— `node_modules` 里的 `@tauri-apps/plugin-dialog` 停在 2.6.0，而 Rust 侧按 2.7.2 编译；后者把 `ask` / `confirm` 并进了 `message` 命令，前端调用的 `plugin:dialog|confirm` 已不存在，Promise 直接 reject。十三处确认（批量删除、解散/删除分组、以云端覆盖本地书签、重置 known_hosts、远程文件删除）都是「点了没反应」，其中书签栏右键删除最显眼。`alertDialog` 因为 `message` 两个版本都有而照常工作，所以症状看起来像书签的 bug 而不是对话框坏了
+- **对话框桥失败会报出来，而不是静默当成「用户取消」** —— `confirmDialog` 现在自己 catch、经 `alertDialog` 报错并返回 false。返回 false 而不是重新抛出是为了守住安全默认值：调用方读作「用户拒绝」，桥断了也不会让破坏性操作无确认地通过
+- **Telnet 出站不转义 IAC** —— 用户数据里的字面 `0xFF` 会被服务器当成命令。现已按 RFC 854 转义，并在未协商 BINARY 时对 CR 补 NUL（回车因此从 `CR` 变成 `CR NUL`，与 BSD telnet 和规范一致）
+- **工作区恢复丢掉网络串口的落点** —— 恢复逻辑写死 `protocol: "serial"` 且只复制六个字段，transport / host / netPort 全丢，重启后变成去打开一个名叫 `10.0.0.5:2217` 的本机设备。现在恢复保留协议与端点，没有 host 的网络条目直接拒绝
+- **Cloud Console 与 Live Share 开播前先要求登录** —— 两者都经账号中转，但未绑定的设备此前可以把 Cloud Console 开关拨开（设置在账号对话框弹出之前就已写下），Live Share 则先渲染出开始表单、再抛一个原始后端错误。后端一直是拒绝未绑定设备的，所以并非安全漏洞，只是开关停在错误或含糊的状态。现在 Cloud Console 先把「打开」的意图存着、设备真的绑定后才落盘，Live Share 未绑定时显示登录提示；加入别人的分享不受影响——那只需要对方的码
+
 ### 内部
 - 书签交换格式的 `version` 保持 1，`share` 与 `origin` 均为可选字段：0.3.3 及更早的客户端仍能打开新分享包（serde 忽略未知字段，相对路径前缀到用户选择的分组后结构完全正确），只是看不到分享名与空分组；`connections.rs` 有一条专门守住这个约定的单测
 - `SavedConnection` 新增 `origin: {bundleId, entryId}`——`entryId` 记的是分享者的连接 id，同一条书签多次导出保持不变；本机 id 在导入时一律重发，无法充当跨机器身份。这是后续「再次导入同一分享包时更新而不是翻倍」的一级匹配键
@@ -30,7 +44,12 @@
 - 订阅存储 `bookmark_subscriptions.enc` 以设备本地密钥加密（与 `sync_config.enc` 同一套）：里面存的是分享码，而码就是密钥；前端拿到的视图类型里没有码
 - 新增 `ImportPreviewHost.vue`（沿用 `PromptDialogHost` 的队列 + 宿主模式）、`ShareDialog.vue`、`ShareListDialog.vue`、`importPreview.ts`、`bookmarkShare.ts`
 - 服务端（AuraXLabs）：`bookmark_shares` 表与迁移、4 个端点、账号配额与限速规则；缺失/已撤销/已过期/次数用尽一律回同一个 404，4 位路由段因此无法被枚举出「哪些码存在」
-
+- 终端共享功能改名为 **Live Share**（原「远程协助 / Remote Assist」），中英两端都用这个拉丁名；协助码 → 共享码，结束协助 → 结束共享。只改显示文案：`assist.*` i18n 键、菜单 id、`assist` 标签页类型、Rust 模块与 `remote-assist-design.md` 都保持原名，协议与已经发出去的加入链接不受影响
+- 串口新增传输层接缝 `serial_link.rs`（`SerialLink` 供读线程、`SerialSink` 供一切写入），`serial.rs` 的读循环因此与传输无关，ZMODEM 路由、UTF-8 解码与事件发布一行未动；option 44 的编解码 `rfc2217.rs` 不做 IO，整套握手可单测。`scripts/rfc2217_test_server.py` 让 pyserial 自己的 `PortManager` 跑在自回显 pty 上，互操作测试不需要硬件
+- 传输层由协议派生（协议成为唯一事实来源），书签里冗余的 `serialTransport` 字段移除；`sharedSessionProtocol()` 把三种串口协议一律映射回 `serial`——它们本来就同住 `SerialState`，否则 `rfc2217` 反序列化成 `SessionProtocol` 会失败并悄悄弄坏共享
+- 依赖树整体前移：十六个 npm 包与 cargo 在 semver 范围内更新，顺带清掉 brace-expansion / nanoid / postcss 三条告警；TypeScript 5.9.3 → 6.0.3，停在 6.x 是刻意的——TypeScript 7 是原生编译器，其 package exports 去掉了 vue-tsc 赖以运行的 JS 编译器 API。`make update` 现在跑完两套生态后列出仍然落后的包，让这种漂移可见
+- 不再调用整体标记为 deprecated 的 generic-array 自有方法，改走 `Deref` 与 `From<&[u8; N]>`：同样的指针转换、不复制，密文格式不变，旧版本写下的数据照常解密
+- Vite 的 chunk 体积告警上限从 500 kB 提到 700 kB：超标的是启动即需的 xterm（505.88 kB），而资产随 Tauri 二进制走本地文件系统，告警针对的网络下载成本并不存在
 
 ## 0.3.3
 
