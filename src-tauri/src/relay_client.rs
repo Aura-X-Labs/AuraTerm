@@ -24,7 +24,7 @@ use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKe
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 fn classify_relay_frame(kind: &str) -> FrameClass {
     match kind {
@@ -188,7 +188,13 @@ pub async fn relay_connect(
     .await
 }
 
-pub(crate) async fn connect_session<R: tauri::Runtime>(
+/// One full admission: grant, relay ticket, ECDH, locally verified provider
+/// identity, then the tab is live. A relay ticket is one-time by design, so
+/// every reconnect runs this again from the top rather than resuming
+/// anything — and re-admission replays the host's snapshot, which is what
+/// makes a reconnect visually seamless.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn attach_once<R: tauri::Runtime>(
     app: &AppHandle<R>,
     http: &reqwest::Client,
     state: &RelayClientState,
@@ -197,6 +203,7 @@ pub(crate) async fn connect_session<R: tauri::Runtime>(
     target_device_id: String,
     session_id: String,
     want_control: bool,
+    on_end: Option<tokio::sync::oneshot::Sender<remote_tab::TabEnd>>,
 ) -> Result<RelayJoinView, String> {
     // "controller" only buys the right to *ask*: the relay then forwards
     // our frames, and the provider decides whether they become keystrokes.
@@ -313,13 +320,136 @@ pub(crate) async fn connect_session<R: tauri::Runtime>(
             reason: None,
         },
     );
-    state.tabs.spawn_reader(app.clone(), id, fingerprint.clone(), stream);
+    state
+        .tabs
+        .spawn_reader_with_end(app.clone(), id, fingerprint.clone(), stream, on_end);
     Ok(RelayJoinView {
         session_id: grant.session_id,
         connection_id,
         fingerprint,
         provider_label: grant.provider_label,
     })
+}
+
+/// How hard a dropped relay tab tries to come back before giving up.
+const RECONNECT_ATTEMPTS: u32 = 5;
+const RECONNECT_BACKOFF_BASE_MS: u64 = 800;
+const RECONNECT_BACKOFF_MAX_MS: u64 = 10_000;
+
+/// Attach, then keep the tab alive across transport drops.
+///
+/// A deliberate ending — kicked, denied, the share stopped — closes the tab
+/// at once: the other side meant it. A dropped connection is retried with
+/// backoff while the tab is still open, and only becomes an ending when the
+/// retries run out, so a laptop lid or a flaky network costs a repaint
+/// rather than the session.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn connect_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    http: &reqwest::Client,
+    state: &RelayClientState,
+    device: &DeviceConfig,
+    id: String,
+    target_device_id: String,
+    session_id: String,
+    want_control: bool,
+) -> Result<RelayJoinView, String> {
+    let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+    let joined = attach_once(
+        app,
+        http,
+        state,
+        device,
+        id.clone(),
+        target_device_id.clone(),
+        session_id.clone(),
+        want_control,
+        Some(end_tx),
+    )
+    .await?;
+    spawn_reconnect_watch(
+        app.clone(),
+        http.clone(),
+        device.clone(),
+        id,
+        target_device_id,
+        session_id,
+        want_control,
+        end_rx,
+    );
+    Ok(joined)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_reconnect_watch<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    http: reqwest::Client,
+    device: DeviceConfig,
+    id: String,
+    target_device_id: String,
+    session_id: String,
+    want_control: bool,
+    end_rx: tokio::sync::oneshot::Receiver<remote_tab::TabEnd>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let Ok(mut last_end) = end_rx.await else { return };
+        for attempt in 1..=RECONNECT_ATTEMPTS {
+            if last_end.deliberate {
+                break;
+            }
+            let state = app.state::<RelayClientState>();
+            // The reader drops the tab from the registry on the way out, so
+            // a tab that is back means someone re-attached; a closed tab
+            // (close_relay_session) must not be resurrected either. Only an
+            // absent tab whose window still exists gets retried, which the
+            // emit below makes visible.
+            if state.tabs.contains(&id) {
+                return;
+            }
+            state.tabs.emit_state(
+                &app,
+                TabStateEvent {
+                    id: id.clone(),
+                    state: "handshake".into(),
+                    role: "viewer".into(),
+                    cols: last_end.cols,
+                    rows: last_end.rows,
+                    host_label: last_end.host_label.clone(),
+                    fingerprint: Some(last_end.fingerprint.clone()),
+                    control_policy: None,
+                    reason: Some("reconnecting".into()),
+                },
+            );
+            let backoff = (RECONNECT_BACKOFF_BASE_MS * 2_u64.pow(attempt - 1))
+                .min(RECONNECT_BACKOFF_MAX_MS);
+            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let attached = attach_once(
+                &app,
+                &http,
+                &state,
+                &device,
+                id.clone(),
+                target_device_id.clone(),
+                session_id.clone(),
+                want_control,
+                Some(tx),
+            )
+            .await;
+            match attached {
+                // Live again: wait for however this next connection ends.
+                Ok(_) => match rx.await {
+                    Ok(end) => last_end = end,
+                    Err(_) => return,
+                },
+                // The provider may simply be down; keep the reason from the
+                // original drop and try again after a longer backoff.
+                Err(_) => continue,
+            }
+        }
+        let state = app.state::<RelayClientState>();
+        state.tabs.finish(&app, &id, &last_end);
+    });
 }
 
 /// The browser half of the provider's `derive_peer_cipher`: same HKDF info,

@@ -1007,6 +1007,22 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               @change="updateRelay('allowOpenBookmark', inputChecked($event))"
             >
           </label>
+
+          <label class="settings-field" :class="{ 'settings-field--disabled': !settings.liveRelay.enabled }">
+            <span>
+              <strong>{{ $t('settings.relayIdleTimeout') }}</strong>
+              <small>{{ $t('settings.relayIdleTimeoutHint') }}</small>
+            </span>
+            <input
+              type="number"
+              class="settings-input settings-input--number"
+              min="0"
+              max="1440"
+              :disabled="!settings.liveRelay.enabled"
+              :value="settings.liveRelay.idleTimeoutMinutes"
+              @change="updateRelay('idleTimeoutMinutes', Math.max(0, Number(inputValue($event)) || 0))"
+            >
+          </label>
         </div>
 
         <!-- Keyboard & Mouse Tab -->

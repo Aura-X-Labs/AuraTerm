@@ -74,6 +74,10 @@ pub(crate) struct RelayPeerMeta {
     may_request_control: bool,
     /// Highest `input_seq` applied, for de-duplication within one fence.
     last_input_seq: u64,
+    /// When this peer last typed. Only meaningful while it holds control;
+    /// the idle sweep uses it to take write access back from a controller
+    /// who walked away.
+    last_input_at: SystemTime,
     /// Set while the peer asked for control and the local user has not
     /// answered yet.
     control_requested: bool,
@@ -105,6 +109,9 @@ pub(crate) struct RelayProviderState {
     /// What this device is willing to open for a peer, pushed by the
     /// frontend (which is what can enumerate ports and bookmarks).
     pub(crate) targets: Vec<RelayOpenTarget>,
+    /// True while the idle sweep is running, so admissions do not stack up
+    /// duplicate sweepers.
+    housekeeping_running: bool,
     /// Write-authority fence, owned by this device (design §5.10). Every
     /// grant bumps it, so INPUT carrying an older fence is stale by
     /// construction — a revoked peer cannot replay queued keystrokes.
@@ -478,12 +485,71 @@ async fn admit<R: tauri::Runtime>(
                 controller: false,
                 may_request_control: peer.may_request_control,
                 last_input_seq: 0,
+                last_input_at: SystemTime::now(),
                 control_requested: false,
             },
         );
     }
     let _ = app.emit("relay-peers-changed", ());
     let _ = app.emit("cloud-bridge-peers-changed", ());
+    spawn_idle_sweep(client.clone(), Arc::clone(inner), app.clone());
+}
+
+/// How often the idle sweep looks; the timeout itself is in minutes, so a
+/// coarse tick is plenty and costs nothing while nobody is attached.
+const IDLE_SWEEP_SECS: u64 = 20;
+
+/// Take write access back from a controller who stopped typing.
+///
+/// The setting is worded "no input", and only a controller can produce
+/// input — so this deliberately does *not* disconnect silent viewers.
+/// Watching a long build without touching the keyboard is the normal case
+/// for a viewer; a live cursor sitting unattended on someone else's
+/// terminal is the case actually worth ending.
+fn spawn_idle_sweep<R: tauri::Runtime>(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, app: AppHandle<R>) {
+    {
+        let Ok(mut guard) = inner.lock() else { return };
+        if guard.relay.housekeeping_running {
+            return;
+        }
+        guard.relay.housekeeping_running = true;
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(IDLE_SWEEP_SECS)).await;
+            let expired = {
+                let Ok(mut guard) = inner.lock() else { break };
+                if guard.relay.peers.is_empty() && guard.relay.pending.is_empty() {
+                    // Nobody attached: stand down until the next admission.
+                    guard.relay.housekeeping_running = false;
+                    break;
+                }
+                let timeout = guard.relay.policy.idle_timeout_minutes;
+                if timeout == 0 {
+                    Vec::new()
+                } else {
+                    let cutoff = Duration::from_secs(u64::from(timeout) * 60);
+                    let now = SystemTime::now();
+                    guard
+                        .relay
+                        .peers
+                        .iter()
+                        .filter(|(_, peer)| {
+                            peer.controller
+                                && now
+                                    .duration_since(peer.last_input_at)
+                                    .map(|idle| idle >= cutoff)
+                                    .unwrap_or(false)
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>()
+                }
+            };
+            for connection_id in expired {
+                let _ = set_relay_control(&client, &inner, &app, &connection_id, false).await;
+            }
+        }
+    });
 }
 
 // ── control authority (design §5.10) ───────────────────────────────────────
@@ -546,6 +612,7 @@ pub(crate) async fn set_relay_control<R: tauri::Runtime>(
         peer.controller = grant;
         peer.control_requested = false;
         peer.last_input_seq = 0;
+        peer.last_input_at = SystemTime::now();
         let frame = if grant {
             json!({"kind": "CONTROL_GRANT", "fence": fence})
         } else {
@@ -666,6 +733,7 @@ async fn handle_peer_frame<R: tauri::Runtime>(
                 let Some((local_id, protocol)) = target else { return };
                 if let Some(peer) = guard.relay.peers.get_mut(connection_id) {
                     peer.last_input_seq = input_seq;
+                    peer.last_input_at = SystemTime::now();
                 }
                 Some((local_id, protocol, bytes, fence, input_seq, cloud_id))
             };

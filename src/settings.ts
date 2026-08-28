@@ -85,8 +85,8 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
 /**
  * Live Relay provider policy (design docs/plans/live-sync-design.md §5.8):
  * whether this machine may be reached from the account's other AuraTerm
- * devices, and what they may do. No UI until Phase 4 — every gate defaults
- * closed except plain attach. A summary is mirrored into the cloud bridge
+ * devices, and what they may do. Every gate defaults closed except plain
+ * attach. A summary is mirrored into the cloud bridge
  * (`cloud_bridge_set_relay_policy`) and reported with presence pings; the
  * local process stays the authority on every actual request.
  */
@@ -106,7 +106,8 @@ export interface LiveRelaySettings {
   /** Allow peer input at all (still clamped by the global `allowRemoteSend` gate). */
   allowRemoteInput: boolean;
   maxConcurrentPeers: number;
-  /** Disconnect a peer after this long without input; 0 disables. */
+  /** Take control back from a peer that stops typing for this long; 0
+   *  disables. Silent viewers are left alone. */
   idleTimeoutMinutes: number;
 }
 
@@ -276,7 +277,7 @@ export interface AppSettings {
   rememberMasterPassword?: boolean;
   /** AI assistant configuration (API key excluded; stored encrypted separately) */
   aiConfig: AiConfig;
-  /** Live Relay provider policy (no UI yet; defaults keep the device closed). */
+  /** Live Relay provider policy; defaults keep the device unreachable. */
   liveRelay: LiveRelaySettings;
 }
 

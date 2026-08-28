@@ -340,6 +340,21 @@ impl RemoteTabs {
     /// render terminal bytes, mirror role/fence changes into the registry,
     /// and finish with an "ended" state event plus `pty-exit`.
     pub fn spawn_reader<R: tauri::Runtime>(&self, app: AppHandle<R>, id: String, fingerprint: String, stream: WsStream) {
+        self.spawn_reader_with_end(app, id, fingerprint, stream, None);
+    }
+
+    /// Pump the tab's stream, handing the outcome to `on_end` instead of
+    /// closing the tab. A caller that supplies the channel owns the ending:
+    /// it may reconnect quietly, or call [`RemoteTabs::finish`] to close
+    /// the tab for real. Without it the reader closes the tab itself.
+    pub fn spawn_reader_with_end<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        id: String,
+        fingerprint: String,
+        stream: WsStream,
+        on_end: Option<tokio::sync::oneshot::Sender<TabEnd>>,
+    ) {
         let (scope_id, connection_id, cipher) = {
             let Ok(tabs) = self.tabs.lock() else { return };
             let Some(tab) = tabs.get(&id) else { return };
@@ -355,8 +370,60 @@ impl RemoteTabs {
             cipher,
             fingerprint,
             stream,
+            on_end,
         );
     }
+
+    /// Close the tab for good: drop it from the registry and emit the
+    /// final state + `pty-exit`. Only needed by callers that took the
+    /// ending into their own hands via [`RemoteTabs::spawn_reader_with_end`].
+    pub fn finish<R: tauri::Runtime>(&self, app: &AppHandle<R>, id: &str, end: &TabEnd) {
+        if let Ok(mut tabs) = self.tabs.lock() {
+            tabs.remove(id);
+        }
+        emit_tab_end(app, self.protocol, id, end);
+    }
+}
+
+/// How a reader loop finished.
+#[derive(Clone, Debug)]
+pub struct TabEnd {
+    pub reason: String,
+    /// True when the peer ended the tab on purpose (kicked, denied, share
+    /// stopped) rather than the transport dropping under it. Only the
+    /// latter is worth reconnecting after.
+    pub deliberate: bool,
+    /// Last known view, so a caller that gives up can still emit a
+    /// faithful final state instead of a blank one.
+    pub role: String,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+    pub host_label: Option<String>,
+    pub fingerprint: String,
+}
+
+fn emit_tab_end<R: tauri::Runtime>(app: &AppHandle<R>, protocol: &'static TabProtocol, id: &str, end: &TabEnd) {
+    let _ = app.emit(
+        &util::session_event(protocol.state_event, id),
+        TabStateEvent {
+            id: id.to_string(),
+            state: "ended".into(),
+            role: end.role.clone(),
+            cols: end.cols,
+            rows: end.rows,
+            host_label: end.host_label.clone(),
+            fingerprint: Some(end.fingerprint.clone()),
+            control_policy: None,
+            reason: Some(end.reason.clone()),
+        },
+    );
+    let _ = app.emit(
+        &util::session_event("pty-exit", id),
+        PtyExitEvent {
+            id: id.to_string(),
+            message: format!("{} ({})", protocol.ended_message, end.reason),
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -370,6 +437,7 @@ fn spawn_reader_task<R: tauri::Runtime>(
     cipher: PeerCipher,
     fingerprint: String,
     mut stream: WsStream,
+    on_end: Option<tokio::sync::oneshot::Sender<TabEnd>>,
 ) {
     let state_event = protocol.state_event;
     tauri::async_runtime::spawn(async move {
@@ -379,6 +447,9 @@ fn spawn_reader_task<R: tauri::Runtime>(
         let mut rows: Option<u16> = None;
         let mut role = "viewer".to_string();
         let mut end_reason = "disconnected".to_string();
+        // Set when the peer ends the tab on purpose; a transport drop
+        // leaves it false, which is the only case worth reconnecting after.
+        let mut deliberate = false;
         let emit_state = |event: TabStateEvent| {
             let _ = app.emit(&util::session_event(state_event, &event.id), event);
         };
@@ -400,6 +471,7 @@ fn spawn_reader_task<R: tauri::Runtime>(
                         .and_then(|v| v.as_str())
                         .unwrap_or(protocol.default_end_reason)
                         .to_string();
+                    deliberate = true;
                     break;
                 }
                 Some("E2EE_FRAME") => {}
@@ -428,6 +500,7 @@ fn spawn_reader_task<R: tauri::Runtime>(
                     let status = inner.get("state").and_then(|v| v.as_str()).unwrap_or("active").to_string();
                     if status == "denied" {
                         end_reason = inner.get("reason").and_then(|v| v.as_str()).unwrap_or("denied").to_string();
+                        deliberate = true;
                         emit_state(TabStateEvent {
                             id: id.clone(),
                             state: "denied".into(),
@@ -518,33 +591,53 @@ fn spawn_reader_task<R: tauri::Runtime>(
                         .and_then(|v| v.as_str())
                         .unwrap_or(protocol.default_end_reason)
                         .to_string();
+                    deliberate = true;
                     break;
                 }
                 FrameClass::Ignore => {}
             }
         }
-        // Connection over: drop the tab, tell the frontend.
+        // Connection over. The tab always leaves the registry — its
+        // connection is gone either way — but who announces the ending
+        // depends on whether a caller claimed it.
         if let Ok(mut tabs) = tabs.lock() {
             tabs.remove(&id);
         }
-        emit_state(TabStateEvent {
-            id: id.clone(),
-            state: "ended".into(),
+        let end = TabEnd {
+            reason: end_reason,
+            deliberate,
             role,
             cols,
             rows,
             host_label,
-            fingerprint: Some(fingerprint),
-            control_policy: None,
-            reason: Some(end_reason.clone()),
-        });
-        let _ = app.emit(
-            &util::session_event("pty-exit", &id),
-            PtyExitEvent {
-                id: id.clone(),
-                message: format!("{} ({end_reason})", protocol.ended_message),
-            },
-        );
+            fingerprint,
+        };
+        match on_end {
+            Some(sender) => {
+                // The caller decides: reconnect quietly, or call `finish`.
+                let _ = sender.send(end);
+            }
+            None => {
+                emit_state(TabStateEvent {
+                    id: id.clone(),
+                    state: "ended".into(),
+                    role: end.role.clone(),
+                    cols: end.cols,
+                    rows: end.rows,
+                    host_label: end.host_label.clone(),
+                    fingerprint: Some(end.fingerprint.clone()),
+                    control_policy: None,
+                    reason: Some(end.reason.clone()),
+                });
+                let _ = app.emit(
+                    &util::session_event("pty-exit", &id),
+                    PtyExitEvent {
+                        id: id.clone(),
+                        message: format!("{} ({})", protocol.ended_message, end.reason),
+                    },
+                );
+            }
+        }
     });
 }
 
