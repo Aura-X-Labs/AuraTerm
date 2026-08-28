@@ -1843,7 +1843,7 @@ function handleOpenAbout() {
 
 /** Open the online AuraTerm user manual (hosted on the AuraXLab site) in the
  *  system browser. */
-const USER_MANUAL_URL = "https://auraxlab.com/products/auraterm/manual";
+const USER_MANUAL_URL = "https://auraxlab.com/docs/manual";
 function handleOpenUserManual() {
   closeOpenMenus();
   void openExternalUrl(USER_MANUAL_URL);
