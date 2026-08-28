@@ -42,6 +42,8 @@ npm run package:msixupload         # Package MSIX upload bundle
 ```bash
 make clean             # Remove src-tauri/target and dist directories
 make release           # Update releases/auraterm-releases.json metadata from built artifacts
+                       # and sync Changelog.md into ../AuraXLabs (site changelog page);
+                       # override the site checkout location with AURAXLABS_DIR
 make upload            # release + upload artifacts
 npm run sync:version   # Manually sync version across all config files
 ```
