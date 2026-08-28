@@ -21,7 +21,7 @@ use crate::cloud_bridge::{
 use crate::e2ee::{sas_fingerprint, PeerCipher, DIRECTION_BROWSER};
 use crate::settings::LiveRelaySettings;
 use crate::shared_session::SharedSessionPort;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -79,6 +79,18 @@ pub(crate) struct RelayPeerMeta {
     control_requested: bool,
 }
 
+/// One session a peer may ask this device to open. The id is opaque to
+/// everyone but this device: the server forwards it untouched, and the
+/// frontend resolves it back to a shell / port / bookmark. A peer can only
+/// ever name an id already on this list.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct RelayOpenTarget {
+    /// "local_shell" | "serial" | "bookmark"
+    pub kind: String,
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Default)]
 pub(crate) struct RelayProviderState {
     /// Full policy mirrored from settings (`cloud_bridge_set_relay_policy`).
@@ -90,6 +102,9 @@ pub(crate) struct RelayProviderState {
     pending: HashMap<String, PendingRelayPeer>,
     /// connection_id -> admitted peer metadata.
     peers: HashMap<String, RelayPeerMeta>,
+    /// What this device is willing to open for a peer, pushed by the
+    /// frontend (which is what can enumerate ports and bookmarks).
+    pub(crate) targets: Vec<RelayOpenTarget>,
     /// Write-authority fence, owned by this device (design §5.10). Every
     /// grant bumps it, so INPUT carrying an older fence is stale by
     /// construction — a revoked peer cannot replay queued keystrokes.
@@ -209,6 +224,10 @@ pub(crate) async fn handle_frame<R: tauri::Runtime>(
                 return false;
             }
             handle_relay_init(client, inner, app, frame).await;
+            true
+        }
+        "RELAY_OPEN_REQUEST" => {
+            handle_open_request(client, inner, app, frame).await;
             true
         }
         "E2EE_CLOSE" => {
@@ -674,6 +693,154 @@ async fn handle_peer_frame<R: tauri::Runtime>(
         }
         _ => {}
     }
+}
+
+// ── open mode (design §5.9) ────────────────────────────────────────────────
+
+/// Payload of `relay-open-request`: the frontend opens the named target as
+/// a real, visible tab, shares it, and reports the session id back.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayOpenRequestEvent {
+    pub request_id: String,
+    pub kind: String,
+    pub target_id: String,
+    pub label: String,
+    pub consumer_label: String,
+    /// True when the local user still has to approve it.
+    pub needs_approval: bool,
+}
+
+/// A peer asked this device to open a fresh session.
+///
+/// This is the one path where a remote party causes AuraTerm to start
+/// something, and it stays fenced in by four separate conditions: Live
+/// Relay is on, the *kind* is switched on, the id is already on this
+/// device's own advertised list, and the concurrency cap has room. The
+/// peer never names a program, a working directory or an environment —
+/// only an opaque id this device minted itself, which the frontend
+/// resolves back to its own shell, its own port, or its own bookmark.
+/// A browser cannot reach this code at all: it has no device credential.
+async fn handle_open_request<R: tauri::Runtime>(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+    app: &AppHandle<R>,
+    frame: &serde_json::Value,
+) {
+    let Some(request_id) = frame.get("request_id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let kind = frame.get("open_kind").and_then(|v| v.as_str()).unwrap_or("");
+    let target_id = frame.get("target_id").and_then(|v| v.as_str()).unwrap_or("");
+    let consumer_label = frame
+        .get("consumer_label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect::<String>();
+
+    let decision = {
+        let Ok(guard) = inner.lock() else { return };
+        decide_open(&guard.relay, kind, target_id)
+    };
+    match decision {
+        Err(reason) => {
+            resolve_open(client, inner, request_id, None, Some(reason)).await;
+        }
+        Ok(target) => {
+            let needs_approval = inner
+                .lock()
+                .map(|guard| guard.relay.policy.require_approval)
+                .unwrap_or(true);
+            let _ = app.emit(
+                "relay-open-request",
+                RelayOpenRequestEvent {
+                    request_id: request_id.to_string(),
+                    kind: target.kind,
+                    target_id: target.id,
+                    label: target.label,
+                    consumer_label,
+                    needs_approval,
+                },
+            );
+        }
+    }
+}
+
+/// The whole gate an open request must pass, kept pure so the policy can
+/// be tested without any relay or HTTP plumbing. Order matters only for the
+/// refusal reason the peer is shown; any single failure refuses.
+pub(crate) fn decide_open(
+    relay: &RelayProviderState,
+    kind: &str,
+    target_id: &str,
+) -> Result<RelayOpenTarget, &'static str> {
+    let policy = &relay.policy;
+    if !policy.enabled {
+        return Err("relay_disabled");
+    }
+    let kind_allowed = match kind {
+        "local_shell" => policy.allow_open_shell,
+        "serial" => policy.allow_open_serial,
+        "bookmark" => policy.allow_open_bookmark,
+        _ => false,
+    };
+    if !kind_allowed {
+        return Err("open_kind_disabled");
+    }
+    if relay.relay_peer_count() >= policy.max_concurrent_peers.max(1) as usize {
+        return Err("busy");
+    }
+    // An id this device never advertised is refused outright, so a stale or
+    // guessed target can never start anything.
+    relay
+        .targets
+        .iter()
+        .find(|candidate| candidate.kind == kind && candidate.id == target_id)
+        .cloned()
+        .ok_or("unknown_target")
+}
+
+/// Tell the control plane what happened, so the waiting peer stops polling.
+pub(crate) async fn resolve_open(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+    request_id: &str,
+    session_id: Option<&str>,
+    reason: Option<&str>,
+) {
+    let device = inner.lock().ok().and_then(|guard| guard.device.clone());
+    let Some(device) = device else { return };
+    let _ = client
+        .post(format!(
+            "{}/api/v1/auraterm/console/relay/opens/{}/resolve",
+            device.base_url, request_id
+        ))
+        .header("Authorization", format!("Bearer {}", device.credential))
+        .json(&json!({"session_id": session_id, "reason": reason}))
+        .send()
+        .await;
+}
+
+/// The frontend calls this once it has opened (or refused to open) the tab.
+#[tauri::command]
+pub async fn relay_resolve_open(
+    state: State<'_, CloudBridgeState>,
+    request_id: String,
+    session_id: Option<String>,
+    reason: Option<String>,
+) -> Result<(), String> {
+    resolve_open(
+        &state.client,
+        &state.inner,
+        &request_id,
+        session_id.as_deref(),
+        reason.as_deref(),
+    )
+    .await;
+    Ok(())
 }
 
 // ── Tauri commands ──────────────────────────────────────────────────────────
@@ -1269,6 +1436,97 @@ mod tests {
                       json!({"kind": "INPUT", "fence": fence, "input_seq": 1, "data_hex": "41"})).await;
             assert!(harness.written.lock().unwrap().is_empty(),
                     "a read-only share must refuse TX even under a live grant");
+        });
+    }
+
+    // ── phase 4: the open gate ─────────────────────────────────────────────
+
+    fn open_state(policy: LiveRelaySettings, targets: Vec<RelayOpenTarget>) -> RelayProviderState {
+        RelayProviderState {
+            policy,
+            targets,
+            ..RelayProviderState::default()
+        }
+    }
+
+    fn shell_target() -> RelayOpenTarget {
+        RelayOpenTarget {
+            kind: "local_shell".into(),
+            id: "shell".into(),
+            label: "Local Shell".into(),
+        }
+    }
+
+    /// Every gate defaults closed: a fresh install refuses every kind.
+    #[test]
+    fn open_is_refused_by_default() {
+        let state = open_state(LiveRelaySettings::default(), vec![shell_target()]);
+        assert_eq!(decide_open(&state, "local_shell", "shell"), Err("relay_disabled"));
+
+        // Relay on, but the per-kind switches are still off.
+        let mut policy = enabled_policy(false);
+        policy.allow_open_shell = false;
+        let state = open_state(policy, vec![shell_target()]);
+        assert_eq!(decide_open(&state, "local_shell", "shell"), Err("open_kind_disabled"));
+        assert_eq!(decide_open(&state, "serial", "bm:1"), Err("open_kind_disabled"));
+        assert_eq!(decide_open(&state, "bookmark", "bm:1"), Err("open_kind_disabled"));
+    }
+
+    /// A kind switch only opens its own kind.
+    #[test]
+    fn open_switches_are_per_kind() {
+        let mut policy = enabled_policy(false);
+        policy.allow_open_shell = true;
+        let targets = vec![
+            shell_target(),
+            RelayOpenTarget { kind: "serial".into(), id: "bm:s".into(), label: "COM3".into() },
+            RelayOpenTarget { kind: "bookmark".into(), id: "bm:b".into(), label: "prod".into() },
+        ];
+        let state = open_state(policy, targets);
+        assert_eq!(decide_open(&state, "local_shell", "shell").unwrap().id, "shell");
+        assert_eq!(decide_open(&state, "serial", "bm:s"), Err("open_kind_disabled"));
+        assert_eq!(decide_open(&state, "bookmark", "bm:b"), Err("open_kind_disabled"));
+    }
+
+    /// A peer may only name an id this device itself advertised — no
+    /// guessing, no stale ids, and never a program or path of its own.
+    #[test]
+    fn open_only_accepts_an_advertised_target_id() {
+        let mut policy = enabled_policy(false);
+        policy.allow_open_bookmark = true;
+        let state = open_state(policy, vec![RelayOpenTarget {
+            kind: "bookmark".into(),
+            id: "bm:known".into(),
+            label: "prod-web".into(),
+        }]);
+        assert_eq!(decide_open(&state, "bookmark", "bm:known").unwrap().label, "prod-web");
+        assert_eq!(decide_open(&state, "bookmark", "bm:guessed"), Err("unknown_target"));
+        // A shell-shaped id under a kind it was not advertised for is not a
+        // way in either.
+        assert_eq!(decide_open(&state, "bookmark", "shell"), Err("unknown_target"));
+        assert_eq!(decide_open(&state, "not_a_kind", "bm:known"), Err("open_kind_disabled"));
+    }
+
+    /// The concurrency cap covers opening, not just attaching.
+    #[test]
+    fn open_respects_the_concurrency_cap() {
+        tauri::async_runtime::block_on(async {
+            let mut policy = enabled_policy(false);
+            policy.allow_open_shell = true;
+            policy.max_concurrent_peers = 1;
+            let mut harness = harness(policy);
+            harness.state.inner.lock().unwrap().relay.targets = vec![shell_target()];
+            // No peers yet: allowed.
+            {
+                let guard = harness.state.inner.lock().unwrap();
+                assert!(decide_open(&guard.relay, "local_shell", "shell").is_ok());
+            }
+            // One peer attaches, filling the cap.
+            let cipher = knock(&mut harness).await;
+            let _state = next_decrypted(&mut harness, &cipher).await;
+            let _snapshot = next_decrypted(&mut harness, &cipher).await;
+            let guard = harness.state.inner.lock().unwrap();
+            assert_eq!(decide_open(&guard.relay, "local_shell", "shell"), Err("busy"));
         });
     }
 

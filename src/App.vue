@@ -36,6 +36,7 @@ import {
 import AiAssistantPanel from "./AiAssistantPanel.vue";
 import PromptDialogHost from "./PromptDialogHost.vue";
 import ImportPreviewHost from "./ImportPreviewHost.vue";
+import { confirmDialog } from "./nativeDialogs";
 import { aiHasApiKey } from "./ai";
 import {
   cloudBridgeStatus,
@@ -47,13 +48,18 @@ import {
 } from "./cloudBridge";
 import {
   relayKick,
+  relayOpen,
   relayProviderStatus,
+  relayResolveOpen,
   relayRespondKnock,
   relayRevokeAllControl,
   relaySetControl,
+  setRelayOpenTargets,
   type RelayAttachTarget,
   type RelayDeviceEntry,
   type RelayKnock,
+  type RelayOpenRequest,
+  type RelayOpenTarget,
   type RelayProviderStatus,
 } from "./liveRelay";
 import { restoreAccount } from "./account";
@@ -568,6 +574,7 @@ onMounted(async () => {
     // for the Cloud menu.
     void setCloudBridgeAllowRemoteSend(settings.value.allowRemoteSend).catch(() => {});
     void setCloudBridgeRelayPolicy(settings.value.liveRelay).catch(() => {});
+    void refreshRelayOpenTargets();
     void refreshSyncView()
       .catch(() => {})
       .finally(() => syncCloudMenuState());
@@ -631,6 +638,9 @@ onMounted(async () => {
   }));
   cleanupFns.push(await listen("relay-peers-changed", () => {
     void refreshRelayStatus();
+  }));
+  cleanupFns.push(await listen<RelayOpenRequest>("relay-open-request", ({ payload }) => {
+    void handleRelayOpenRequest(payload);
   }));
   cleanupFns.push(await listen<AssistKnock>("assist-guest-knock", ({ payload }) => {
     assistKnocks.value = [
@@ -901,11 +911,26 @@ function handleOpenLiveRelay() {
   void refreshRelayStatus();
 }
 
+/** Ask a sibling device to open a fresh session, then attach to it. */
+async function handleRelayOpen(device: RelayDeviceEntry, target: RelayOpenTarget, wantControl: boolean) {
+  showLiveRelay.value = false;
+  showCloudToast(t("liveRelay.openWaiting", { device: device.label }));
+  try {
+    const sessionId = await relayOpen(device.device_id, target.kind, target.id);
+    openRelayTab(device, sessionId, target.label, wantControl);
+  } catch (error) {
+    showCloudToast(String(error), true);
+  }
+}
+
 /** Attach to a sibling device's shared session in a new tab. */
 function handleRelayAttach(device: RelayDeviceEntry, target: RelayAttachTarget, wantControl: boolean) {
   showLiveRelay.value = false;
+  openRelayTab(device, target.session_id, target.share_label || t("liveRelay.untitledShare"), wantControl);
+}
+
+function openRelayTab(device: RelayDeviceEntry, sessionId: string, shareLabel: string, wantControl: boolean) {
   const newId = mintTabId();
-  const shareLabel = target.share_label || t("liveRelay.untitledShare");
   tabs.value = [...tabs.value, {
     id: newId,
     title: t("liveRelay.tabTitle", { device: device.label }),
@@ -913,7 +938,7 @@ function handleRelayAttach(device: RelayDeviceEntry, target: RelayAttachTarget, 
       protocol: "relay",
       relayConfig: {
         deviceId: device.device_id,
-        sessionId: target.session_id,
+        sessionId,
         deviceLabel: device.label,
         shareLabel,
         wantControl,
@@ -936,6 +961,124 @@ function handleToggleRelayEnabled() {
     ...settingsRef.value,
     liveRelay: { ...settingsRef.value.liveRelay, enabled: next },
   });
+}
+
+/**
+ * Publish what this device is willing to open for a peer. Only the kinds
+ * the user switched on are listed; the ids are opaque to everyone else and
+ * are resolved back to a real session by `openRelayTarget` below.
+ */
+async function refreshRelayOpenTargets() {
+  if (!isMainWindow) return;
+  const policy = settingsRef.value.liveRelay;
+  const targets: RelayOpenTarget[] = [];
+  if (policy.enabled && policy.allowOpenShell) {
+    targets.push({ kind: "local_shell", id: "shell", label: t("liveRelay.targetLocalShell") });
+  }
+  if (policy.enabled && (policy.allowOpenSerial || policy.allowOpenBookmark)) {
+    try {
+      const connections = await invoke<SavedConnection[]>("get_connections");
+      for (const connection of connections) {
+        const isSerial = isSerialProtocol(connection.protocol);
+        if (isSerial && !policy.allowOpenSerial) continue;
+        if (!isSerial && !policy.allowOpenBookmark) continue;
+        targets.push({
+          kind: isSerial ? "serial" : "bookmark",
+          id: `bm:${connection.id}`,
+          label: connection.name,
+        });
+      }
+    } catch {
+      // A bookmark store we cannot read simply advertises nothing.
+    }
+  }
+  await setRelayOpenTargets(targets).catch(() => {});
+}
+
+/**
+ * A peer asked this device to open a session. Resolve the opaque target id
+ * back to a real tab, share it, and tell the waiting peer which session it
+ * became. The tab is a normal, visible one — the local user can see exactly
+ * what was started and close it like any other.
+ */
+async function handleRelayOpenRequest(request: RelayOpenRequest) {
+  const refuse = (reason: string) => void relayResolveOpen(request.requestId, null, reason).catch(() => {});
+  if (request.needsApproval) {
+    const approved = await confirmDialog(
+      t("liveRelay.openConfirm", {
+        name: request.consumerLabel || t("liveRelay.unknownDevice"),
+        target: request.label,
+      }),
+    ).catch(() => false);
+    if (!approved) {
+      refuse("denied");
+      return;
+    }
+  }
+  let newId: string | null = null;
+  try {
+    newId = await openRelayTarget(request);
+  } catch {
+    newId = null;
+  }
+  if (!newId) {
+    refuse("unknown_target");
+    return;
+  }
+  // Share it so the peer has something to attach to. The session needs a
+  // moment to come up before the bridge will take it.
+  const localId = newId;
+  const shared = await shareWhenReady(localId, request.label);
+  if (!shared) {
+    refuse("share_failed");
+    return;
+  }
+  void relayResolveOpen(request.requestId, shared, null).catch(() => {});
+  void refreshCloudBridgeStatus().catch(() => {});
+}
+
+/** Turn an advertised target id back into a real tab; null if unknown. */
+async function openRelayTarget(request: RelayOpenRequest): Promise<string | null> {
+  const policy = settingsRef.value.liveRelay;
+  if (request.kind === "local_shell") {
+    if (!policy.allowOpenShell) return null;
+    const newId = mintTabId();
+    // The shell path and cwd are this device's own; a peer can name
+    // neither (see pty_broker.rs::OpenTerminalRequest).
+    const cwd = window.getStartupDir?.() ?? undefined;
+    tabs.value = [...tabs.value, { id: newId, title: request.label, session: { protocol: "local", cwd } }];
+    assignTabToFocusedPane(newId);
+    return newId;
+  }
+  const connectionId = request.targetId.startsWith("bm:") ? request.targetId.slice(3) : "";
+  if (!connectionId) return null;
+  const connections = await invoke<SavedConnection[]>("get_connections").catch(() => [] as SavedConnection[]);
+  const connection = connections.find((candidate) => candidate.id === connectionId);
+  if (!connection) return null;
+  const isSerial = isSerialProtocol(connection.protocol);
+  if (isSerial ? !policy.allowOpenSerial : !policy.allowOpenBookmark) return null;
+  // handleBookmarkConnect builds the session from the *local* bookmark, so
+  // passwords, keys and jump-host secrets never leave this machine.
+  const before = new Set(tabs.value.map((tab) => tab.id));
+  handleBookmarkConnect(connection);
+  return tabs.value.find((tab) => !before.has(tab.id))?.id ?? null;
+}
+
+/** Share a freshly opened tab, retrying while its session comes up. */
+async function shareWhenReady(localSessionId: string, label: string): Promise<string | null> {
+  const tab = tabs.value.find((candidate) => candidate.id === localSessionId);
+  if (!tab || tab.session.protocol === "assist" || tab.session.protocol === "relay") return null;
+  const protocol = sharedSessionProtocol(tab.session.protocol);
+  const txPolicy = settingsRef.value.allowRemoteSend ? "read_write" : "read_only";
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const share = await shareSessionToCloud(localSessionId, protocol, label, txPolicy);
+      return share.cloudSessionId;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  return null;
 }
 
 async function refreshRelayStatus() {
@@ -1143,6 +1286,9 @@ watch(() => settings.value.allowRemoteSend, (allowed, was) => {
 watch(() => settings.value.liveRelay, (policy) => {
   if (!isMainWindow) return;
   void setCloudBridgeRelayPolicy(policy).catch(() => {});
+  // The advertised targets follow the switches: turning a kind off
+  // withdraws its labels from the account's server on the next report.
+  void refreshRelayOpenTargets();
 }, { deep: true });
 
 function showCloudToast(text: string, error = false) {
@@ -3313,6 +3459,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       :status="relayStatus"
       @close="showLiveRelay = false"
       @attach="handleRelayAttach"
+      @open="handleRelayOpen"
       @kick="handleRelayKick"
       @set-control="handleRelaySetControl"
       @open-account="showLiveRelay = false; showAccount = true"

@@ -362,6 +362,123 @@ pub async fn relay_release_control(state: State<'_, RelayClientState>, id: Strin
     state.inner().tabs.send(&id, json!({"kind": "CONTROL_RELEASE"})).await
 }
 
+#[derive(Deserialize)]
+struct OpenRequestResponse {
+    request_id: String,
+}
+
+#[derive(Deserialize)]
+struct OpenStatusResponse {
+    state: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// How long a consumer waits for the other device's answer, and how often
+/// it asks. The provider side denies an unanswered knock at 60s, so this
+/// outlives that by enough to report the refusal rather than a timeout.
+const OPEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(700);
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Ask a sibling device to open a fresh session and wait for it to say
+/// which session that became. Returns the cloud session id; the caller
+/// then attaches to it through the ordinary path.
+#[tauri::command]
+pub async fn relay_open(
+    bridge: State<'_, CloudBridgeState>,
+    device_id: String,
+    kind: String,
+    target_id: String,
+) -> Result<String, String> {
+    let device = enrolled_device(bridge.inner())?;
+    let http = bridge.client.clone();
+    let bearer = format!("Bearer {}", device.credential);
+
+    let response = http
+        .post(format!("{}/api/v1/auraterm/console/connect-challenge", device.base_url))
+        .header("Authorization", &bearer)
+        .json(&json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach AuraXLab: {e}"))?;
+    if !response.status().is_success() {
+        return Err(api_error(response).await);
+    }
+    let challenge: ChallengeResponse = response.json().await.map_err(|e| e.to_string())?;
+    // The open target stands in for the session id in the signed context,
+    // so a captured proof cannot be replayed at a different target.
+    let context = format!(
+        "auraxlab-console|relay-grant|{}|{}|open|{}|{}|{}",
+        device.device_id,
+        device_id,
+        target_id,
+        sha256_hex(""),
+        challenge.nonce
+    );
+    let proof = ed25519_sign_b64(&device.identity_key, &context)?;
+    let response = http
+        .post(format!("{}/api/v1/auraterm/console/relay/opens", device.base_url))
+        .header("Authorization", &bearer)
+        .json(&json!({
+            "target_device_id": device_id, "open_kind": kind,
+            "target_id": target_id,
+            "nonce": challenge.nonce, "proof": proof,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach AuraXLab: {e}"))?;
+    if !response.status().is_success() {
+        return Err(api_error(response).await);
+    }
+    let request: OpenRequestResponse = response.json().await.map_err(|e| e.to_string())?;
+
+    let deadline = std::time::Instant::now() + OPEN_TIMEOUT;
+    loop {
+        tokio::time::sleep(OPEN_POLL_INTERVAL).await;
+        let response = http
+            .get(format!(
+                "{}/api/v1/auraterm/console/relay/opens/{}",
+                device.base_url, request.request_id
+            ))
+            .header("Authorization", &bearer)
+            .send()
+            .await
+            .map_err(|e| format!("could not reach AuraXLab: {e}"))?;
+        if !response.status().is_success() {
+            return Err(api_error(response).await);
+        }
+        let status: OpenStatusResponse = response.json().await.map_err(|e| e.to_string())?;
+        match status.state.as_str() {
+            "ready" => {
+                return status
+                    .session_id
+                    .ok_or_else(|| "the other device reported no session".to_string())
+            }
+            "denied" => return Err(open_refusal(status.reason.as_deref())),
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("The other device did not answer in time.".into());
+        }
+    }
+}
+
+/// Turn the provider's machine-readable refusal into something a person
+/// can act on — the reasons name a switch they can go and flip.
+fn open_refusal(reason: Option<&str>) -> String {
+    match reason.unwrap_or("") {
+        "relay_disabled" => "Live Relay is switched off on that device.".into(),
+        "open_kind_disabled" => "That device does not allow opening this kind of session.".into(),
+        "unknown_target" => "That device no longer offers this target.".into(),
+        "busy" => "That device already has as many peers as it allows.".into(),
+        "denied" => "The other device declined the request.".into(),
+        other if other.is_empty() => "The other device declined the request.".into(),
+        other => format!("The other device declined the request ({other})."),
+    }
+}
+
 #[tauri::command]
 pub fn close_relay_session(state: State<'_, RelayClientState>, id: String) -> Result<(), String> {
     state.inner().tabs.close(&id)

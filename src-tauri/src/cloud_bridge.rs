@@ -204,10 +204,15 @@ pub(crate) struct RelayPolicySummary {
     enabled: bool,
     allow_attach: bool,
     open_kinds: Vec<String>,
+    /// What a peer's picker may list. Reported only for the kinds the user
+    /// switched on, so enabling one is also the moment its labels become
+    /// visible to the account's own server.
+    open_targets: Vec<crate::relay_provider::RelayOpenTarget>,
 }
 
 impl RelayPolicySummary {
-    pub(crate) fn from_settings(policy: &crate::settings::LiveRelaySettings) -> Self {
+    pub(crate) fn from_state(relay: &crate::relay_provider::RelayProviderState) -> Self {
+        let policy = &relay.policy;
         let mut open_kinds = Vec::new();
         if policy.allow_open_shell {
             open_kinds.push("local_shell".to_string());
@@ -218,10 +223,21 @@ impl RelayPolicySummary {
         if policy.allow_open_bookmark {
             open_kinds.push("bookmark".to_string());
         }
+        let open_targets = if policy.enabled {
+            relay
+                .targets
+                .iter()
+                .filter(|target| open_kinds.iter().any(|kind| kind == &target.kind))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self {
             enabled: policy.enabled,
             allow_attach: policy.allow_attach,
             open_kinds,
+            open_targets,
         }
     }
 }
@@ -893,7 +909,7 @@ async fn connect_attempt(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner
     let relay_policy = inner
         .lock()
         .map_err(|e| e.to_string())
-        .map(|guard| RelayPolicySummary::from_settings(&guard.relay.policy))?;
+        .map(|guard| RelayPolicySummary::from_state(&guard.relay))?;
     let grant: GrantResponse = json_response(
         client
             .post(format!("{}/api/v1/auraterm/console/connect-grant", device.base_url))
@@ -1033,7 +1049,7 @@ async fn idle_presence_ping(client: &reqwest::Client, inner: &Arc<Mutex<BridgeIn
     let (device, relay_policy) = {
         let guard = inner.lock().map_err(|e| e.to_string())?;
         let device = guard.device.clone().ok_or_else(|| "device is not enrolled".to_string())?;
-        (device, RelayPolicySummary::from_settings(&guard.relay.policy))
+        (device, RelayPolicySummary::from_state(&guard.relay))
     };
     let response = client
         .post(format!("{}/api/v1/auraterm/console/presence", device.base_url))
@@ -1870,6 +1886,30 @@ pub(crate) mod test_support {
 #[tauri::command]
 pub fn cloud_bridge_set_allow_remote_send(state: State<'_, CloudBridgeState>, allowed: bool) -> Result<(), String> {
     state.inner.lock().map_err(|e| e.to_string())?.allow_remote_send = allowed;
+    Ok(())
+}
+
+/// Mirror the Live Relay open targets the frontend can enumerate (its
+/// resolved shell, the serial ports it sees, its bookmarks) into the
+/// bridge. This is the whitelist a remote open request is checked against:
+/// a peer may only name an id that is already on this list.
+#[tauri::command]
+pub fn cloud_bridge_set_relay_targets(
+    state: State<'_, CloudBridgeState>,
+    targets: Vec<crate::relay_provider::RelayOpenTarget>,
+) -> Result<(), String> {
+    let enrolled = {
+        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+        guard.relay.targets = targets;
+        guard.device.is_some()
+    };
+    if enrolled {
+        let client = state.client.clone();
+        let inner = Arc::clone(&state.inner);
+        tauri::async_runtime::spawn(async move {
+            let _ = idle_presence_ping(&client, &inner).await;
+        });
+    }
     Ok(())
 }
 
