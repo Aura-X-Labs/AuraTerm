@@ -223,8 +223,8 @@ fn default_ai_model() -> String { "claude-opus-4-8".to_string() }
 
 /// Live Relay provider policy (design `docs/plans/live-sync-design.md` §5.8):
 /// whether *this* machine may be reached from the account's other AuraTerm
-/// devices, and what they may do. No UI until Phase 4 — every gate defaults
-/// closed except plain attach. A summary of this policy rides along with the
+/// devices, and what they may do. Every gate defaults closed except plain
+/// attach. A summary of this policy rides along with the
 /// device's presence ping so the server can refuse doomed grant requests
 /// early; the local process stays the authority on every actual request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,7 +246,9 @@ pub struct LiveRelaySettings {
     /// `allow_remote_send` gate shared with Cloud Console).
     pub allow_remote_input: bool,
     pub max_concurrent_peers: u32,
-    /// Disconnect a peer after this long without input; 0 disables.
+    /// Take control back from a peer that stops typing for this long;
+    /// 0 disables. Silent viewers are left alone — watching without
+    /// touching the keyboard is the normal case for one.
     pub idle_timeout_minutes: u32,
 }
 
@@ -363,7 +365,7 @@ pub struct Settings {
     /// AI assistant configuration (API key excluded; stored encrypted separately).
     #[serde(default)]
     pub ai_config: AiConfig,
-    /// Live Relay provider policy (no UI yet; defaults keep the device closed).
+    /// Live Relay provider policy; defaults keep the device unreachable.
     #[serde(default)]
     pub live_relay: LiveRelaySettings,
 }

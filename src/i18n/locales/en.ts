@@ -169,6 +169,8 @@ const en = {
     relayOpenSerialHint: "Off by default. Turning this on also reports those bookmarks' names to your AuraXLab account, so the other device can list them",
     relayOpenBookmark: "Live Relay: let peers connect with my SSH/Telnet bookmarks",
     relayOpenBookmarkHint: "Off by default. Credentials never leave this device — it connects using its own stored bookmark. Turning this on reports those bookmarks' names to your AuraXLab account so the other device can list them",
+    relayIdleTimeout: "Live Relay: take control back after idle minutes",
+    relayIdleTimeoutHint: "A peer that stops typing for this long loses write access and goes back to watching. 0 disables it. Viewers are never disconnected for being quiet.",
     copyOnSelect: "Copy on select",
     copyOnSelectHint:
       "Auto-copy selected text to clipboard; Ctrl+C consumes key when selection exists (no ^C to PTY)",
@@ -534,14 +536,14 @@ const en = {
     signedOut: "Signed out.",
     signedOutStillBound:
       "Signed out. This device stays bound and reachable via Live Console — use \"Unbind this device\" below to remove it.",
-    trafficSection: "Live Console traffic",
+    trafficSection: "Live Sync traffic",
     trafficTotal: "Total",
     trafficUp: "Upload",
     trafficDown: "Download",
     trafficSessions: "Sessions",
     trafficUnavailable: "Traffic stats are not available right now.",
     trafficHint:
-      "Relay bytes for this account's shared sessions (payload size only — content stays end-to-end encrypted).",
+      "Relay bytes for this account's shared sessions — Live Console viewers, Live Share guests and Live Relay peers alike (payload size only; content stays end-to-end encrypted).",
     refresh: "Refresh",
     deviceOnlyMigration:
       "A legacy device binding was found. Sign in again to verify ownership before Live Console can reconnect.",
