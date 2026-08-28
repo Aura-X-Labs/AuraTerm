@@ -142,9 +142,9 @@ impl RxRing {
 pub(crate) struct SharedSession {
     pub(crate) cloud_session_id: String,
     pub(crate) label: String,
-    protocol: SessionProtocol,
+    pub(crate) protocol: SessionProtocol,
     subscription: SubscriptionToken,
-    policy: SessionPolicy,
+    pub(crate) policy: SessionPolicy,
     pub(crate) ring: Arc<Mutex<RxRing>>,
     output_notify: Arc<tokio::sync::Notify>,
     pub(crate) peers: HashMap<String, PeerCipher>,
@@ -186,7 +186,7 @@ pub(crate) struct BridgeInner {
     /// Global "Allow Remote Send" gate mirrored from the persisted frontend
     /// setting (`allowRemoteSend`). Defaults to `false` so remote INPUT stays
     /// blocked until the frontend pushes the real value — fail closed.
-    allow_remote_send: bool,
+    pub(crate) allow_remote_send: bool,
     /// Live Relay provider state (policy mirror, pending knocks, admitted
     /// peers). The policy defaults to all-closed until the frontend pushes
     /// the persisted value — fail closed; the summary derived from it is
@@ -528,7 +528,7 @@ pub(crate) fn ed25519_verify(public_key: &[u8], message: &[u8], signature: &[u8]
     verifying.verify(message, &ed25519_dalek::Signature::from_bytes(&sig_bytes)).is_ok()
 }
 
-fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
     if value.is_empty() || value.len() % 2 != 0 || value.len() > MAX_TX_BYTES * 2 {
         return Err("invalid TX byte length".into());
     }
@@ -1134,7 +1134,7 @@ async fn process_inbound_frame(
     if crate::assist_host::handle_frame(client, inner, port, app, &frame).await {
         return;
     }
-    if crate::relay_provider::handle_frame(client, inner, app, &frame).await {
+    if crate::relay_provider::handle_frame(client, inner, port, app, &frame).await {
         return;
     }
     let kind = frame.get("kind").and_then(|value| value.as_str());
@@ -1835,6 +1835,7 @@ pub(crate) mod test_support {
         local_id: &str,
         cloud_id: &str,
         label: &str,
+        tx: TxPolicy,
     ) -> Arc<Mutex<RxRing>> {
         let subscription = state.port.subscribe_rx(local_id, Box::new(|_| {}));
         let ring = Arc::new(Mutex::new(RxRing::new(DEFAULT_RX_RING_BYTES)));
@@ -1847,7 +1848,7 @@ pub(crate) mod test_support {
                 protocol: SessionProtocol::Local,
                 subscription,
                 policy: SessionPolicy {
-                    tx: TxPolicy::ReadOnly,
+                    tx,
                     tx_expires_at: None,
                     rx_ring_bytes: DEFAULT_RX_RING_BYTES,
                 },

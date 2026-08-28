@@ -14,10 +14,15 @@ import {
 const props = defineProps<{ enrolled: boolean; status: RelayProviderStatus }>();
 const emit = defineEmits<{
   close: [];
-  attach: [device: RelayDeviceEntry, target: RelayAttachTarget];
+  attach: [device: RelayDeviceEntry, target: RelayAttachTarget, wantControl: boolean];
   kick: [connectionId: string];
+  setControl: [connectionId: string, grant: boolean];
   openAccount: [];
 }>();
+
+/** Ask for a ticket that may request control. Only meaningful on a
+ *  writable share; the provider still decides whether it is ever granted. */
+const wantControl = ref(true);
 
 const devices = ref<RelayDeviceEntry[]>([]);
 const selectedId = ref<string | null>(null);
@@ -119,7 +124,7 @@ onMounted(refresh);
           <p v-if="blockedReason(selected)" class="relay-hint">{{ blockedReason(selected) }}</p>
           <ul v-else class="relay-targets">
             <li v-for="target in selected.attach_targets" :key="target.session_id">
-              <button type="button" class="relay-target" @click="emit('attach', selected, target)">
+              <button type="button" class="relay-target" @click="emit('attach', selected, target, wantControl && !target.read_only)">
                 <span class="relay-target-label">{{ target.share_label || t('liveRelay.untitledShare') }}</span>
                 <span class="relay-target-meta">
                   {{ target.source_protocol || '—' }} ·
@@ -128,7 +133,11 @@ onMounted(refresh);
               </button>
             </li>
           </ul>
-          <p class="relay-hint">{{ t('liveRelay.viewOnlyNote') }}</p>
+          <label v-if="selected.attach_targets.some((tgt) => !tgt.read_only)" class="relay-check">
+            <input v-model="wantControl" type="checkbox">
+            <span>{{ t('liveRelay.wantControl') }}</span>
+          </label>
+          <p class="relay-hint">{{ t('liveRelay.controlNote') }}</p>
         </template>
 
         <!-- Provider side: who is attached to *this* device right now. -->
@@ -141,10 +150,22 @@ onMounted(refresh);
                 <span class="relay-device-label">{{ peer.label || t('liveRelay.unknownDevice') }}</span>
                 <span class="relay-device-meta">
                   {{ peer.shareLabel }} ·
-                  {{ peer.state === 'pending' ? t('liveRelay.peerPending') : t('liveRelay.peerViewing') }} ·
-                  <span class="relay-mono">{{ peer.fingerprint }}</span>
+                  <template v-if="peer.state === 'pending'">{{ t('liveRelay.peerPending') }}</template>
+                  <template v-else-if="peer.state === 'controller'">{{ t('liveRelay.peerControlling') }}</template>
+                  <template v-else-if="peer.controlRequested">{{ t('liveRelay.peerAsking') }}</template>
+                  <template v-else>{{ t('liveRelay.peerViewing') }}</template>
+                  · <span class="relay-mono">{{ peer.fingerprint }}</span>
                 </span>
               </span>
+              <button
+                v-if="peer.canControl && peer.state !== 'pending'"
+                type="button"
+                class="relay-btn"
+                :class="{ primary: peer.controlRequested }"
+                @click="emit('setControl', peer.connectionId, peer.state !== 'controller')"
+              >
+                {{ peer.state === 'controller' ? t('liveRelay.revokeControl') : t('liveRelay.grantControl') }}
+              </button>
               <button type="button" class="relay-btn danger" @click="emit('kick', peer.connectionId)">
                 {{ t('liveRelay.kick') }}
               </button>
@@ -188,4 +209,5 @@ onMounted(refresh);
 .relay-peer { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--ui-input-bg,#26262b); border: 1px solid var(--ui-border,#3a3a3a); border-radius: 6px; }
 .relay-peer .relay-device-main { flex: 1; }
 .relay-mono { font-family: ui-monospace,Consolas,monospace; }
+.relay-check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; margin-top: 2px; }
 </style>

@@ -49,6 +49,8 @@ import {
   relayKick,
   relayProviderStatus,
   relayRespondKnock,
+  relayRevokeAllControl,
+  relaySetControl,
   type RelayAttachTarget,
   type RelayDeviceEntry,
   type RelayKnock,
@@ -802,18 +804,19 @@ async function refreshCloudBridgeStatus() {
 // relay's E2EE_INIT frames, so "control" means a controller is attached even
 // while it is not typing. Hidden entirely until the device is bound.
 type CloudPillKind = "control" | "monitor" | "online" | "standby" | "reconnecting" | "offline" | "assist";
+// ── Live Sync status cluster (design 3.3) ─────────────────────────────────
+// Three independent indicators sharing one style, each opening its own
+// panel. They used to be one muxed pill, which hid Live Console state
+// whenever a Live Share was running.
+
+/** Live Console: relay link health plus who is watching this device. */
 const cloudStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
   const bridge = bridgeStatus.value;
   if (!bridge.enrolled) return null;
-  const assist = assistState.value;
-  if (assist) {
-    const controllers = assist.guests.filter((g) => g.role === "controller").length;
-    const viewers = assist.guests.filter((g) => g.role === "viewer").length;
-    if (controllers > 0) return { kind: "control", text: t("assist.statusControl", { n: controllers }) };
-    if (viewers > 0) return { kind: "assist", text: t("assist.statusViewers", { n: viewers }) };
-    return { kind: "assist", text: t("assist.statusWaiting") };
-  }
-  const watchers = bridge.shares.reduce((sum, share) => sum + share.viewerCount, 0);
+  // Relay peers ride the same share peer map; count only console viewers so
+  // the two indicators do not double-report the same person.
+  const relayPeers = relayStatus.value.peers.filter((peer) => peer.state === "viewer").length;
+  const watchers = Math.max(0, bridge.shares.reduce((sum, share) => sum + share.viewerCount, 0) - relayPeers);
   if (bridge.shares.some((share) => share.controllerAttached)) {
     return { kind: "control", text: t("cloudShare.statusControl") };
   }
@@ -825,12 +828,31 @@ const cloudStatusPill = computed<{ kind: CloudPillKind; text: string } | null>((
   if (bridge.standby) return { kind: "standby", text: t("cloudShare.statusStandby") };
   return { kind: "offline", text: t("cloudShare.statusOffline") };
 });
-// Only the main window owns the Cloud Console switch (see
+
+/** Live Share: only while a share is actually running. */
+const assistStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
+  const assist = assistState.value;
+  if (!assist) return null;
+  const controllers = assist.guests.filter((g) => g.role === "controller").length;
+  const viewers = assist.guests.filter((g) => g.role === "viewer").length;
+  if (controllers > 0) return { kind: "control", text: t("assist.statusControl", { n: controllers }) };
+  if (viewers > 0) return { kind: "assist", text: t("assist.statusViewers", { n: viewers }) };
+  return { kind: "assist", text: t("assist.statusWaiting") };
+});
+
+/** Live Relay: only while one of the account's own devices is attached. */
+const relayStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
+  const peers = relayStatus.value.peers;
+  if (peers.length === 0) return null;
+  const pending = peers.filter((peer) => peer.state === "pending").length;
+  if (pending > 0) return { kind: "assist", text: t("liveRelay.statusPending", { n: pending }) };
+  return { kind: "monitor", text: t("liveRelay.statusAttached", { n: peers.length }) };
+});
+
+// Only the main window owns the Live Console switch (see
 // handleToggleCloudConsole); child windows show a read-only pill.
 const cloudPillTitle = computed(() => (
-  assistState.value
-    ? t("assist.statusTooltip")
-    : isMainWindow ? t("cloudShare.statusTooltipToggle") : t("cloudShare.statusTooltip")
+  isMainWindow ? t("cloudShare.statusTooltipToggle") : t("cloudShare.statusTooltip")
 ));
 
 // ── Remote Assist host wiring ───────────────────────────────────────────────
@@ -880,7 +902,7 @@ function handleOpenLiveRelay() {
 }
 
 /** Attach to a sibling device's shared session in a new tab. */
-function handleRelayAttach(device: RelayDeviceEntry, target: RelayAttachTarget) {
+function handleRelayAttach(device: RelayDeviceEntry, target: RelayAttachTarget, wantControl: boolean) {
   showLiveRelay.value = false;
   const newId = mintTabId();
   const shareLabel = target.share_label || t("liveRelay.untitledShare");
@@ -894,10 +916,26 @@ function handleRelayAttach(device: RelayDeviceEntry, target: RelayAttachTarget) 
         sessionId: target.session_id,
         deviceLabel: device.label,
         shareLabel,
+        wantControl,
       },
     },
   }];
   assignTabToFocusedPane(newId);
+}
+
+function handleOpenConsoleWeb() {
+  closeOpenMenus();
+  void openExternalUrl("https://auraxlab.com/cloud/console").catch(() => {});
+}
+
+/** The Live Relay master gate. Off (default) means no device on this
+ *  account can attach here, whatever the server's cached policy says. */
+function handleToggleRelayEnabled() {
+  const next = !settings.value.liveRelay.enabled;
+  persistSettingsSilently({
+    ...settingsRef.value,
+    liveRelay: { ...settingsRef.value.liveRelay, enabled: next },
+  });
 }
 
 async function refreshRelayStatus() {
@@ -908,9 +946,23 @@ async function refreshRelayStatus() {
   }
 }
 
-function handleRelayKnockDecision(knock: RelayKnock, allow: boolean) {
+function handleRelayKnockDecision(knock: RelayKnock, allow: boolean, withControl: boolean) {
   relayKnocks.value = relayKnocks.value.filter((k) => k.connectionId !== knock.connectionId);
-  void relayRespondKnock(knock.connectionId, allow)
+  void relayRespondKnock(knock.connectionId, allow, withControl)
+    .catch(() => {})
+    .finally(() => void refreshRelayStatus());
+}
+
+/** Hand write access to a relay peer, or take it back. */
+function handleRelaySetControl(connectionId: string, grant: boolean) {
+  void relaySetControl(connectionId, grant)
+    .catch((error) => showCloudToast(String(error), true))
+    .finally(() => void refreshRelayStatus());
+}
+
+/** Panic button: nobody attached keeps write access. */
+function handleRelayRevokeAllControl() {
+  void relayRevokeAllControl()
     .catch(() => {})
     .finally(() => void refreshRelayStatus());
 }
@@ -927,14 +979,6 @@ function handleOpenRemoteAssist() {
   void refreshAssistState();
   // The dialog's sign-in gate reads bridgeStatus.enrolled; make it fresh.
   void refreshCloudBridgeStatus().catch(() => {});
-}
-
-function handleCloudPillClick() {
-  if (assistState.value) {
-    handleOpenRemoteAssist();
-  } else {
-    handleToggleCloudConsole();
-  }
 }
 
 function handleAssistKnockDecision(knock: AssistKnock, decision: "allow_view" | "allow_control" | "deny") {
@@ -2319,6 +2363,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor share session rx tx remote view follow active", run: () => handleToggleCloudConsole() },
     { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
     { id: "remote-assist", title: assistState.value ? t("assist.paletteManage") : t("assist.paletteStart"), group: t("palette.groups.app"), keywords: "remote assist help support code invite guest share screen pair", run: () => handleOpenRemoteAssist() },
+    { id: "live-relay-revoke", title: t("liveRelay.paletteRevoke"), group: t("palette.groups.app"), keywords: "live relay revoke control read only devices", run: () => handleRelayRevokeAllControl() },
     { id: "live-relay", title: t("liveRelay.palette"), group: t("palette.groups.app"), keywords: "live relay my devices attach own account remote access sibling", run: () => handleOpenLiveRelay() },
     { id: "join-assist", title: t("assist.paletteJoin"), group: t("palette.groups.app"), keywords: "join remote assist code guest help someone terminal", run: () => handleOpenJoinAssist() },
     { id: "remote-assist-revoke", title: t("assist.paletteRevoke"), group: t("palette.groups.app"), keywords: "remote assist revoke control kick stop input", run: () => handleRevokeAllAssistControl() },
@@ -2554,6 +2599,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                 <span class="titlebar-menu-item-check">{{ settings.allowRemoteSend ? '✓' : '' }}</span>
                 <span>{{ $t('menu.allowRemoteSend') }}</span>
               </button>
+              <button class="titlebar-menu-item" type="button" @click="handleOpenConsoleWeb">
+                <span>{{ $t('menu.openConsoleWeb') }}</span>
+              </button>
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleOpenRemoteAssist">
                 <span>{{ assistState ? $t('menu.remoteAssistManage') : $t('menu.remoteAssist') }}</span>
@@ -2564,6 +2612,10 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               <div class="titlebar-menu-separator" />
               <button class="titlebar-menu-item" type="button" @click="handleOpenLiveRelay">
                 <span>{{ $t('menu.liveRelay') }}</span>
+              </button>
+              <button class="titlebar-menu-item titlebar-menu-item--checkable" type="button" @click="closeOpenMenus(); handleToggleRelayEnabled()">
+                <span class="titlebar-menu-item-check">{{ settings.liveRelay.enabled ? '✓' : '' }}</span>
+                <span>{{ $t('menu.allowRelayIn') }}</span>
               </button>
             </div>
           </div>
@@ -3140,11 +3192,33 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               class="terminal-status-cloud"
               :class="`cloud-${cloudStatusPill.kind}`"
               :title="cloudPillTitle"
-              :disabled="!isMainWindow && !assistState"
-              @click="handleCloudPillClick"
+              :disabled="!isMainWindow"
+              @click="handleToggleCloudConsole"
             >
               <span class="cloud-status-dot" />
               {{ cloudStatusPill.text }}
+            </button>
+            <button
+              v-if="assistStatusPill"
+              type="button"
+              class="terminal-status-cloud"
+              :class="`cloud-${assistStatusPill.kind}`"
+              :title="$t('assist.statusTooltip')"
+              @click="handleOpenRemoteAssist"
+            >
+              <span class="cloud-status-dot" />
+              {{ assistStatusPill.text }}
+            </button>
+            <button
+              v-if="relayStatusPill"
+              type="button"
+              class="terminal-status-cloud"
+              :class="`cloud-${relayStatusPill.kind}`"
+              :title="$t('liveRelay.statusTooltip')"
+              @click="handleOpenLiveRelay"
+            >
+              <span class="cloud-status-dot" />
+              {{ relayStatusPill.text }}
             </button>
             <span v-if="activeCloudShare" class="terminal-status-pill">
               {{ activeCloudShare.txAllowed ? t('cloudShare.rxTx', { policy: activeCloudShare.txPolicy }) : t('cloudShare.rxOnly') }}
@@ -3240,6 +3314,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       @close="showLiveRelay = false"
       @attach="handleRelayAttach"
       @kick="handleRelayKick"
+      @set-control="handleRelaySetControl"
       @open-account="showLiveRelay = false; showAccount = true"
     />
     <LiveRelayKnockDialog :queue="relayKnocks" @decide="handleRelayKnockDecision" />

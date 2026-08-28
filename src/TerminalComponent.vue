@@ -201,14 +201,18 @@ function applyRemoteSize() {
   }
 }
 
+// Live Share guests and Live Relay tabs run the same control handshake on
+// their own IPC channel; the button is shared, the command is not.
 function requestAssistControl() {
   if (!ptyId.value) return;
-  void invoke("assist_request_control", { id: ptyId.value }).catch((error) => console.error("assist control request failed", error));
+  const command = isRelayGuest.value ? "relay_request_control" : "assist_request_control";
+  void invoke(command, { id: ptyId.value }).catch((error) => console.error("control request failed", error));
 }
 
 function releaseAssistControl() {
   if (!ptyId.value) return;
-  void invoke("assist_release_control", { id: ptyId.value }).catch((error) => console.error("assist control release failed", error));
+  const command = isRelayGuest.value ? "relay_release_control" : "assist_release_control";
+  void invoke(command, { id: ptyId.value }).catch((error) => console.error("control release failed", error));
 }
 const retryPassword = ref("");
 const mfaEvent = ref<SshMfaPromptEvent | null>(null);
@@ -1219,6 +1223,7 @@ onMounted(() => {
               id: newId,
               deviceId: session.relayConfig.deviceId,
               sessionId: session.relayConfig.sessionId,
+              wantControl: session.relayConfig.wantControl === true,
             });
             terminal.writeln(t("liveRelay.tabConnected", { fingerprint: joined.fingerprint }));
             break;

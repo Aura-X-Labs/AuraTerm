@@ -15,11 +15,12 @@
 //! relay_viewer cannot even send INPUT (phase 3 territory).
 
 use crate::cloud_bridge::{
-    derive_peer_cipher, e2ee_context, ed25519_sign_b64, encode_hex, send_e2ee_frame, send_frame,
-    sha256_hex, BridgeInner, CloudBridgeState,
+    decode_hex, derive_peer_cipher, e2ee_context, ed25519_sign_b64, encode_hex, send_e2ee_frame,
+    send_frame, sha256_hex, BridgeInner, CloudBridgeState, RemoteTxEvent, MAX_TX_BYTES,
 };
-use crate::e2ee::{sas_fingerprint, PeerCipher};
+use crate::e2ee::{sas_fingerprint, PeerCipher, DIRECTION_BROWSER};
 use crate::settings::LiveRelaySettings;
+use crate::shared_session::SharedSessionPort;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -51,6 +52,9 @@ pub(crate) struct PendingRelayPeer {
     fingerprint: String,
     consumer_label: String,
     consumer_device_id: String,
+    /// The relay admitted it as `relay_controller`, so it may ask for
+    /// control. It still starts as a viewer.
+    may_request_control: bool,
 }
 
 /// An admitted relay peer (also registered in the share's peer map, which
@@ -59,10 +63,20 @@ pub(crate) struct RelayPeerMeta {
     cloud_session_id: String,
     fingerprint: String,
     consumer_label: String,
-    /// Kept for phase 3's per-device audit trail and revocation UX.
     #[allow(dead_code)]
     consumer_device_id: String,
     joined_at: SystemTime,
+    /// True once the local user granted this peer control. Write authority
+    /// is this flag plus a matching fence — never anything the server said.
+    controller: bool,
+    /// Set when the peer's relay role lets it send upstream at all; a
+    /// `relay_viewer` is refused by the relay before we ever see a frame.
+    may_request_control: bool,
+    /// Highest `input_seq` applied, for de-duplication within one fence.
+    last_input_seq: u64,
+    /// Set while the peer asked for control and the local user has not
+    /// answered yet.
+    control_requested: bool,
 }
 
 #[derive(Default)]
@@ -76,6 +90,10 @@ pub(crate) struct RelayProviderState {
     pending: HashMap<String, PendingRelayPeer>,
     /// connection_id -> admitted peer metadata.
     peers: HashMap<String, RelayPeerMeta>,
+    /// Write-authority fence, owned by this device (design §5.10). Every
+    /// grant bumps it, so INPUT carrying an older fence is stale by
+    /// construction — a revoked peer cannot replay queued keystrokes.
+    fence: u64,
 }
 
 impl RelayProviderState {
@@ -97,9 +115,13 @@ pub struct RelayPeerView {
     pub label: String,
     pub fingerprint: String,
     pub share_label: String,
-    /// "pending" | "viewer"
+    /// "pending" | "viewer" | "controller"
     pub state: String,
     pub joined_at: Option<u64>,
+    /// The peer attached with a controller ticket, so control can be given.
+    pub can_control: bool,
+    /// It asked for control and is waiting for an answer.
+    pub control_requested: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -117,6 +139,8 @@ pub struct RelayKnockEvent {
     pub label: String,
     pub fingerprint: String,
     pub share_label: String,
+    /// "join" (waiting for admission) | "control" (asks to type)
+    pub kind: String,
 }
 
 // ── inbound frame hook (called from cloud_bridge::process_inbound_frame) ────
@@ -127,11 +151,33 @@ pub struct RelayKnockEvent {
 pub(crate) async fn handle_frame<R: tauri::Runtime>(
     client: &reqwest::Client,
     inner: &Arc<Mutex<BridgeInner>>,
+    port: &Arc<dyn SharedSessionPort>,
     app: &AppHandle<R>,
     frame: &serde_json::Value,
 ) -> bool {
     let kind = frame.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     match kind {
+        "E2EE_FRAME" => {
+            // Claim the envelope only when it belongs to a relay peer;
+            // Live Console viewers stay on their own path.
+            let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) else {
+                return false;
+            };
+            let channel = inner.lock().ok().and_then(|guard| {
+                guard
+                    .relay
+                    .peers
+                    .contains_key(connection_id)
+                    .then(|| peer_channel(&guard, connection_id))
+                    .flatten()
+            });
+            let Some((cipher, cloud_id)) = channel else { return false };
+            let Ok(decrypted) = cipher.decrypt(&cloud_id, connection_id, DIRECTION_BROWSER, frame) else {
+                return true;
+            };
+            handle_peer_frame(client, inner, port, app, connection_id, &decrypted).await;
+            true
+        }
         "RELAY_GRANT_ISSUED" => {
             let (Some(key_hash), Some(consumer_id)) = (
                 frame.get("peer_key_hash").and_then(|v| v.as_str()),
@@ -168,6 +214,17 @@ pub(crate) async fn handle_frame<R: tauri::Runtime>(
         "E2EE_CLOSE" => {
             if let Some(connection_id) = frame.get("connection_id").and_then(|v| v.as_str()) {
                 let changed = if let Ok(mut guard) = inner.lock() {
+                    let had_control = guard
+                        .relay
+                        .peers
+                        .get(connection_id)
+                        .map(|peer| peer.controller)
+                        .unwrap_or(false);
+                    // Retire the fence with the controller that held it, so
+                    // a reconnecting peer cannot resume its write authority.
+                    if had_control {
+                        guard.relay.fence += 1;
+                    }
                     guard.relay.pending.remove(connection_id).is_some()
                         | guard.relay.peers.remove(connection_id).is_some()
                 } else {
@@ -202,6 +259,7 @@ async fn handle_relay_init<R: tauri::Runtime>(
     app: &AppHandle<R>,
     frame: &serde_json::Value,
 ) {
+    let role = frame.get("role").and_then(|v| v.as_str()).unwrap_or("");
     let (Some(cloud_id), Some(connection_id), Some(peer_public)) = (
         frame.get("session_id").and_then(|v| v.as_str()),
         frame.get("connection_id").and_then(|v| v.as_str()),
@@ -265,10 +323,14 @@ async fn handle_relay_init<R: tauri::Runtime>(
     let (consumer_label, consumer_device_id) = grant
         .map(|meta| (meta.consumer_label, meta.consumer_device_id))
         .unwrap_or_default();
+    // Only a relay_controller ticket can carry frames upstream at all; a
+    // relay_viewer is refused by the relay, so never offer it the button.
+    let may_request_control = role == "relay_controller";
 
     if policy.require_approval {
         let state = json!({"kind": "RELAY_STATE", "state": "pending_approval",
-            "role": "viewer", "control_policy": "view_only",
+            "role": "viewer",
+            "control_policy": if may_request_control { "on_request" } else { "view_only" },
             "host_label": share_label});
         if send_e2ee_frame(client, inner, cloud_id, connection_id, &cipher, &state).await.is_err() {
             return;
@@ -282,6 +344,7 @@ async fn handle_relay_init<R: tauri::Runtime>(
                     fingerprint: fingerprint.clone(),
                     consumer_label: consumer_label.clone(),
                     consumer_device_id,
+                    may_request_control,
                 },
             );
         }
@@ -292,6 +355,7 @@ async fn handle_relay_init<R: tauri::Runtime>(
                 label: consumer_label,
                 fingerprint,
                 share_label,
+                kind: "join".into(),
             },
         );
         let _ = app.emit("relay-peers-changed", ());
@@ -308,6 +372,7 @@ async fn handle_relay_init<R: tauri::Runtime>(
                 fingerprint,
                 consumer_label,
                 consumer_device_id,
+                may_request_control,
             },
         )
         .await;
@@ -360,9 +425,12 @@ async fn admit<R: tauri::Runtime>(
         let _ = send_e2ee_frame(client, inner, &cloud_id, connection_id, &peer.cipher, &state).await;
         return;
     };
+    // `control_policy` tells the consumer whether to offer "ask for
+    // control"; the answer still comes from this device, frame by frame.
+    let control_policy = if peer.may_request_control { "on_request" } else { "view_only" };
     let state = json!({"kind": "RELAY_STATE", "state": "active", "role": "viewer",
-        "control_policy": "view_only", "host_label": share_label,
-        "cols": cols, "rows": rows});
+        "control_policy": control_policy, "host_label": share_label,
+        "cols": cols, "rows": rows, "fence": 0});
     if send_e2ee_frame(client, inner, &cloud_id, connection_id, &peer.cipher, &state).await.is_err() {
         return;
     }
@@ -388,11 +456,224 @@ async fn admit<R: tauri::Runtime>(
                 consumer_label: peer.consumer_label,
                 consumer_device_id: peer.consumer_device_id,
                 joined_at: SystemTime::now(),
+                controller: false,
+                may_request_control: peer.may_request_control,
+                last_input_seq: 0,
+                control_requested: false,
             },
         );
     }
     let _ = app.emit("relay-peers-changed", ());
     let _ = app.emit("cloud-bridge-peers-changed", ());
+}
+
+// ── control authority (design §5.10) ───────────────────────────────────────
+
+/// Grant or revoke one peer's write authority. Granting bumps the fence and
+/// demotes whoever held control, so exactly one peer can type at a time and
+/// any INPUT still in flight under the old fence is stale on arrival.
+///
+/// Every caller is local: a menu action, a knock answer, or a policy change.
+/// Nothing the server or the peer says reaches this function.
+pub(crate) async fn set_relay_control<R: tauri::Runtime>(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+    app: &AppHandle<R>,
+    connection_id: &str,
+    grant: bool,
+) -> Result<(), String> {
+    // (connection_id, cipher, cloud_id, frame) for each peer to notify.
+    let mut notify: Vec<(String, PeerCipher, String, serde_json::Value)> = Vec::new();
+    {
+        let mut guard = inner.lock().map_err(|e| e.to_string())?;
+        if grant {
+            let policy = guard.relay.policy.clone();
+            let allow_input = policy.allow_remote_input && guard.allow_remote_send;
+            let may_ask = guard
+                .relay
+                .peers
+                .get(connection_id)
+                .map(|peer| peer.may_request_control)
+                .unwrap_or(false);
+            if !allow_input {
+                return Err("Remote input is switched off on this device.".into());
+            }
+            if !may_ask {
+                return Err("That peer attached read-only and cannot be given control.".into());
+            }
+            guard.relay.fence += 1;
+            // One controller at a time.
+            let others: Vec<String> = guard
+                .relay
+                .peers
+                .iter()
+                .filter(|(id, peer)| id.as_str() != connection_id && peer.controller)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for other in others {
+                if let Some(peer) = guard.relay.peers.get_mut(&other) {
+                    peer.controller = false;
+                    peer.last_input_seq = 0;
+                }
+                if let Some((cipher, cloud_id)) = peer_channel(&guard, &other) {
+                    notify.push((other, cipher, cloud_id, json!({"kind": "CONTROL_REVOKE", "reason": "replaced"})));
+                }
+            }
+        }
+        let fence = guard.relay.fence;
+        let Some(peer) = guard.relay.peers.get_mut(connection_id) else {
+            return Ok(());
+        };
+        peer.controller = grant;
+        peer.control_requested = false;
+        peer.last_input_seq = 0;
+        let frame = if grant {
+            json!({"kind": "CONTROL_GRANT", "fence": fence})
+        } else {
+            json!({"kind": "CONTROL_REVOKE", "reason": "revoked"})
+        };
+        if let Some((cipher, cloud_id)) = peer_channel(&guard, connection_id) {
+            notify.push((connection_id.to_string(), cipher, cloud_id, frame));
+        }
+    }
+    for (peer_id, cipher, cloud_id, frame) in notify {
+        let _ = send_e2ee_frame(client, inner, &cloud_id, &peer_id, &cipher, &frame).await;
+    }
+    let _ = app.emit("relay-peers-changed", ());
+    Ok(())
+}
+
+/// The cipher + session a peer's frames travel on, taken from the share's
+/// peer map (the same map the output pump fans bytes through).
+fn peer_channel(guard: &BridgeInner, connection_id: &str) -> Option<(PeerCipher, String)> {
+    let cloud_id = guard.relay.peers.get(connection_id)?.cloud_session_id.clone();
+    let cipher = guard
+        .shares
+        .values()
+        .find(|share| share.cloud_session_id == cloud_id)
+        .and_then(|share| share.peers.get(connection_id).cloned())?;
+    Some((cipher, cloud_id))
+}
+
+/// Decrypted traffic from an admitted relay peer. Returns true when the
+/// frame was consumed here, so the Live Console handler never sees it —
+/// relay write authority is a local fence, not a server-signed lease.
+async fn handle_peer_frame<R: tauri::Runtime>(
+    client: &reqwest::Client,
+    inner: &Arc<Mutex<BridgeInner>>,
+    port: &Arc<dyn SharedSessionPort>,
+    app: &AppHandle<R>,
+    connection_id: &str,
+    frame: &serde_json::Value,
+) {
+    match frame.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
+        "CONTROL_REQUEST" => {
+            let decision = {
+                let Ok(mut guard) = inner.lock() else { return };
+                let require_approval = guard.relay.policy.require_approval;
+                let allow_input = guard.relay.policy.allow_remote_input && guard.allow_remote_send;
+                let Some(peer) = guard.relay.peers.get_mut(connection_id) else { return };
+                if !peer.may_request_control || !allow_input {
+                    None
+                } else if require_approval {
+                    peer.control_requested = true;
+                    Some((false, peer.consumer_label.clone(), peer.fingerprint.clone(), peer.cloud_session_id.clone()))
+                } else {
+                    Some((true, peer.consumer_label.clone(), peer.fingerprint.clone(), peer.cloud_session_id.clone()))
+                }
+            };
+            let Some((auto, label, fingerprint, cloud_id)) = decision else { return };
+            if auto {
+                let _ = set_relay_control(client, inner, app, connection_id, true).await;
+                return;
+            }
+            let share_label = inner
+                .lock()
+                .ok()
+                .and_then(|guard| {
+                    guard
+                        .shares
+                        .values()
+                        .find(|share| share.cloud_session_id == cloud_id)
+                        .map(|share| share.label.clone())
+                })
+                .unwrap_or_default();
+            let _ = app.emit(
+                "relay-knock",
+                RelayKnockEvent {
+                    connection_id: connection_id.to_string(),
+                    label,
+                    fingerprint,
+                    share_label,
+                    kind: "control".into(),
+                },
+            );
+            let _ = app.emit("relay-peers-changed", ());
+        }
+        "CONTROL_RELEASE" => {
+            let _ = set_relay_control(client, inner, app, connection_id, false).await;
+        }
+        "INPUT" => {
+            let validated = {
+                let Ok(mut guard) = inner.lock() else { return };
+                // The global Live Console TX gate covers Live Relay too:
+                // one switch blocks remote input on every path (§5.14).
+                if !guard.allow_remote_send || !guard.relay.policy.allow_remote_input {
+                    return;
+                }
+                let fence = guard.relay.fence;
+                let Some(peer) = guard.relay.peers.get(connection_id) else { return };
+                let cloud_id = peer.cloud_session_id.clone();
+                let input_seq = frame.get("input_seq").and_then(|v| v.as_u64()).unwrap_or(0);
+                if !peer.controller
+                    || frame.get("fence").and_then(|v| v.as_u64()) != Some(fence)
+                    || input_seq <= peer.last_input_seq
+                {
+                    return;
+                }
+                let bytes = frame
+                    .get("data_hex")
+                    .and_then(|v| v.as_str())
+                    .and_then(|hex| decode_hex(hex).ok())
+                    .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_TX_BYTES);
+                let Some(bytes) = bytes else { return };
+                // The share must still permit TX; a re-share can have
+                // downgraded it to read-only under a live controller.
+                let target = guard.shares.iter().find_map(|(local, share)| {
+                    (share.cloud_session_id == cloud_id
+                        && share.policy.allows_tx(SystemTime::now()))
+                    .then(|| (local.clone(), share.protocol))
+                });
+                let Some((local_id, protocol)) = target else { return };
+                if let Some(peer) = guard.relay.peers.get_mut(connection_id) {
+                    peer.last_input_seq = input_seq;
+                }
+                Some((local_id, protocol, bytes, fence, input_seq, cloud_id))
+            };
+            let Some((local_id, protocol, bytes, fence, input_seq, cloud_id)) = validated else {
+                return;
+            };
+            let byte_count = bytes.len();
+            if port.write_tx(protocol, &local_id, &bytes).await.is_err() {
+                return;
+            }
+            let _ = app.emit(
+                "cloud-bridge-remote-tx",
+                RemoteTxEvent {
+                    local_session_id: local_id,
+                    byte_count,
+                    fence,
+                },
+            );
+            let cipher = inner.lock().ok().and_then(|guard| peer_channel(&guard, connection_id).map(|(c, _)| c));
+            if let Some(cipher) = cipher {
+                let ack = json!({"kind": "INPUT_ACK", "input_seq": input_seq,
+                                 "fence": fence, "byte_count": byte_count});
+                let _ = send_e2ee_frame(client, inner, &cloud_id, connection_id, &cipher, &ack).await;
+            }
+        }
+        _ => {}
+    }
 }
 
 // ── Tauri commands ──────────────────────────────────────────────────────────
@@ -419,14 +700,18 @@ pub fn relay_provider_status(state: State<'_, CloudBridgeState>) -> Result<Relay
             share_label: share_label(&peer.cloud_session_id),
             state: "pending".into(),
             joined_at: None,
+            can_control: peer.may_request_control,
+            control_requested: false,
         })
         .chain(guard.relay.peers.iter().map(|(connection_id, peer)| RelayPeerView {
             connection_id: connection_id.clone(),
             label: peer.consumer_label.clone(),
             fingerprint: peer.fingerprint.clone(),
             share_label: share_label(&peer.cloud_session_id),
-            state: "viewer".into(),
+            state: if peer.controller { "controller" } else { "viewer" }.into(),
             joined_at: Some(unix_seconds(peer.joined_at)),
+            can_control: peer.may_request_control,
+            control_requested: peer.control_requested,
         }))
         .collect();
     peers.sort_by(|a, b| a.connection_id.cmp(&b.connection_id));
@@ -444,6 +729,7 @@ pub async fn relay_respond_knock(
     state: State<'_, CloudBridgeState>,
     connection_id: String,
     allow: bool,
+    with_control: Option<bool>,
 ) -> Result<(), String> {
     let pending = state
         .inner
@@ -452,13 +738,52 @@ pub async fn relay_respond_knock(
         .relay
         .pending
         .remove(&connection_id);
-    let Some(peer) = pending else { return Ok(()) };
+    let Some(peer) = pending else {
+        // Not a join knock: an admitted peer asking for control.
+        if state.inner.lock().map_err(|e| e.to_string())?.relay.peers.contains_key(&connection_id) {
+            return set_relay_control(&state.client, &state.inner, &app, &connection_id, allow).await;
+        }
+        return Ok(());
+    };
     if allow {
         admit(&state.client, &state.inner, &app, &connection_id, peer).await;
+        if with_control == Some(true) {
+            let _ = set_relay_control(&state.client, &state.inner, &app, &connection_id, true).await;
+        }
     } else {
         let frame = json!({"kind": "RELAY_STATE", "state": "denied", "reason": "denied"});
         let _ = send_e2ee_frame(&state.client, &state.inner, &peer.cloud_session_id, &connection_id, &peer.cipher, &frame).await;
         let _ = app.emit("relay-peers-changed", ());
+    }
+    Ok(())
+}
+
+/// Give or take back one peer's write authority from the local UI.
+#[tauri::command]
+pub async fn relay_set_control(
+    app: AppHandle,
+    state: State<'_, CloudBridgeState>,
+    connection_id: String,
+    grant: bool,
+) -> Result<(), String> {
+    set_relay_control(&state.client, &state.inner, &app, &connection_id, grant).await
+}
+
+/// Take control back from every relay peer at once (the panic button).
+#[tauri::command]
+pub async fn relay_revoke_all_control(app: AppHandle, state: State<'_, CloudBridgeState>) -> Result<(), String> {
+    let holders: Vec<String> = {
+        let guard = state.inner.lock().map_err(|e| e.to_string())?;
+        guard
+            .relay
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.controller)
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    for connection_id in holders {
+        let _ = set_relay_control(&state.client, &state.inner, &app, &connection_id, false).await;
     }
     Ok(())
 }
@@ -471,6 +796,9 @@ pub async fn relay_kick(app: AppHandle, state: State<'_, CloudBridgeState>, conn
         let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
         let pending = guard.relay.pending.remove(&connection_id);
         let admitted = guard.relay.peers.remove(&connection_id);
+        if admitted.as_ref().is_some_and(|peer| peer.controller) {
+            guard.relay.fence += 1;
+        }
         let cipher = guard.shares.values_mut().find_map(|share| {
             share.peer_roles.remove(&connection_id);
             share.peers.remove(&connection_id)
@@ -495,14 +823,16 @@ mod tests {
     use crate::cloud_bridge::test_support::{install_fake_device, install_fake_share};
     use crate::e2ee::DIRECTION_AGENT;
     use crate::relay_client::derive_browser_cipher;
-    use crate::shared_session::{SessionProtocol, SharedSessionPort};
+    use crate::shared_session::{SessionProtocol, SharedSessionPort, TxPolicy};
     use crate::terminal_event_hub::{SubscriptionToken, TerminalEvent, TerminalEventHub};
     use async_trait::async_trait;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint};
+    use std::time::Duration;
 
     struct NullPort {
         hub: Arc<TerminalEventHub>,
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     #[async_trait]
@@ -516,7 +846,8 @@ mod tests {
         fn unsubscribe_rx(&self, subscription: &SubscriptionToken) {
             self.hub.unsubscribe(subscription);
         }
-        async fn write_tx(&self, _protocol: SessionProtocol, _session_id: &str, _bytes: &[u8]) -> Result<(), String> {
+        async fn write_tx(&self, _protocol: SessionProtocol, _session_id: &str, bytes: &[u8]) -> Result<(), String> {
+            self.written.lock().unwrap().push(bytes.to_vec());
             Ok(())
         }
     }
@@ -527,26 +858,41 @@ mod tests {
     struct Harness {
         app: tauri::App<tauri::test::MockRuntime>,
         state: CloudBridgeState,
+        port: Arc<dyn SharedSessionPort>,
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
         outbound: tokio::sync::mpsc::Receiver<serde_json::Value>,
     }
 
     fn harness(policy: LiveRelaySettings) -> Harness {
+        harness_with_share(policy, TxPolicy::ReadWrite)
+    }
+
+    fn harness_with_share(policy: LiveRelaySettings, tx: TxPolicy) -> Harness {
         let hub = Arc::new(TerminalEventHub::new());
-        let port: Arc<dyn SharedSessionPort> = Arc::new(NullPort { hub });
-        let state = CloudBridgeState::new(port);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let port: Arc<dyn SharedSessionPort> = Arc::new(NullPort {
+            hub,
+            written: Arc::clone(&written),
+        });
+        let state = CloudBridgeState::new(Arc::clone(&port));
         let outbound = install_fake_device(&state.inner, "http://127.0.0.1:9");
         {
             let mut guard = state.inner.lock().unwrap();
             // A real signing seed so E2EE_READY proofs verify.
             guard.device.as_mut().unwrap().identity_key = URL_SAFE_NO_PAD.encode([9_u8; 32]);
             guard.relay.policy = policy;
+            // The global TX gate is fail-closed by default; Live Console's
+            // frontend pushes the persisted value at startup.
+            guard.allow_remote_send = true;
             guard.terminal_sizes.insert("tab-1".into(), (100, 30));
         }
-        let ring = install_fake_share(&state, "tab-1", CLOUD_ID, "prod-web-01");
+        let ring = install_fake_share(&state, "tab-1", CLOUD_ID, "prod-web-01", tx);
         ring.lock().unwrap().push(b"host$ ".to_vec());
         Harness {
             app: tauri::test::mock_app(),
             state,
+            port,
+            written,
             outbound,
         }
     }
@@ -561,6 +907,10 @@ mod tests {
 
     /// Drive one consumer up to E2EE_READY; returns its cipher.
     async fn knock(harness: &mut Harness) -> crate::e2ee::PeerCipher {
+        knock_as(harness, "relay_viewer", CONNECTION_ID).await
+    }
+
+    async fn knock_as(harness: &mut Harness, role: &str, connection_id: &str) -> crate::e2ee::PeerCipher {
         let own_secret = EphemeralSecret::random(&mut rand::rngs::OsRng);
         let own_public = URL_SAFE_NO_PAD.encode(own_secret.public_key().to_encoded_point(false).as_bytes());
         let client = reqwest::Client::new();
@@ -569,11 +919,12 @@ mod tests {
             handle_frame(
                 &client,
                 &harness.state.inner,
+                &harness.port,
                 harness.app.handle(),
                 &json!({"kind": "RELAY_GRANT_ISSUED", "session_id": CLOUD_ID,
                         "peer_key_hash": sha256_hex(&own_public),
                         "consumer_device_id": "device-b",
-                        "consumer_label": "Travel laptop", "role": "relay_viewer"}),
+                        "consumer_label": "Travel laptop", "role": role}),
             )
             .await
         );
@@ -581,10 +932,11 @@ mod tests {
             handle_frame(
                 &client,
                 &harness.state.inner,
+                &harness.port,
                 harness.app.handle(),
                 &json!({"kind": "E2EE_INIT", "session_id": CLOUD_ID,
-                        "connection_id": CONNECTION_ID,
-                        "peer_public_key": own_public, "role": "relay_viewer"}),
+                        "connection_id": connection_id,
+                        "peer_public_key": own_public, "role": role}),
             )
             .await
         );
@@ -592,17 +944,50 @@ mod tests {
         assert_eq!(ready["frame"]["kind"], "E2EE_READY");
         derive_browser_cipher(
             CLOUD_ID,
-            CONNECTION_ID,
+            connection_id,
             own_secret,
             ready["frame"]["agent_public_key"].as_str().unwrap(),
         )
         .unwrap()
     }
 
+    /// Encrypt a consumer frame and push it through the provider hook.
+    async fn peer_says(harness: &Harness, connection_id: &str, cipher: &crate::e2ee::PeerCipher, frame: serde_json::Value) {
+        let envelope = cipher
+            .encrypt(CLOUD_ID, connection_id, DIRECTION_BROWSER, &frame)
+            .unwrap();
+        let mut outer = envelope;
+        outer["connection_id"] = json!(connection_id);
+        outer["session_id"] = json!(CLOUD_ID);
+        assert!(
+            handle_frame(
+                &reqwest::Client::new(),
+                &harness.state.inner,
+                &harness.port,
+                harness.app.handle(),
+                &outer,
+            )
+            .await,
+            "provider must claim its peer's envelope"
+        );
+    }
+
     async fn next_decrypted(harness: &mut Harness, cipher: &crate::e2ee::PeerCipher) -> serde_json::Value {
-        let envelope = harness.outbound.recv().await.expect("outbound frame");
+        next_decrypted_for(harness, CONNECTION_ID, cipher).await
+    }
+
+    async fn next_decrypted_for(
+        harness: &mut Harness,
+        connection_id: &str,
+        cipher: &crate::e2ee::PeerCipher,
+    ) -> serde_json::Value {
+        // Bounded: a missing frame should fail the test, not hang it.
+        let envelope = tokio::time::timeout(Duration::from_secs(5), harness.outbound.recv())
+            .await
+            .expect("timed out waiting for an outbound frame")
+            .expect("outbound frame");
         cipher
-            .decrypt(CLOUD_ID, CONNECTION_ID, DIRECTION_AGENT, &envelope["frame"])
+            .decrypt(CLOUD_ID, connection_id, DIRECTION_AGENT, &envelope["frame"])
             .expect("decryptable envelope")
     }
 
@@ -692,6 +1077,201 @@ mod tests {
         });
     }
 
+    // ── phase 3: control authority ─────────────────────────────────────────
+
+    /// A read-only (relay_viewer) peer is never offered control, and asking
+    /// anyway changes nothing.
+    #[test]
+    fn viewer_peer_cannot_obtain_control() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(false));
+            let cipher = knock(&mut harness).await;
+            let state = next_decrypted(&mut harness, &cipher).await;
+            assert_eq!(state["control_policy"], "view_only");
+            let _snapshot = next_decrypted(&mut harness, &cipher).await;
+
+            peer_says(&harness, CONNECTION_ID, &cipher, json!({"kind": "CONTROL_REQUEST"})).await;
+            // Explicit grants are refused too: the ticket was read-only.
+            let handle = harness.app.handle().clone();
+            let refused = set_relay_control(&reqwest::Client::new(), &harness.state.inner, &handle, CONNECTION_ID, true).await;
+            assert!(refused.is_err(), "a viewer ticket must not be grantable");
+            assert!(!harness.state.inner.lock().unwrap().relay.peers[CONNECTION_ID].controller);
+        });
+    }
+
+    /// Auto-grant path: request -> CONTROL_GRANT with a fence -> INPUT is
+    /// written to the local session and acked.
+    #[test]
+    fn controller_peer_types_after_an_auto_grant() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(false));
+            let cipher = knock_as(&mut harness, "relay_controller", CONNECTION_ID).await;
+            let state = next_decrypted(&mut harness, &cipher).await;
+            assert_eq!(state["control_policy"], "on_request");
+            let _snapshot = next_decrypted(&mut harness, &cipher).await;
+
+            // Input before any grant is dropped on the floor.
+            peer_says(&harness, CONNECTION_ID, &cipher,
+                      json!({"kind": "INPUT", "fence": 1, "input_seq": 1, "data_hex": "6e6f"})).await;
+            assert!(harness.written.lock().unwrap().is_empty());
+
+            peer_says(&harness, CONNECTION_ID, &cipher, json!({"kind": "CONTROL_REQUEST"})).await;
+            let grant = next_decrypted(&mut harness, &cipher).await;
+            assert_eq!(grant["kind"], "CONTROL_GRANT");
+            let fence = grant["fence"].as_u64().unwrap();
+            assert_eq!(fence, 1);
+
+            peer_says(&harness, CONNECTION_ID, &cipher,
+                      json!({"kind": "INPUT", "fence": fence, "input_seq": 1, "data_hex": "6c730a"})).await;
+            let ack = next_decrypted(&mut harness, &cipher).await;
+            assert_eq!(ack["kind"], "INPUT_ACK");
+            assert_eq!(ack["byte_count"], 3);
+            assert_eq!(harness.written.lock().unwrap().as_slice(), &[b"ls\n".to_vec()]);
+
+            // A replayed input_seq under the same fence is de-duplicated.
+            peer_says(&harness, CONNECTION_ID, &cipher,
+                      json!({"kind": "INPUT", "fence": fence, "input_seq": 1, "data_hex": "41"})).await;
+            assert_eq!(harness.written.lock().unwrap().len(), 1);
+        });
+    }
+
+    /// Revoking is immediate: the peer is told, and neither the old fence
+    /// nor a guessed newer one gets another byte through.
+    #[test]
+    fn revoke_makes_the_peer_read_only_at_once() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(false));
+            let cipher = knock_as(&mut harness, "relay_controller", CONNECTION_ID).await;
+            let _state = next_decrypted(&mut harness, &cipher).await;
+            let _snapshot = next_decrypted(&mut harness, &cipher).await;
+            peer_says(&harness, CONNECTION_ID, &cipher, json!({"kind": "CONTROL_REQUEST"})).await;
+            let grant = next_decrypted(&mut harness, &cipher).await;
+            let fence = grant["fence"].as_u64().unwrap();
+            peer_says(&harness, CONNECTION_ID, &cipher,
+                      json!({"kind": "INPUT", "fence": fence, "input_seq": 1, "data_hex": "6c730a"})).await;
+            let _ack = next_decrypted(&mut harness, &cipher).await;
+            assert_eq!(harness.written.lock().unwrap().len(), 1);
+
+            let handle = harness.app.handle().clone();
+            set_relay_control(&reqwest::Client::new(), &harness.state.inner, &handle, CONNECTION_ID, false)
+                .await
+                .unwrap();
+            let revoke = next_decrypted(&mut harness, &cipher).await;
+            assert_eq!(revoke["kind"], "CONTROL_REVOKE");
+
+            for (f, seq) in [(fence, 2_u64), (fence + 1, 3)] {
+                peer_says(&harness, CONNECTION_ID, &cipher,
+                          json!({"kind": "INPUT", "fence": f, "input_seq": seq, "data_hex": "41"})).await;
+            }
+            assert_eq!(harness.written.lock().unwrap().len(), 1, "no byte may land after a revoke");
+        });
+    }
+
+    /// Granting control to a second peer demotes the first and bumps the
+    /// fence, so the displaced controller's queued input is stale.
+    #[test]
+    fn granting_control_displaces_the_previous_controller() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(false));
+            let first = knock_as(&mut harness, "relay_controller", CONNECTION_ID).await;
+            let _s = next_decrypted(&mut harness, &first).await;
+            let _snap = next_decrypted(&mut harness, &first).await;
+            peer_says(&harness, CONNECTION_ID, &first, json!({"kind": "CONTROL_REQUEST"})).await;
+            let grant = next_decrypted(&mut harness, &first).await;
+            let old_fence = grant["fence"].as_u64().unwrap();
+
+            let second = knock_as(&mut harness, "relay_controller", "conn-relay-2").await;
+            let _s2 = next_decrypted_for(&mut harness, "conn-relay-2", &second).await;
+            let _snap2 = next_decrypted_for(&mut harness, "conn-relay-2", &second).await;
+
+            let handle = harness.app.handle().clone();
+            set_relay_control(&reqwest::Client::new(), &harness.state.inner, &handle, "conn-relay-2", true)
+                .await
+                .unwrap();
+            // The displaced peer hears about it; the new one gets the fence.
+            let revoke = next_decrypted(&mut harness, &first).await;
+            assert_eq!(revoke["kind"], "CONTROL_REVOKE");
+            assert_eq!(revoke["reason"], "replaced");
+            let grant2 = next_decrypted_for(&mut harness, "conn-relay-2", &second).await;
+            assert_eq!(grant2["kind"], "CONTROL_GRANT");
+            assert!(grant2["fence"].as_u64().unwrap() > old_fence);
+
+            // Old controller typing on the old fence is ignored.
+            peer_says(&harness, CONNECTION_ID, &first,
+                      json!({"kind": "INPUT", "fence": old_fence, "input_seq": 9, "data_hex": "41"})).await;
+            assert!(harness.written.lock().unwrap().is_empty());
+        });
+    }
+
+    /// The global Live Console TX gate covers Live Relay: one switch off,
+    /// no relay peer can type, whatever the relay policy says.
+    #[test]
+    fn global_remote_send_gate_blocks_relay_input() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(false));
+            let cipher = knock_as(&mut harness, "relay_controller", CONNECTION_ID).await;
+            let _s = next_decrypted(&mut harness, &cipher).await;
+            let _snap = next_decrypted(&mut harness, &cipher).await;
+            peer_says(&harness, CONNECTION_ID, &cipher, json!({"kind": "CONTROL_REQUEST"})).await;
+            let grant = next_decrypted(&mut harness, &cipher).await;
+            let fence = grant["fence"].as_u64().unwrap();
+
+            harness.state.inner.lock().unwrap().allow_remote_send = false;
+            peer_says(&harness, CONNECTION_ID, &cipher,
+                      json!({"kind": "INPUT", "fence": fence, "input_seq": 1, "data_hex": "41"})).await;
+            assert!(harness.written.lock().unwrap().is_empty());
+        });
+    }
+
+    /// With require_approval the request raises a knock instead of granting.
+    #[test]
+    fn control_request_raises_a_knock_when_approval_is_required() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(true));
+            let cipher = knock_as(&mut harness, "relay_controller", CONNECTION_ID).await;
+            let _pending = next_decrypted(&mut harness, &cipher).await;
+            let waiting = harness.state.inner.lock().unwrap().relay.pending.remove(CONNECTION_ID).unwrap();
+            let handle = harness.app.handle().clone();
+            admit(&reqwest::Client::new(), &harness.state.inner, &handle, CONNECTION_ID, waiting).await;
+            let _active = next_decrypted(&mut harness, &cipher).await;
+            let _snap = next_decrypted(&mut harness, &cipher).await;
+
+            peer_says(&harness, CONNECTION_ID, &cipher, json!({"kind": "CONTROL_REQUEST"})).await;
+            {
+                let guard = harness.state.inner.lock().unwrap();
+                let peer = &guard.relay.peers[CONNECTION_ID];
+                assert!(peer.control_requested, "the request must be parked for the local user");
+                assert!(!peer.controller, "approval required means no auto-grant");
+            }
+            // Answering yes grants it.
+            set_relay_control(&reqwest::Client::new(), &harness.state.inner, &handle, CONNECTION_ID, true)
+                .await
+                .unwrap();
+            let grant = next_decrypted(&mut harness, &cipher).await;
+            assert_eq!(grant["kind"], "CONTROL_GRANT");
+        });
+    }
+
+    /// The share's own TX policy outranks a granted controller: a read-only
+    /// share never takes a byte, however the control state looks.
+    #[test]
+    fn read_only_share_refuses_input_from_a_controller() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness_with_share(enabled_policy(false), TxPolicy::ReadOnly);
+            let cipher = knock_as(&mut harness, "relay_controller", CONNECTION_ID).await;
+            let _state = next_decrypted(&mut harness, &cipher).await;
+            let _snapshot = next_decrypted(&mut harness, &cipher).await;
+            peer_says(&harness, CONNECTION_ID, &cipher, json!({"kind": "CONTROL_REQUEST"})).await;
+            let grant = next_decrypted(&mut harness, &cipher).await;
+            let fence = grant["fence"].as_u64().unwrap();
+
+            peer_says(&harness, CONNECTION_ID, &cipher,
+                      json!({"kind": "INPUT", "fence": fence, "input_seq": 1, "data_hex": "41"})).await;
+            assert!(harness.written.lock().unwrap().is_empty(),
+                    "a read-only share must refuse TX even under a live grant");
+        });
+    }
+
     #[test]
     fn concurrency_cap_denies_with_busy() {
         tauri::async_runtime::block_on(async {
@@ -709,6 +1289,7 @@ mod tests {
             handle_frame(
                 &client,
                 &harness.state.inner,
+                &harness.port,
                 harness.app.handle(),
                 &json!({"kind": "E2EE_INIT", "session_id": CLOUD_ID,
                         "connection_id": "conn-relay-2",
