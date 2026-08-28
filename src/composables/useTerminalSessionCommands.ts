@@ -72,9 +72,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       case "assist":
         return invoke("write_assist_input", { id, data });
       case "relay":
-        // Phase 2 relay tabs are view-only; the relay refuses upstream
-        // frames from a non-controller peer anyway.
-        return Promise.resolve();
+        // Dropped on the Rust side unless the provider granted control.
+        return invoke("write_relay_input", { id, data });
     }
   }
 

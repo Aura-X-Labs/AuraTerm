@@ -341,6 +341,8 @@ export interface RelayGuestConfig {
   sessionId: string;
   deviceLabel: string;
   shareLabel: string;
+  /** Ask for a ticket that may request control (writable shares only). */
+  wantControl?: boolean;
 }
 
 export type SessionConfig =

@@ -10,30 +10,52 @@ import type { RelayKnock } from "./liveRelay";
  * Unanswered knocks are denied by the backend after a timeout.
  */
 const props = defineProps<{ queue: RelayKnock[] }>();
-const emit = defineEmits<{ decide: [knock: RelayKnock, allow: boolean] }>();
+const emit = defineEmits<{
+  decide: [knock: RelayKnock, allow: boolean, withControl: boolean];
+}>();
 
 const current = computed(() => props.queue[0] ?? null);
+const isControl = computed(() => current.value?.kind === "control");
 </script>
 
 <template>
   <div v-if="current" class="knock-overlay">
     <div class="knock-dialog" role="alertdialog" :aria-label="t('liveRelay.knockTitle')">
-      <div class="knock-title">{{ t('liveRelay.knockTitle') }}</div>
+      <div class="knock-title">
+        {{ isControl ? t('liveRelay.knockControlTitle') : t('liveRelay.knockTitle') }}
+      </div>
       <p class="knock-text">
-        {{ t('liveRelay.knockText', { name: current.label || t('liveRelay.unknownDevice'), share: current.shareLabel }) }}
+        {{ isControl
+          ? t('liveRelay.knockControlText', { name: current.label || t('liveRelay.unknownDevice'), share: current.shareLabel })
+          : t('liveRelay.knockText', { name: current.label || t('liveRelay.unknownDevice'), share: current.shareLabel }) }}
       </p>
       <p class="knock-fingerprint">
         {{ t('liveRelay.fingerprint') }}: <span class="knock-mono">{{ current.fingerprint }}</span>
       </p>
-      <p class="knock-note">{{ t('liveRelay.knockViewOnlyNote') }}</p>
+      <p class="knock-note">
+        {{ isControl ? t('liveRelay.knockControlNote') : t('liveRelay.knockViewOnlyNote') }}
+      </p>
       <p v-if="queue.length > 1" class="knock-more">{{ t('liveRelay.knockMore', { n: queue.length - 1 }) }}</p>
       <div class="knock-actions">
-        <button class="knock-btn primary" type="button" @click="emit('decide', current, true)">
-          {{ t('liveRelay.allow') }}
-        </button>
-        <button class="knock-btn danger" type="button" @click="emit('decide', current, false)">
-          {{ t('liveRelay.deny') }}
-        </button>
+        <template v-if="isControl">
+          <button class="knock-btn primary" type="button" @click="emit('decide', current, true, true)">
+            {{ t('liveRelay.grantControl') }}
+          </button>
+          <button class="knock-btn danger" type="button" @click="emit('decide', current, false, false)">
+            {{ t('liveRelay.keepViewOnly') }}
+          </button>
+        </template>
+        <template v-else>
+          <button class="knock-btn" type="button" @click="emit('decide', current, true, false)">
+            {{ t('liveRelay.allowView') }}
+          </button>
+          <button class="knock-btn primary" type="button" @click="emit('decide', current, true, true)">
+            {{ t('liveRelay.allowControl') }}
+          </button>
+          <button class="knock-btn danger" type="button" @click="emit('decide', current, false, false)">
+            {{ t('liveRelay.deny') }}
+          </button>
+        </template>
       </div>
     </div>
   </div>

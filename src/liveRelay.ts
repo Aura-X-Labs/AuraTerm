@@ -8,9 +8,11 @@ import { invoke } from "@tauri-apps/api/core";
  * already shares — a `relay` tab whose bytes arrive end-to-end encrypted.
  * As a **provider**, it answers knocks from those devices and can kick them.
  *
- * Phase 2 is attach + view-only: the relay refuses upstream frames from a
- * non-controller peer, so a relay tab sends nothing back. Control arrives in
- * phase 3, open-a-new-session in phase 4.
+ * Attaching to a read-only share stays view-only end to end: the relay
+ * itself refuses upstream frames from such a peer. On a writable share the
+ * consumer may ask for control, but write access is a fence the *provider*
+ * issues and can revoke at any moment. Opening a brand-new session on the
+ * remote device arrives in phase 4.
  */
 
 /** One attachable session a device already publishes to Live Console. */
@@ -55,9 +57,13 @@ export interface RelayPeerView {
   label: string;
   fingerprint: string;
   shareLabel: string;
-  /** "pending" | "viewer" */
+  /** "pending" | "viewer" | "controller" */
   state: string;
   joinedAt: number | null;
+  /** It attached with a controller ticket, so control can be handed over. */
+  canControl: boolean;
+  /** It asked for control and is waiting for an answer. */
+  controlRequested: boolean;
 }
 
 export interface RelayProviderStatus {
@@ -71,13 +77,15 @@ export interface RelayKnock {
   label: string;
   fingerprint: string;
   shareLabel: string;
+  /** "join" (waiting for admission) | "control" (asks to type) */
+  kind: string;
 }
 
 /** Mirror of a relay tab's state, emitted as `relay-client-state:<id>`. */
 export interface RelayGuestView {
   /** "handshake" | "pending_approval" | "active" | "denied" | "ended" */
   state: string;
-  /** "viewer" | "controller" (always "viewer" in phase 2) */
+  /** "viewer" | "controller" */
   role: string;
   cols?: number | null;
   rows?: number | null;
@@ -94,9 +102,28 @@ export function relayListDevices(): Promise<RelayDeviceEntry[]> {
   return invoke("relay_list_devices");
 }
 
-/** Attach to `sessionId` on `deviceId` as the new terminal tab `id`. */
-export function relayConnect(id: string, deviceId: string, sessionId: string): Promise<RelayJoinView> {
-  return invoke("relay_connect", { id, deviceId, sessionId });
+/**
+ * Attach to `sessionId` on `deviceId` as the new terminal tab `id`.
+ * `wantControl` asks for a ticket that may *request* control later; the
+ * provider still decides whether it ever gets it.
+ */
+export function relayConnect(
+  id: string,
+  deviceId: string,
+  sessionId: string,
+  wantControl = false,
+): Promise<RelayJoinView> {
+  return invoke("relay_connect", { id, deviceId, sessionId, wantControl });
+}
+
+/** Ask the provider for write access on a relay tab. */
+export function relayRequestControl(id: string): Promise<void> {
+  return invoke("relay_request_control", { id });
+}
+
+/** Hand write access back. */
+export function relayReleaseControl(id: string): Promise<void> {
+  return invoke("relay_release_control", { id });
 }
 
 export function closeRelaySession(id: string): Promise<void> {
@@ -109,9 +136,27 @@ export function relayProviderStatus(): Promise<RelayProviderStatus> {
   return invoke("relay_provider_status");
 }
 
-/** Answer a knock. Denying tells the peer inside the E2EE channel. */
-export function relayRespondKnock(connectionId: string, allow: boolean): Promise<void> {
-  return invoke("relay_respond_knock", { connectionId, allow });
+/**
+ * Answer a knock. Denying tells the peer inside the E2EE channel.
+ * `withControl` admits and hands over write access in one step; on a
+ * control knock it is the answer itself.
+ */
+export function relayRespondKnock(
+  connectionId: string,
+  allow: boolean,
+  withControl = false,
+): Promise<void> {
+  return invoke("relay_respond_knock", { connectionId, allow, withControl });
+}
+
+/** Give or take back one peer's write access from the provider panel. */
+export function relaySetControl(connectionId: string, grant: boolean): Promise<void> {
+  return invoke("relay_set_control", { connectionId, grant });
+}
+
+/** Take control back from every attached peer at once. */
+export function relayRevokeAllControl(): Promise<void> {
+  return invoke("relay_revoke_all_control");
 }
 
 /** Disconnect an admitted peer (or cancel a pending knock). */

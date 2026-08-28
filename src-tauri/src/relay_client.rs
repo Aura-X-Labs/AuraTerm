@@ -178,9 +178,14 @@ pub async fn relay_connect(
     id: String,
     device_id: String,
     session_id: String,
+    want_control: Option<bool>,
 ) -> Result<RelayJoinView, String> {
     let device = enrolled_device(bridge.inner())?;
-    connect_session(&app, &bridge.client, state.inner(), &device, id, device_id, session_id).await
+    connect_session(
+        &app, &bridge.client, state.inner(), &device, id, device_id, session_id,
+        want_control.unwrap_or(false),
+    )
+    .await
 }
 
 pub(crate) async fn connect_session<R: tauri::Runtime>(
@@ -191,7 +196,13 @@ pub(crate) async fn connect_session<R: tauri::Runtime>(
     id: String,
     target_device_id: String,
     session_id: String,
+    want_control: bool,
 ) -> Result<RelayJoinView, String> {
+    // "controller" only buys the right to *ask*: the relay then forwards
+    // our frames, and the provider decides whether they become keystrokes.
+    // On a read-only share we stay a viewer so the relay drops our frames
+    // outright rather than the provider having to.
+    let role = if want_control { "controller" } else { "viewer" };
     let bearer = format!("Bearer {}", device.credential);
 
     // ── our half of the E2EE handshake, minted before the grant so the
@@ -219,13 +230,16 @@ pub(crate) async fn connect_session<R: tauri::Runtime>(
         sha256_hex(&own_public),
         challenge.nonce
     );
+    // The role is deliberately outside the signed context: it is authorised
+    // by the share's own tx_policy server-side, and re-checked on the
+    // device. Binding it here would buy nothing and break old proofs.
     let proof = ed25519_sign_b64(&device.identity_key, &context)?;
     let response = http
         .post(format!("{}/api/v1/auraterm/console/relay/grants", device.base_url))
         .header("Authorization", &bearer)
         .json(&json!({
             "target_device_id": target_device_id, "mode": "attach",
-            "session_id": session_id, "role": "viewer",
+            "session_id": session_id, "role": role,
             "e2ee_public_key": own_public,
             "nonce": challenge.nonce, "proof": proof,
         }))
@@ -293,6 +307,8 @@ pub(crate) async fn connect_session<R: tauri::Runtime>(
             rows: None,
             host_label: Some(grant.provider_label.clone()),
             fingerprint: Some(fingerprint.clone()),
+            // The provider's first RELAY_STATE replaces this with the real
+            // policy; until then assume the conservative answer.
             control_policy: Some("view_only".into()),
             reason: None,
         },
@@ -325,6 +341,25 @@ pub(crate) fn derive_browser_cipher(
         .expand(info.as_bytes(), &mut key)
         .map_err(|_| "could not derive E2EE key".to_string())?;
     Ok(PeerCipher::new(key))
+}
+
+/// Keystrokes from a relay tab; dropped locally unless the provider granted
+/// control and announced a fence (`RemoteTabs::write_input`).
+#[tauri::command]
+pub async fn write_relay_input(state: State<'_, RelayClientState>, id: String, data: String) -> Result<(), String> {
+    state.inner().tabs.write_input(&id, &data).await
+}
+
+#[tauri::command]
+pub async fn relay_request_control(state: State<'_, RelayClientState>, id: String) -> Result<(), String> {
+    state.inner().tabs.send(&id, json!({"kind": "CONTROL_REQUEST"})).await
+}
+
+#[tauri::command]
+pub async fn relay_release_control(state: State<'_, RelayClientState>, id: String) -> Result<(), String> {
+    // Stop sending immediately; the provider confirms with CONTROL_REVOKE.
+    state.inner().tabs.set_role(&id, "viewer");
+    state.inner().tabs.send(&id, json!({"kind": "CONTROL_RELEASE"})).await
 }
 
 #[tauri::command]
@@ -497,7 +532,7 @@ mod tests {
             let device = test_device(&origin);
             let joined = connect_session(
                 app.handle(), &reqwest::Client::new(), &state, &device,
-                "tab-relay".into(), PROVIDER_DEVICE.into(), SESSION_ID.into(),
+                "tab-relay".into(), PROVIDER_DEVICE.into(), SESSION_ID.into(), false,
             )
             .await
             .expect("attach succeeds");
@@ -526,7 +561,7 @@ mod tests {
             let device = test_device(&origin);
             let error = connect_session(
                 app.handle(), &reqwest::Client::new(), &state, &device,
-                "tab-bad".into(), PROVIDER_DEVICE.into(), SESSION_ID.into(),
+                "tab-bad".into(), PROVIDER_DEVICE.into(), SESSION_ID.into(), false,
             )
             .await
             .expect_err("identity mismatch must refuse the connection");
