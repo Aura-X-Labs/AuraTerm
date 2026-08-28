@@ -33,7 +33,7 @@ pub(crate) struct DeviceConfig {
     account_subject: String,
     /// URL-safe base64 of the Ed25519 private seed (32 bytes). Signs every
     /// proof-of-possession; never leaves the device after enrollment.
-    identity_key: String,
+    pub(crate) identity_key: String,
     /// URL-safe base64 of the Ed25519 public key uploaded at enrollment.
     identity_public: String,
     pub(crate) credential: String,
@@ -139,19 +139,20 @@ impl RxRing {
     }
 }
 
-struct SharedSession {
-    cloud_session_id: String,
-    label: String,
+pub(crate) struct SharedSession {
+    pub(crate) cloud_session_id: String,
+    pub(crate) label: String,
     protocol: SessionProtocol,
     subscription: SubscriptionToken,
     policy: SessionPolicy,
-    ring: Arc<Mutex<RxRing>>,
+    pub(crate) ring: Arc<Mutex<RxRing>>,
     output_notify: Arc<tokio::sync::Notify>,
-    peers: HashMap<String, PeerCipher>,
+    pub(crate) peers: HashMap<String, PeerCipher>,
     /// connection_id -> viewer role as reported by the relay in E2EE_INIT
-    /// ("controller", "shared_viewer", "observer"). Drives the local
-    /// Monitor/Control status pill; absent on servers that predate roles.
-    peer_roles: HashMap<String, String>,
+    /// ("controller", "shared_viewer", "observer", "relay_viewer"). Drives
+    /// the local Monitor/Control status pill; absent on servers that
+    /// predate roles.
+    pub(crate) peer_roles: HashMap<String, String>,
     last_fence: u64,
     last_input_seq: u64,
 }
@@ -170,7 +171,7 @@ enum AgentTransport {
 pub(crate) struct BridgeInner {
     pub(crate) device: Option<DeviceConfig>,
     pending: Option<PendingEnrollment>,
-    shares: HashMap<String, SharedSession>,
+    pub(crate) shares: HashMap<String, SharedSession>,
     transport: Option<AgentTransport>,
     /// Remote Assist host session (at most one per device).
     pub(crate) assist: Option<crate::assist_host::AssistHost>,
@@ -186,12 +187,12 @@ pub(crate) struct BridgeInner {
     /// setting (`allowRemoteSend`). Defaults to `false` so remote INPUT stays
     /// blocked until the frontend pushes the real value — fail closed.
     allow_remote_send: bool,
-    /// Live Relay capability summary mirrored from the persisted `liveRelay`
-    /// settings block, reported with each idle presence ping so the server
-    /// can refuse doomed grant requests early (design §5.8). Defaults to
-    /// all-closed until the frontend pushes the real policy — fail closed;
-    /// the server copy is an optimisation, never an authority.
-    relay_policy: RelayPolicySummary,
+    /// Live Relay provider state (policy mirror, pending knocks, admitted
+    /// peers). The policy defaults to all-closed until the frontend pushes
+    /// the persisted value — fail closed; the summary derived from it is
+    /// reported to the server as an early-reject optimisation, never as
+    /// the authority.
+    pub(crate) relay: crate::relay_provider::RelayProviderState,
 }
 
 /// What the server needs to pre-screen Live Relay grant requests: is the
@@ -484,7 +485,7 @@ fn random_secret(length: usize) -> String {
     rand::thread_rng().sample_iter(&Alphanumeric).take(length).map(char::from).collect()
 }
 
-fn sha256_hex(value: &str) -> String {
+pub(crate) fn sha256_hex(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
@@ -500,7 +501,7 @@ fn ed25519_keypair() -> (String, String) {
 /// Sign a domain-separated context with the device's Ed25519 private seed;
 /// returns a URL-safe base64 signature matching the server's `_unb64` proof
 /// format.
-fn ed25519_sign_b64(seed_b64: &str, message: &str) -> Result<String, String> {
+pub(crate) fn ed25519_sign_b64(seed_b64: &str, message: &str) -> Result<String, String> {
     use ed25519_dalek::Signer;
     let seed: [u8; 32] = URL_SAFE_NO_PAD
         .decode(seed_b64)
@@ -513,7 +514,7 @@ fn ed25519_sign_b64(seed_b64: &str, message: &str) -> Result<String, String> {
 
 /// Verify an Ed25519 signature (e.g. a `cav1` lease grant) with a 32-byte
 /// public key. Any malformed input fails closed.
-fn ed25519_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+pub(crate) fn ed25519_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
     use ed25519_dalek::Verifier;
     let Ok(public_bytes) = <[u8; 32]>::try_from(public_key) else {
         return false;
@@ -887,6 +888,12 @@ async fn connect_attempt(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner
         device.device_id, device.boot_id, device.key_version, challenge.nonce
     );
     let proof = ed25519_sign_b64(&device.identity_key, &context)?;
+    // A relay-connected agent sends no presence pings, so the Live Relay
+    // capability summary also rides along with the connect grant.
+    let relay_policy = inner
+        .lock()
+        .map_err(|e| e.to_string())
+        .map(|guard| RelayPolicySummary::from_settings(&guard.relay.policy))?;
     let grant: GrantResponse = json_response(
         client
             .post(format!("{}/api/v1/auraterm/console/connect-grant", device.base_url))
@@ -894,6 +901,7 @@ async fn connect_attempt(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner
             .json(&json!({
                 "boot_id": device.boot_id, "key_version": device.key_version,
                 "nonce": challenge.nonce, "proof": proof,
+                "relay_policy": relay_policy,
             }))
             .send()
             .await
@@ -1025,7 +1033,7 @@ async fn idle_presence_ping(client: &reqwest::Client, inner: &Arc<Mutex<BridgeIn
     let (device, relay_policy) = {
         let guard = inner.lock().map_err(|e| e.to_string())?;
         let device = guard.device.clone().ok_or_else(|| "device is not enrolled".to_string())?;
-        (device, guard.relay_policy.clone())
+        (device, RelayPolicySummary::from_settings(&guard.relay.policy))
     };
     let response = client
         .post(format!("{}/api/v1/auraterm/console/presence", device.base_url))
@@ -1124,6 +1132,9 @@ async fn process_inbound_frame(
     // Remote Assist frames (ASSIST_INIT / PAKE_* and anything addressed to
     // the assist session) are owned by the host module.
     if crate::assist_host::handle_frame(client, inner, port, app, &frame).await {
+        return;
+    }
+    if crate::relay_provider::handle_frame(client, inner, app, &frame).await {
         return;
     }
     let kind = frame.get("kind").and_then(|value| value.as_str());
@@ -1571,7 +1582,7 @@ pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn e2ee_context(device_id: &str, session_id: &str, connection_id: &str, peer_public_key: &str, agent_public_key: &str) -> String {
+pub(crate) fn e2ee_context(device_id: &str, session_id: &str, connection_id: &str, peer_public_key: &str, agent_public_key: &str) -> String {
     format!(
         "auraxlab-console|e2ee-v1|{device_id}|{session_id}|{connection_id}|{}|{}",
         sha256_hex(peer_public_key),
@@ -1579,7 +1590,7 @@ fn e2ee_context(device_id: &str, session_id: &str, connection_id: &str, peer_pub
     )
 }
 
-fn derive_peer_cipher(session_id: &str, connection_id: &str, peer_public_key: &str) -> Result<(PeerCipher, String), String> {
+pub(crate) fn derive_peer_cipher(session_id: &str, connection_id: &str, peer_public_key: &str) -> Result<(PeerCipher, String), String> {
     let peer_bytes = URL_SAFE_NO_PAD
         .decode(peer_public_key)
         .map_err(|_| "invalid browser E2EE public key".to_string())?;
@@ -1598,7 +1609,7 @@ fn derive_peer_cipher(session_id: &str, connection_id: &str, peer_public_key: &s
     ))
 }
 
-async fn send_e2ee_frame(
+pub(crate) async fn send_e2ee_frame(
     client: &reqwest::Client,
     inner: &Arc<Mutex<BridgeInner>>,
     session_id: &str,
@@ -1816,6 +1827,40 @@ pub(crate) mod test_support {
         guard.want_online = true;
         rx
     }
+
+    /// A live shared session backed by a fresh ring, for relay-provider
+    /// admission tests. Returns the ring so tests can seed scrollback.
+    pub(crate) fn install_fake_share(
+        state: &CloudBridgeState,
+        local_id: &str,
+        cloud_id: &str,
+        label: &str,
+    ) -> Arc<Mutex<RxRing>> {
+        let subscription = state.port.subscribe_rx(local_id, Box::new(|_| {}));
+        let ring = Arc::new(Mutex::new(RxRing::new(DEFAULT_RX_RING_BYTES)));
+        let mut guard = state.inner.lock().unwrap();
+        guard.shares.insert(
+            local_id.to_string(),
+            SharedSession {
+                cloud_session_id: cloud_id.into(),
+                label: label.into(),
+                protocol: SessionProtocol::Local,
+                subscription,
+                policy: SessionPolicy {
+                    tx: TxPolicy::ReadOnly,
+                    tx_expires_at: None,
+                    rx_ring_bytes: DEFAULT_RX_RING_BYTES,
+                },
+                ring: Arc::clone(&ring),
+                output_notify: Arc::new(tokio::sync::Notify::new()),
+                peers: HashMap::new(),
+                peer_roles: HashMap::new(),
+                last_fence: 0,
+                last_input_seq: 0,
+            },
+        );
+        ring
+    }
 }
 
 /// Mirror the persisted "Allow Remote Send" setting into the bridge. The
@@ -1827,14 +1872,27 @@ pub fn cloud_bridge_set_allow_remote_send(state: State<'_, CloudBridgeState>, al
     Ok(())
 }
 
-/// Mirror the persisted `liveRelay` settings block into the bridge; the next
-/// idle presence ping reports the derived capability summary to the server.
+/// Mirror the persisted `liveRelay` settings block into the bridge. The
+/// derived capability summary reaches the server with the next presence
+/// ping or connect-grant; an enrolled device also reports it right away so
+/// the server-side early-reject stays fresh while relay-connected.
 #[tauri::command]
 pub fn cloud_bridge_set_relay_policy(
     state: State<'_, CloudBridgeState>,
     policy: crate::settings::LiveRelaySettings,
 ) -> Result<(), String> {
-    state.inner.lock().map_err(|e| e.to_string())?.relay_policy = RelayPolicySummary::from_settings(&policy);
+    let enrolled = {
+        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+        guard.relay.policy = policy;
+        guard.device.is_some()
+    };
+    if enrolled {
+        let client = state.client.clone();
+        let inner = Arc::clone(&state.inner);
+        tauri::async_runtime::spawn(async move {
+            let _ = idle_presence_ping(&client, &inner).await;
+        });
+    }
     Ok(())
 }
 

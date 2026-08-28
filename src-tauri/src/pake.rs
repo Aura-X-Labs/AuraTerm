@@ -308,7 +308,7 @@ impl Spake2Keys {
 }
 
 /// RFC 4648 base32 (uppercase, no padding) of the first bytes; 5 bytes → 8 chars.
-fn base32_no_pad(bytes: &[u8]) -> String {
+pub(crate) fn base32_no_pad(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut out = String::new();
     let mut buffer: u32 = 0;

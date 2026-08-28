@@ -31,6 +31,8 @@ mod connections;
 mod encryption;
 mod keychain;
 mod pty_broker;
+mod relay_client;
+mod relay_provider;
 mod remote_tab;
 mod rfc2217;
 mod serial;
@@ -1159,6 +1161,7 @@ fn main() {
         .manage(serial_state)
         .manage(cloud_bridge::CloudBridgeState::new(shared_port))
         .manage(assist_client::AssistClientState::default())
+        .manage(relay_client::RelayClientState::default())
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
         .manage(connections::ImportPlanState::default())
@@ -1218,6 +1221,12 @@ fn main() {
             cloud_bridge::cloud_bridge_status,
             cloud_bridge::cloud_bridge_set_allow_remote_send,
             cloud_bridge::cloud_bridge_set_relay_policy,
+            relay_provider::relay_provider_status,
+            relay_provider::relay_respond_knock,
+            relay_provider::relay_kick,
+            relay_client::relay_list_devices,
+            relay_client::relay_connect,
+            relay_client::close_relay_session,
             cloud_bridge::cloud_bridge_report_size,
             assist_host::assist_start,
             assist_host::assist_stop,

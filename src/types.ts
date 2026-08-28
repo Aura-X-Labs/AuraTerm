@@ -333,6 +333,16 @@ export interface AssistGuestConfig {
   displayName?: string;
 }
 
+/** Live Relay: attach to a session another of the account's own devices
+ *  already shares (design docs/plans/live-sync-design.md §5). Transient —
+ *  a relay tab is never restored from the workspace snapshot. */
+export interface RelayGuestConfig {
+  deviceId: string;
+  sessionId: string;
+  deviceLabel: string;
+  shareLabel: string;
+}
+
 export type SessionConfig =
   | { protocol: "local"; cwd?: string }
   | { protocol: "ssh"; sshConfig: SshConfig }
@@ -340,7 +350,8 @@ export type SessionConfig =
   | { protocol: "serial"; serialConfig: SerialConfig }
   | { protocol: "rfc2217"; serialConfig: SerialConfig }
   | { protocol: "raw-tcp"; serialConfig: SerialConfig }
-  | { protocol: "assist"; assistConfig: AssistGuestConfig };
+  | { protocol: "assist"; assistConfig: AssistGuestConfig }
+  | { protocol: "relay"; relayConfig: RelayGuestConfig };
 
 export type SerialConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 

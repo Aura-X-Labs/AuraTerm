@@ -35,8 +35,11 @@ export function transportForProtocol(protocol: SerialProtocol): SerialTransport 
  *  Remote Assist and the cloud bridge index sessions by which backend state map
  *  holds them, and all three serial protocols live in `SerialState`. Passing
  *  "rfc2217" through would fail to deserialize on the Rust side. */
+/** Map a *local* session protocol onto the backend state map that owns it.
+ *  Remote mirrors (assist guests, Live Relay tabs) have no local session and
+ *  are excluded at the type level. */
 export function sharedSessionProtocol(
-  protocol: Exclude<ConnectionProtocol | "local", "assist">,
+  protocol: Exclude<ConnectionProtocol | "local", "assist" | "relay">,
 ): "serial" | "ssh" | "telnet" | "local" {
   return isSerialProtocol(protocol) ? "serial" : (protocol as "ssh" | "telnet" | "local");
 }
