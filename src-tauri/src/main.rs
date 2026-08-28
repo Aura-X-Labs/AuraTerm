@@ -31,6 +31,7 @@ mod connections;
 mod encryption;
 mod keychain;
 mod pty_broker;
+mod remote_tab;
 mod rfc2217;
 mod serial;
 mod serial_link;
@@ -1216,6 +1217,7 @@ fn main() {
             cloud_bridge::cloud_bridge_stop_share,
             cloud_bridge::cloud_bridge_status,
             cloud_bridge::cloud_bridge_set_allow_remote_send,
+            cloud_bridge::cloud_bridge_set_relay_policy,
             cloud_bridge::cloud_bridge_report_size,
             assist_host::assist_start,
             assist_host::assist_stop,

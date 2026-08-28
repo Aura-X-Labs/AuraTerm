@@ -59,3 +59,10 @@ export function stopCloudShare(localSessionId: string): Promise<void> {
 export function setCloudBridgeAllowRemoteSend(allowed: boolean): Promise<void> {
   return invoke("cloud_bridge_set_allow_remote_send", { allowed });
 }
+
+/** Mirror the persisted Live Relay policy into the bridge; the next idle
+ * presence ping reports the capability summary to the server. Fails closed
+ * (all-off) until the first push, like the remote-send gate. */
+export function setCloudBridgeRelayPolicy(policy: import("./settings").LiveRelaySettings): Promise<void> {
+  return invoke("cloud_bridge_set_relay_policy", { policy });
+}

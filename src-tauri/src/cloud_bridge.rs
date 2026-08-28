@@ -186,6 +186,43 @@ pub(crate) struct BridgeInner {
     /// setting (`allowRemoteSend`). Defaults to `false` so remote INPUT stays
     /// blocked until the frontend pushes the real value — fail closed.
     allow_remote_send: bool,
+    /// Live Relay capability summary mirrored from the persisted `liveRelay`
+    /// settings block, reported with each idle presence ping so the server
+    /// can refuse doomed grant requests early (design §5.8). Defaults to
+    /// all-closed until the frontend pushes the real policy — fail closed;
+    /// the server copy is an optimisation, never an authority.
+    relay_policy: RelayPolicySummary,
+}
+
+/// What the server needs to pre-screen Live Relay grant requests: is the
+/// device reachable at all, may peers attach to existing shares, and which
+/// open-target kinds are enabled. Never more than that — the full policy
+/// (approval, concurrency, timeouts) stays local.
+#[derive(Clone, Default, PartialEq, Serialize)]
+pub(crate) struct RelayPolicySummary {
+    enabled: bool,
+    allow_attach: bool,
+    open_kinds: Vec<String>,
+}
+
+impl RelayPolicySummary {
+    pub(crate) fn from_settings(policy: &crate::settings::LiveRelaySettings) -> Self {
+        let mut open_kinds = Vec::new();
+        if policy.allow_open_shell {
+            open_kinds.push("local_shell".to_string());
+        }
+        if policy.allow_open_serial {
+            open_kinds.push("serial".to_string());
+        }
+        if policy.allow_open_bookmark {
+            open_kinds.push("bookmark".to_string());
+        }
+        Self {
+            enabled: policy.enabled,
+            allow_attach: policy.allow_attach,
+            open_kinds,
+        }
+    }
 }
 
 impl BridgeInner {
@@ -981,19 +1018,19 @@ struct PresencePingResponse {
     ping_interval: Option<u64>,
 }
 
-/// Idle-mode liveness: one authenticated POST carrying no payload. The
-/// server stages it in Redis with a short TTL; no relay connection exists.
+/// Idle-mode liveness: one authenticated POST carrying only the Live Relay
+/// capability summary. The server stages liveness in Redis with a short TTL
+/// (no relay connection exists) and persists the summary when it changed.
 async fn idle_presence_ping(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner>>) -> Result<Option<u64>, String> {
-    let device = inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .device
-        .clone()
-        .ok_or_else(|| "device is not enrolled".to_string())?;
+    let (device, relay_policy) = {
+        let guard = inner.lock().map_err(|e| e.to_string())?;
+        let device = guard.device.clone().ok_or_else(|| "device is not enrolled".to_string())?;
+        (device, guard.relay_policy.clone())
+    };
     let response = client
         .post(format!("{}/api/v1/auraterm/console/presence", device.base_url))
         .header("Authorization", format!("Bearer {}", device.credential))
-        .json(&json!({}))
+        .json(&json!({"relay_policy": relay_policy}))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1787,6 +1824,17 @@ pub(crate) mod test_support {
 #[tauri::command]
 pub fn cloud_bridge_set_allow_remote_send(state: State<'_, CloudBridgeState>, allowed: bool) -> Result<(), String> {
     state.inner.lock().map_err(|e| e.to_string())?.allow_remote_send = allowed;
+    Ok(())
+}
+
+/// Mirror the persisted `liveRelay` settings block into the bridge; the next
+/// idle presence ping reports the derived capability summary to the server.
+#[tauri::command]
+pub fn cloud_bridge_set_relay_policy(
+    state: State<'_, CloudBridgeState>,
+    policy: crate::settings::LiveRelaySettings,
+) -> Result<(), String> {
+    state.inner.lock().map_err(|e| e.to_string())?.relay_policy = RelayPolicySummary::from_settings(&policy);
     Ok(())
 }
 
