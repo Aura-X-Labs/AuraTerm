@@ -61,6 +61,9 @@ pub enum FrameClass {
     ControlGrant,
     /// Our control was revoked.
     ControlRevoke,
+    /// The peer ended this tab from inside the E2EE channel (kick, share
+    /// stopped): finish the loop with the frame's `reason`.
+    SessionEnd,
     /// Not part of the shared vocabulary; ignore.
     Ignore,
 }
@@ -508,6 +511,14 @@ fn spawn_reader_task<R: tauri::Runtime>(
                         control_policy: None,
                         reason: inner.get("reason").and_then(|v| v.as_str()).map(str::to_string),
                     });
+                }
+                FrameClass::SessionEnd => {
+                    end_reason = inner
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(protocol.default_end_reason)
+                        .to_string();
+                    break;
                 }
                 FrameClass::Ignore => {}
             }

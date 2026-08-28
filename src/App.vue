@@ -21,6 +21,8 @@ import AccountDialog from "./AccountDialog.vue";
 import RemoteAssistDialog from "./RemoteAssistDialog.vue";
 import AssistKnockDialog from "./AssistKnockDialog.vue";
 import JoinAssistDialog from "./JoinAssistDialog.vue";
+import LiveRelayDialog from "./LiveRelayDialog.vue";
+import LiveRelayKnockDialog from "./LiveRelayKnockDialog.vue";
 import {
   assistStatus as fetchAssistStatus,
   respondAssistJoin,
@@ -43,6 +45,15 @@ import {
   stopCloudShare,
   type CloudBridgeStatus,
 } from "./cloudBridge";
+import {
+  relayKick,
+  relayProviderStatus,
+  relayRespondKnock,
+  type RelayAttachTarget,
+  type RelayDeviceEntry,
+  type RelayKnock,
+  type RelayProviderStatus,
+} from "./liveRelay";
 import { restoreAccount } from "./account";
 import { cloudSyncNow, getSyncConfig, type SyncConfigView } from "./cloudSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
@@ -134,6 +145,11 @@ const showJoinAssist = ref(false);
 // Remote Assist host state (design docs/plans/remote-assist-design.md §9.3).
 const assistState = ref<AssistStatus | null>(null);
 const assistKnocks = ref<AssistKnock[]>([]);
+// Live Relay: consumer-side picker, plus the provider-side knock queue
+// and admitted-peer mirror driven by `relay-peers-changed`.
+const showLiveRelay = ref(false);
+const relayKnocks = ref<RelayKnock[]>([]);
+const relayStatus = ref<RelayProviderStatus>({ enabled: false, peers: [] });
 // AuraXLab sign-in state drives the Cloud menu (Sign In vs My Account).
 // Refreshed on startup and whenever the account / sync dialogs close.
 const syncView = shallowRef<SyncConfigView | null>(null);
@@ -605,6 +621,15 @@ onMounted(async () => {
   cleanupFns.push(await listen("assist-changed", () => {
     void refreshAssistState();
   }));
+  cleanupFns.push(await listen<RelayKnock>("relay-knock", ({ payload }) => {
+    relayKnocks.value = [
+      ...relayKnocks.value.filter((k) => k.connectionId !== payload.connectionId),
+      payload,
+    ];
+  }));
+  cleanupFns.push(await listen("relay-peers-changed", () => {
+    void refreshRelayStatus();
+  }));
   cleanupFns.push(await listen<AssistKnock>("assist-guest-knock", ({ payload }) => {
     assistKnocks.value = [
       ...assistKnocks.value.filter((k) => !(k.connectionId === payload.connectionId && k.kind === payload.kind)),
@@ -817,14 +842,15 @@ async function refreshAssistState() {
   }
 }
 
-// Only real local sessions can be assisted; a guest tab cannot be re-shared.
+// Only real local sessions can be assisted; a remote mirror (assist guest
+// or Live Relay tab) cannot be re-shared.
 const assistSessionChoices = computed(() => tabs.value
-  .filter((tab) => tab.session.protocol !== "assist")
+  .filter((tab) => tab.session.protocol !== "assist" && tab.session.protocol !== "relay")
   // The bridge indexes sessions by which backend state map holds them, so the
   // three serial protocols all report as "serial".
   .map((tab) => ({
     id: tab.id,
-    protocol: sharedSessionProtocol(tab.session.protocol as Exclude<typeof tab.session.protocol, "assist">),
+    protocol: sharedSessionProtocol(tab.session.protocol as Exclude<typeof tab.session.protocol, "assist" | "relay">),
     title: tab.title,
   })));
 
@@ -843,6 +869,56 @@ function handleJoinAssist(code: string, displayName: string) {
     session: { protocol: "assist", assistConfig: { code, displayName: displayName || undefined } },
   }];
   assignTabToFocusedPane(newId);
+}
+
+function handleOpenLiveRelay() {
+  closeOpenMenus();
+  showLiveRelay.value = true;
+  // The dialog's sign-in gate reads bridgeStatus.enrolled; make it fresh.
+  void refreshCloudBridgeStatus().catch(() => {});
+  void refreshRelayStatus();
+}
+
+/** Attach to a sibling device's shared session in a new tab. */
+function handleRelayAttach(device: RelayDeviceEntry, target: RelayAttachTarget) {
+  showLiveRelay.value = false;
+  const newId = mintTabId();
+  const shareLabel = target.share_label || t("liveRelay.untitledShare");
+  tabs.value = [...tabs.value, {
+    id: newId,
+    title: t("liveRelay.tabTitle", { device: device.label }),
+    session: {
+      protocol: "relay",
+      relayConfig: {
+        deviceId: device.device_id,
+        sessionId: target.session_id,
+        deviceLabel: device.label,
+        shareLabel,
+      },
+    },
+  }];
+  assignTabToFocusedPane(newId);
+}
+
+async function refreshRelayStatus() {
+  try {
+    relayStatus.value = await relayProviderStatus();
+  } catch {
+    relayStatus.value = { enabled: false, peers: [] };
+  }
+}
+
+function handleRelayKnockDecision(knock: RelayKnock, allow: boolean) {
+  relayKnocks.value = relayKnocks.value.filter((k) => k.connectionId !== knock.connectionId);
+  void relayRespondKnock(knock.connectionId, allow)
+    .catch(() => {})
+    .finally(() => void refreshRelayStatus());
+}
+
+function handleRelayKick(connectionId: string) {
+  void relayKick(connectionId)
+    .catch(() => {})
+    .finally(() => void refreshRelayStatus());
 }
 
 function handleOpenRemoteAssist() {
@@ -888,7 +964,7 @@ watch(activeTabId, (tabId) => {
   assistFollowTimer = setTimeout(() => {
     assistFollowTimer = null;
     const tab = tabs.value.find((candidate) => candidate.id === tabId);
-    if (!tab || tab.session.protocol === "assist") return;
+    if (!tab || tab.session.protocol === "assist" || tab.session.protocol === "relay") return;
     void switchAssistSession(tab.id, sharedSessionProtocol(tab.session.protocol), tab.title)
       .then(() => refreshAssistState())
       .catch(() => {});
@@ -932,7 +1008,7 @@ async function syncAutoShare() {
     const alreadyShared = bridgeStatus.value.shares.some(
       (share) => share.localSessionId === target?.id && share.txAllowed === allowTx,
     );
-    if (target && target.session.protocol !== "assist" && !alreadyShared) {
+    if (target && target.session.protocol !== "assist" && target.session.protocol !== "relay" && !alreadyShared) {
       // A freshly opened tab may not have a live PTY yet; a failed attempt
       // is dropped silently and the next status poll converges.
       await shareSessionToCloud(
@@ -2243,6 +2319,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor share session rx tx remote view follow active", run: () => handleToggleCloudConsole() },
     { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
     { id: "remote-assist", title: assistState.value ? t("assist.paletteManage") : t("assist.paletteStart"), group: t("palette.groups.app"), keywords: "remote assist help support code invite guest share screen pair", run: () => handleOpenRemoteAssist() },
+    { id: "live-relay", title: t("liveRelay.palette"), group: t("palette.groups.app"), keywords: "live relay my devices attach own account remote access sibling", run: () => handleOpenLiveRelay() },
     { id: "join-assist", title: t("assist.paletteJoin"), group: t("palette.groups.app"), keywords: "join remote assist code guest help someone terminal", run: () => handleOpenJoinAssist() },
     { id: "remote-assist-revoke", title: t("assist.paletteRevoke"), group: t("palette.groups.app"), keywords: "remote assist revoke control kick stop input", run: () => handleRevokeAllAssistControl() },
     { id: "serial-break", title: t("serial.cmdBreak"), subtitle: t("serial.cmdBreakHint"), group: t("palette.groups.serial"), keywords: "serial break uart u-boot rommon interrupt", enabled: serialControllable.value, run: () => { void handleSendSerialBreak(); } },
@@ -2483,6 +2560,10 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               </button>
               <button class="titlebar-menu-item" type="button" @click="handleOpenJoinAssist">
                 <span>{{ $t('menu.joinAssist') }}</span>
+              </button>
+              <div class="titlebar-menu-separator" />
+              <button class="titlebar-menu-item" type="button" @click="handleOpenLiveRelay">
+                <span>{{ $t('menu.liveRelay') }}</span>
               </button>
             </div>
           </div>
@@ -3152,6 +3233,16 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       @open-account="showRemoteAssist = false; showAccount = true"
     />
     <JoinAssistDialog v-if="showJoinAssist" @close="showJoinAssist = false" @join="handleJoinAssist" />
+    <LiveRelayDialog
+      v-if="showLiveRelay"
+      :enrolled="bridgeStatus.enrolled"
+      :status="relayStatus"
+      @close="showLiveRelay = false"
+      @attach="handleRelayAttach"
+      @kick="handleRelayKick"
+      @open-account="showLiveRelay = false; showAccount = true"
+    />
+    <LiveRelayKnockDialog :queue="relayKnocks" @decide="handleRelayKnockDecision" />
     <AssistKnockDialog
       :queue="assistKnocks"
       :allow-control="assistState?.policy.control !== 'view_only'"

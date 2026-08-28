@@ -71,12 +71,16 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
         return invoke("write_pty_input", { id, data });
       case "assist":
         return invoke("write_assist_input", { id, data });
+      case "relay":
+        // Phase 2 relay tabs are view-only; the relay refuses upstream
+        // frames from a non-controller peer anyway.
+        return Promise.resolve();
     }
   }
 
   function resizeSession(id: string, cols: number, rows: number, session: SessionConfig) {
-    if (session.protocol === "assist") {
-      // A guest tab follows the host's grid; it never resizes anything.
+    if (session.protocol === "assist" || session.protocol === "relay") {
+      // A guest / relay tab follows the host's grid; it resizes nothing.
       return Promise.resolve();
     }
     // Cloud Console viewers and Remote Assist guests follow the host's grid;
@@ -111,6 +115,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
         return invoke("close_pty", { id });
       case "assist":
         return invoke("close_assist_session", { id });
+      case "relay":
+        return invoke("close_relay_session", { id });
     }
   }
 

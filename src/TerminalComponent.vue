@@ -188,6 +188,9 @@ interface AssistGuestView {
 }
 const assistGuest = ref<AssistGuestView | null>(null);
 const isAssistGuest = computed(() => props.session.protocol === "assist");
+const isRelayGuest = computed(() => props.session.protocol === "relay");
+/** Both mirror a remote grid and never resize or echo locally. */
+const isRemoteMirror = computed(() => isAssistGuest.value || isRelayGuest.value);
 let unlistenAssistState: UnlistenFn | null = null;
 
 /** Guest tabs render the host's grid; local fitting is a no-op for them. */
@@ -532,7 +535,7 @@ function writeInput(data: string) {
 }
 
 function fit() {
-  if (isAssistGuest.value) {
+  if (isRemoteMirror.value) {
     applyRemoteSize();
     return;
   }
@@ -880,7 +883,7 @@ onMounted(() => {
     if (!props.isVisible) {
       return;
     }
-    if (isAssistGuest.value) {
+    if (isRemoteMirror.value) {
       applyRemoteSize();
       return;
     }
@@ -1199,6 +1202,27 @@ onMounted(() => {
             terminal.writeln(t("assist.guestJoined", { fingerprint: joined.fingerprint }));
             break;
           }
+          case "relay": {
+            // Same shape as an assist guest: a remote-driven mirror. The
+            // backend emits the identical state payload on its own channel.
+            assistGuest.value = { state: "handshake", role: "viewer" };
+            terminal.writeln(t("liveRelay.tabConnecting", { device: session.relayConfig.deviceLabel }));
+            unlistenAssistState?.();
+            unlistenAssistState = await listen<AssistGuestView & { id: string }>(`relay-client-state:${newId}`, (event) => {
+              assistGuest.value = event.payload;
+              applyRemoteSize();
+              if (terminal) {
+                terminal.options.disableStdin = event.payload.role !== "controller";
+              }
+            });
+            const joined = await invoke<{ fingerprint: string }>("relay_connect", {
+              id: newId,
+              deviceId: session.relayConfig.deviceId,
+              sessionId: session.relayConfig.sessionId,
+            });
+            terminal.writeln(t("liveRelay.tabConnected", { fingerprint: joined.fingerprint }));
+            break;
+          }
         }
       } catch (error) {
         if (disposed || !terminal) {
@@ -1373,9 +1397,11 @@ async function handleCancelZmodem() {
       backgroundColor: effectiveSettings.theme.background,
     }"
   >
-    <div v-if="isAssistGuest && assistGuest" class="assist-guest-bar" :class="assistGuest.role === 'controller' ? 'controlling' : assistGuest.state">
+    <div v-if="isRemoteMirror && assistGuest" class="assist-guest-bar" :class="assistGuest.role === 'controller' ? 'controlling' : assistGuest.state">
       <span class="assist-guest-label">
-        {{ $t('assist.guestBanner', { host: assistGuest.hostLabel || '…' }) }}
+        {{ isRelayGuest
+          ? $t('liveRelay.tabBanner', { device: (props.session as { relayConfig: { deviceLabel: string } }).relayConfig.deviceLabel, share: assistGuest.hostLabel || '…' })
+          : $t('assist.guestBanner', { host: assistGuest.hostLabel || '…' }) }}
         <span v-if="assistGuest.fingerprint" class="assist-guest-fingerprint">{{ assistGuest.fingerprint }}</span>
       </span>
       <span class="assist-guest-status">
@@ -1400,7 +1426,7 @@ async function handleCancelZmodem() {
         @click="releaseAssistControl"
       >{{ $t('assist.guestReleaseControl') }}</button>
     </div>
-    <div ref="terminalRootRef" :style="{ flex: 1, minHeight: 0, overflow: isAssistGuest ? 'auto' : undefined }" />
+    <div ref="terminalRootRef" :style="{ flex: 1, minHeight: 0, overflow: isRemoteMirror ? 'auto' : undefined }" />
 
     <div v-if="zmodemTransfer" class="zmodem-transfer-bar" :class="zmodemTransfer.status">
       <input ref="zmodemFileInput" type="file" hidden @change="handleZmodemFileSelected">
