@@ -12,7 +12,8 @@ import { invoke } from "@tauri-apps/api/core";
  * itself refuses upstream frames from such a peer. On a writable share the
  * consumer may ask for control, but write access is a fence the *provider*
  * issues and can revoke at any moment. Opening a brand-new session on the
- * remote device arrives in phase 4.
+ * remote device is the *open* flow below: the peer names a target the
+ * provider itself advertised, and the provider opens it as a visible tab.
  */
 
 /** One attachable session a device already publishes to Live Console. */
@@ -32,6 +33,15 @@ export interface RelayPolicySummary {
   open_kinds: string[];
 }
 
+/** One session a device is willing to open for a peer. */
+export interface RelayOpenTarget {
+  /** "local_shell" | "serial" | "bookmark" */
+  kind: string;
+  /** Opaque outside the device that minted it. */
+  id: string;
+  label: string;
+}
+
 export interface RelayDeviceEntry {
   device_id: string;
   label: string;
@@ -41,6 +51,8 @@ export interface RelayDeviceEntry {
   last_seen_at: string | null;
   relay_policy: RelayPolicySummary | null;
   attach_targets: RelayAttachTarget[];
+  /** Advertised only for the open kinds that device's user switched on. */
+  open_targets: RelayOpenTarget[];
 }
 
 export interface RelayJoinView {
@@ -69,6 +81,20 @@ export interface RelayPeerView {
 export interface RelayProviderStatus {
   enabled: boolean;
   peers: RelayPeerView[];
+}
+
+/**
+ * Payload of `relay-open-request`: a peer asked this device to open a
+ * session. The frontend opens it as a real, visible tab — the local user
+ * sees exactly what was started — shares it, and reports the session id.
+ */
+export interface RelayOpenRequest {
+  requestId: string;
+  kind: string;
+  targetId: string;
+  label: string;
+  consumerLabel: string;
+  needsApproval: boolean;
 }
 
 /** Payload of the `relay-knock` event: a peer awaiting a local decision. */
@@ -126,6 +152,15 @@ export function relayReleaseControl(id: string): Promise<void> {
   return invoke("relay_release_control", { id });
 }
 
+/**
+ * Ask a device to open a fresh session and wait for it to say which
+ * session that became. Resolves with the cloud session id, which the
+ * caller then attaches to like any other target.
+ */
+export function relayOpen(deviceId: string, kind: string, targetId: string): Promise<string> {
+  return invoke("relay_open", { deviceId, kind, targetId });
+}
+
 export function closeRelaySession(id: string): Promise<void> {
   return invoke("close_relay_session", { id });
 }
@@ -157,6 +192,20 @@ export function relaySetControl(connectionId: string, grant: boolean): Promise<v
 /** Take control back from every attached peer at once. */
 export function relayRevokeAllControl(): Promise<void> {
   return invoke("relay_revoke_all_control");
+}
+
+/** Report what this device did with an open request. */
+export function relayResolveOpen(
+  requestId: string,
+  sessionId: string | null,
+  reason: string | null,
+): Promise<void> {
+  return invoke("relay_resolve_open", { requestId, sessionId, reason });
+}
+
+/** Publish what this device is willing to open for a peer. */
+export function setRelayOpenTargets(targets: RelayOpenTarget[]): Promise<void> {
+  return invoke("cloud_bridge_set_relay_targets", { targets });
 }
 
 /** Disconnect an admitted peer (or cancel a pending knock). */

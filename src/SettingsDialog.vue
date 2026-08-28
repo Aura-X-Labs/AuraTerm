@@ -10,6 +10,7 @@ import {
   normalizeAppSettings,
   TERMINAL_THEME_PRESETS,
   type AiConfig,
+  type LiveRelaySettings,
   type AiProvider,
   type AppSettings,
   type OutputRule,
@@ -175,6 +176,10 @@ void aiHasApiKey().then((has) => { aiHasKey.value = has; }).catch(() => {});
 
 function updateAi<K extends keyof AiConfig>(key: K, value: AiConfig[K]) {
   update("aiConfig", { ...settings.value.aiConfig, [key]: value });
+}
+
+function updateRelay<K extends keyof LiveRelaySettings>(key: K, value: LiveRelaySettings[K]) {
+  update("liveRelay", { ...settings.value.liveRelay, [key]: value });
 }
 
 function onAiProviderChange(provider: AiProvider) {
@@ -929,6 +934,77 @@ async function toggleRememberMasterPassword(enabled: boolean) {
               class="settings-toggle"
               :checked="settings.allowRemoteSend"
               @change="update('allowRemoteSend', inputChecked($event))"
+            >
+          </label>
+
+          <!-- Live Relay: reachability of *this* device from the account's
+               other AuraTerms. Every gate below defaults closed. -->
+          <label class="settings-field settings-field--toggle">
+            <span>
+              <strong>{{ $t('settings.relayEnabled') }}</strong>
+              <small>{{ $t('settings.relayEnabledHint') }}</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :checked="settings.liveRelay.enabled"
+              @change="updateRelay('enabled', inputChecked($event))"
+            >
+          </label>
+
+          <label class="settings-field settings-field--toggle" :class="{ 'settings-field--disabled': !settings.liveRelay.enabled }">
+            <span>
+              <strong>{{ $t('settings.relayRequireApproval') }}</strong>
+              <small>{{ $t('settings.relayRequireApprovalHint') }}</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :disabled="!settings.liveRelay.enabled"
+              :checked="settings.liveRelay.requireApproval"
+              @change="updateRelay('requireApproval', inputChecked($event))"
+            >
+          </label>
+
+          <label class="settings-field settings-field--toggle" :class="{ 'settings-field--disabled': !settings.liveRelay.enabled }">
+            <span>
+              <strong>{{ $t('settings.relayOpenShell') }}</strong>
+              <small>{{ $t('settings.relayOpenShellHint') }}</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :disabled="!settings.liveRelay.enabled"
+              :checked="settings.liveRelay.allowOpenShell"
+              @change="updateRelay('allowOpenShell', inputChecked($event))"
+            >
+          </label>
+
+          <label class="settings-field settings-field--toggle" :class="{ 'settings-field--disabled': !settings.liveRelay.enabled }">
+            <span>
+              <strong>{{ $t('settings.relayOpenSerial') }}</strong>
+              <small>{{ $t('settings.relayOpenSerialHint') }}</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :disabled="!settings.liveRelay.enabled"
+              :checked="settings.liveRelay.allowOpenSerial"
+              @change="updateRelay('allowOpenSerial', inputChecked($event))"
+            >
+          </label>
+
+          <label class="settings-field settings-field--toggle" :class="{ 'settings-field--disabled': !settings.liveRelay.enabled }">
+            <span>
+              <strong>{{ $t('settings.relayOpenBookmark') }}</strong>
+              <small>{{ $t('settings.relayOpenBookmarkHint') }}</small>
+            </span>
+            <input
+              type="checkbox"
+              class="settings-toggle"
+              :disabled="!settings.liveRelay.enabled"
+              :checked="settings.liveRelay.allowOpenBookmark"
+              @change="updateRelay('allowOpenBookmark', inputChecked($event))"
             >
           </label>
         </div>

@@ -6,6 +6,7 @@ import {
   relayListDevices,
   type RelayAttachTarget,
   type RelayDeviceEntry,
+  type RelayOpenTarget,
   type RelayProviderStatus,
 } from "./liveRelay";
 
@@ -15,6 +16,7 @@ const props = defineProps<{ enrolled: boolean; status: RelayProviderStatus }>();
 const emit = defineEmits<{
   close: [];
   attach: [device: RelayDeviceEntry, target: RelayAttachTarget, wantControl: boolean];
+  open: [device: RelayDeviceEntry, target: RelayOpenTarget, wantControl: boolean];
   kick: [connectionId: string];
   setControl: [connectionId: string, grant: boolean];
   openAccount: [];
@@ -30,6 +32,17 @@ const loading = ref(false);
 const error = ref("");
 
 const selected = computed(() => devices.value.find((d) => d.device_id === selectedId.value) ?? null);
+
+/** Why the *attach* list is empty, or "" when it has entries. Having
+ *  nothing shared is not a blocker when the device offers openable
+ *  targets — that is exactly what open mode is for. */
+const attachBlock = computed(() => {
+  const device = selected.value;
+  if (!device) return "";
+  const reason = blockedReason(device);
+  if (reason === t("liveRelay.deviceNoShares") && device.open_targets.length) return "";
+  return reason;
+});
 
 async function refresh() {
   if (!props.enrolled) return;
@@ -54,6 +67,12 @@ function blockedReason(device: RelayDeviceEntry): string {
   if (!device.relay_policy.allow_attach) return t("liveRelay.deviceAttachOff");
   if (device.attach_targets.length === 0) return t("liveRelay.deviceNoShares");
   return "";
+}
+
+function openKindLabel(kind: string): string {
+  if (kind === "local_shell") return t("liveRelay.kindShell");
+  if (kind === "serial") return t("liveRelay.kindSerial");
+  return t("liveRelay.kindBookmark");
 }
 
 function presenceLabel(device: RelayDeviceEntry): string {
@@ -121,7 +140,7 @@ onMounted(refresh);
         <template v-if="selected">
           <div class="relay-divider" />
           <span class="relay-label">{{ t('liveRelay.attachTargets') }}</span>
-          <p v-if="blockedReason(selected)" class="relay-hint">{{ blockedReason(selected) }}</p>
+          <p v-if="attachBlock" class="relay-hint">{{ attachBlock }}</p>
           <ul v-else class="relay-targets">
             <li v-for="target in selected.attach_targets" :key="target.session_id">
               <button type="button" class="relay-target" @click="emit('attach', selected, target, wantControl && !target.read_only)">
@@ -133,7 +152,21 @@ onMounted(refresh);
               </button>
             </li>
           </ul>
-          <label v-if="selected.attach_targets.some((tgt) => !tgt.read_only)" class="relay-check">
+          <template v-if="selected.presence === 'online' && selected.open_targets.length">
+            <div class="relay-divider" />
+            <span class="relay-label">{{ t('liveRelay.openTargets') }}</span>
+            <ul class="relay-targets">
+              <li v-for="target in selected.open_targets" :key="target.kind + target.id">
+                <button type="button" class="relay-target" @click="emit('open', selected, target, wantControl)">
+                  <span class="relay-target-label">{{ target.label }}</span>
+                  <span class="relay-target-meta">{{ openKindLabel(target.kind) }}</span>
+                </button>
+              </li>
+            </ul>
+            <p class="relay-hint">{{ t('liveRelay.openNote') }}</p>
+          </template>
+
+          <label v-if="selected.attach_targets.some((tgt) => !tgt.read_only) || selected.open_targets.length" class="relay-check">
             <input v-model="wantControl" type="checkbox">
             <span>{{ t('liveRelay.wantControl') }}</span>
           </label>
