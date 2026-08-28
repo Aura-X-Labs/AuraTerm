@@ -221,6 +221,51 @@ impl Default for AiConfig {
 fn default_ai_provider() -> String { "anthropic".to_string() }
 fn default_ai_model() -> String { "claude-opus-4-8".to_string() }
 
+/// Live Relay provider policy (design `docs/plans/live-sync-design.md` §5.8):
+/// whether *this* machine may be reached from the account's other AuraTerm
+/// devices, and what they may do. No UI until Phase 4 — every gate defaults
+/// closed except plain attach. A summary of this policy rides along with the
+/// device's presence ping so the server can refuse doomed grant requests
+/// early; the local process stays the authority on every actual request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LiveRelaySettings {
+    /// Master gate; off means this device is not reachable via Live Relay.
+    pub enabled: bool,
+    /// Allow attaching to sessions this device already shares.
+    pub allow_attach: bool,
+    /// Allow a peer device to open a fresh local shell here.
+    pub allow_open_shell: bool,
+    /// Allow a peer device to open one of this machine's serial ports.
+    pub allow_open_serial: bool,
+    /// Allow a peer device to start SSH/Telnet from this machine's bookmarks.
+    pub allow_open_bookmark: bool,
+    /// Ask on this machine before admitting each peer.
+    pub require_approval: bool,
+    /// Allow peer input at all (still clamped by the global
+    /// `allow_remote_send` gate shared with Cloud Console).
+    pub allow_remote_input: bool,
+    pub max_concurrent_peers: u32,
+    /// Disconnect a peer after this long without input; 0 disables.
+    pub idle_timeout_minutes: u32,
+}
+
+impl Default for LiveRelaySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_attach: true,
+            allow_open_shell: false,
+            allow_open_serial: false,
+            allow_open_bookmark: false,
+            require_approval: true,
+            allow_remote_input: true,
+            max_concurrent_peers: 3,
+            idle_timeout_minutes: 30,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -318,6 +363,9 @@ pub struct Settings {
     /// AI assistant configuration (API key excluded; stored encrypted separately).
     #[serde(default)]
     pub ai_config: AiConfig,
+    /// Live Relay provider policy (no UI yet; defaults keep the device closed).
+    #[serde(default)]
+    pub live_relay: LiveRelaySettings,
 }
 
 fn default_true() -> bool { true }
@@ -364,6 +412,7 @@ impl Default for Settings {
             credentials_initialized: false,
             remember_master_password: false,
             ai_config: AiConfig::default(),
+            live_relay: LiveRelaySettings::default(),
         }
     }
 }

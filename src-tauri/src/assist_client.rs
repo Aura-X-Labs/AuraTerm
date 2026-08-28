@@ -6,40 +6,55 @@
 //! snapshot/output and — only while the host has granted control — send
 //! keystrokes as E2EE `INPUT` frames. No account is needed on this side;
 //! nothing about the session is persisted.
+//!
+//! Only the assist-specific parts live here: the `/assist/v1/join` call,
+//! the SPAKE2 key agreement, and the Tauri command surface. Everything
+//! after key agreement — relay admission, the E2EE tab registry, the
+//! reader loop rendering into the tab — is the shared `remote_tab` module.
 
 use crate::account::auraxlab_origin;
 use crate::assist::{self, PROTOCOL_VERSION};
 use crate::e2ee::{PeerCipher, DIRECTION_GUEST, DIRECTION_HOST};
-use crate::util::{self, Utf8StreamDecoder};
-use crate::{PtyExitEvent, PtyOutputEvent};
+use crate::remote_tab::{self, FrameClass, RemoteTabs, TabProtocol, TabStateEvent};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio_tungstenite::tungstenite::Message;
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_INPUT_BYTES: usize = 16 * 1024;
-
-#[derive(Default)]
-pub struct AssistClientState {
-    sessions: Arc<Mutex<HashMap<String, GuestSession>>>,
+/// Assist frame names on the shared remote-tab vocabulary.
+fn classify_assist_frame(kind: &str) -> FrameClass {
+    match kind {
+        "ASSIST_STATE" => FrameClass::PeerState,
+        "TERMINAL_SNAPSHOT" => FrameClass::Snapshot,
+        "OUTPUT" => FrameClass::Output,
+        "RESIZE" => FrameClass::Resize,
+        "ASSIST_SESSION_SWITCHED" => FrameClass::SessionSwitched,
+        "CONTROL_GRANT" => FrameClass::ControlGrant,
+        "CONTROL_REVOKE" => FrameClass::ControlRevoke,
+        _ => FrameClass::Ignore,
+    }
 }
 
-type Sessions = Arc<Mutex<HashMap<String, GuestSession>>>;
+static ASSIST_TAB_PROTOCOL: TabProtocol = TabProtocol {
+    state_event: "assist-client-state",
+    own_direction: DIRECTION_GUEST,
+    peer_direction: DIRECTION_HOST,
+    ended_message: "Remote assist ended",
+    default_end_reason: "host_ended",
+    classify: classify_assist_frame,
+};
 
-struct GuestSession {
-    assist_id: String,
-    connection_id: String,
-    cipher: PeerCipher,
-    role: String,
-    fence: Option<u64>,
-    input_seq: u64,
-    outbound: tokio::sync::mpsc::Sender<Message>,
+pub struct AssistClientState {
+    pub(crate) tabs: RemoteTabs,
+}
+
+impl Default for AssistClientState {
+    fn default() -> Self {
+        Self {
+            tabs: RemoteTabs::new(&ASSIST_TAB_PROTOCOL),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -55,78 +70,6 @@ pub struct AssistJoinView {
     pub assist_id: String,
     pub connection_id: String,
     pub fingerprint: String,
-}
-
-/// Mirror of the guest's view of the session, emitted as
-/// `assist-client-state:<id>` whenever it changes.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GuestStateEvent {
-    pub id: String,
-    /// "handshake" | "pending_approval" | "active" | "denied" | "ended"
-    pub state: String,
-    /// "viewer" | "controller"
-    pub role: String,
-    pub cols: Option<u16>,
-    pub rows: Option<u16>,
-    pub host_label: Option<String>,
-    pub fingerprint: Option<String>,
-    pub control_policy: Option<String>,
-    pub reason: Option<String>,
-}
-
-fn emit_state<R: tauri::Runtime>(app: &AppHandle<R>, event: GuestStateEvent) {
-    let _ = app.emit(&util::session_event("assist-client-state", &event.id), event);
-}
-
-fn emit_output<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, decoder: &mut Utf8StreamDecoder, bytes: &[u8]) {
-    let text = decoder.push(bytes);
-    if !text.is_empty() {
-        let _ = app.emit(
-            &util::session_event("pty-output", id),
-            PtyOutputEvent {
-                id: id.to_string(),
-                data: text,
-            },
-        );
-    }
-}
-
-fn decode_hex(value: &str) -> Vec<u8> {
-    if value.len() % 2 != 0 {
-        return Vec::new();
-    }
-    (0..value.len())
-        .step_by(2)
-        .filter_map(|i| u8::from_str_radix(&value[i..i + 2], 16).ok())
-        .collect()
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-async fn recv_text(
-    stream: &mut futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    >,
-) -> Result<serde_json::Value, String> {
-    loop {
-        let message = tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.next())
-            .await
-            .map_err(|_| "timed out waiting for the host".to_string())?
-            .ok_or_else(|| "relay closed the connection".to_string())?
-            .map_err(|e| format!("relay error: {e}"))?;
-        match message {
-            Message::Text(text) => {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                    return Ok(value);
-                }
-            }
-            Message::Close(_) => return Err("relay closed the connection".into()),
-            _ => continue,
-        }
-    }
 }
 
 /// Join a host's assist session as a new terminal tab `id`.
@@ -169,27 +112,12 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
         return Err("This share code is invalid, expired, already used, or the host is offline.".into());
     }
     let grant: JoinGrant = response.json().await.map_err(|e| e.to_string())?;
-    if !(grant.relay_url.starts_with("ws://") || grant.relay_url.starts_with("wss://")) {
-        return Err("The server has no WebSocket relay configured.".into());
-    }
 
     // ── relay admission ─────────────────────────────────────────────────
-    let (socket, _) = tokio_tungstenite::connect_async(&grant.relay_url)
-        .await
-        .map_err(|e| format!("relay connection failed: {e}"))?;
-    let (mut sink, mut stream) = socket.split();
-    sink.send(Message::Text(json!({"kind": "AUTH", "ticket": grant.ticket}).to_string().into()))
-        .await
-        .map_err(|e| format!("relay AUTH failed: {e}"))?;
-    let auth = recv_text(&mut stream).await?;
-    if auth.get("kind").and_then(|v| v.as_str()) != Some("AUTH_OK") {
-        return Err("The relay refused the assist ticket.".into());
-    }
-    let connection_id = auth
-        .get("connection_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "relay did not assign a connection id".to_string())?
-        .to_string();
+    let admission = remote_tab::connect_relay(&grant.relay_url, &grant.ticket).await?;
+    let connection_id = admission.connection_id;
+    let outbound = admission.outbound;
+    let mut stream = admission.stream;
 
     // ── SPAKE2 with the host ────────────────────────────────────────────
     let secret = parsed.secret.clone();
@@ -202,16 +130,17 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
     .map_err(|e| e.to_string())?;
     let guest = assist::guest_pake(&w, &assist_id, &connection_id)?;
     let share = *guest.share();
-    sink.send(Message::Text(
-        json!({"kind": "PAKE_A", "protocol_version": PROTOCOL_VERSION,
-               "pa": URL_SAFE_NO_PAD.encode(share)})
-        .to_string()
-        .into(),
-    ))
-    .await
-    .map_err(|e| format!("relay send failed: {e}"))?;
+    outbound
+        .send(Message::Text(
+            json!({"kind": "PAKE_A", "protocol_version": PROTOCOL_VERSION,
+                   "pa": URL_SAFE_NO_PAD.encode(share)})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(|_| "relay send failed".to_string())?;
     let pake_b = loop {
-        let frame = recv_text(&mut stream).await?;
+        let frame = remote_tab::recv_text(&mut stream).await?;
         match frame.get("kind").and_then(|v| v.as_str()) {
             Some("PAKE_B") => break frame,
             Some("PAKE_FAILED") => return Err("The share code was not accepted by the host.".into()),
@@ -229,56 +158,35 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
     if !keys.verify_peer_confirmation(&confirm_b) {
         // Our own check failed: either a typo in the code or a host that
         // does not know it. Drop the connection; the host counts it.
-        let _ = sink.close().await;
+        drop(outbound);
         return Err("Share code mismatch — check the last 8 characters and try again.".into());
     }
-    sink.send(Message::Text(
-        json!({"kind": "PAKE_CONFIRM", "confirm_a": URL_SAFE_NO_PAD.encode(keys.own_confirmation())})
-            .to_string()
-            .into(),
-    ))
-    .await
-    .map_err(|e| format!("relay send failed: {e}"))?;
+    outbound
+        .send(Message::Text(
+            json!({"kind": "PAKE_CONFIRM", "confirm_a": URL_SAFE_NO_PAD.encode(keys.own_confirmation())})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .map_err(|_| "relay send failed".to_string())?;
     let key = assist::session_key(&keys, &assist_id, &connection_id);
     let fingerprint = assist::fingerprint(&keys);
     let cipher = PeerCipher::new(*key);
 
-    // ── pumps ───────────────────────────────────────────────────────────
-    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Message>(256);
-    tauri::async_runtime::spawn(async move {
-        while let Some(message) = outbound_rx.recv().await {
-            if sink.send(message).await.is_err() {
-                break;
-            }
-        }
-        let _ = sink.close().await;
-    });
-    {
-        let mut sessions = state.sessions.lock().map_err(|e| e.to_string())?;
-        sessions.insert(
-            id.clone(),
-            GuestSession {
-                assist_id: assist_id.clone(),
-                connection_id: connection_id.clone(),
-                cipher: cipher.clone(),
-                role: "viewer".into(),
-                fence: None,
-                input_seq: 0,
-                outbound: outbound_tx.clone(),
-            },
-        );
-    }
-    send_inner(
-        state,
-        &id,
-        json!({"kind": "ASSIST_HELLO", "client": "auraterm",
-               "display_name": display_name.unwrap_or_default().chars().filter(|c| !c.is_control()).take(32).collect::<String>(),
-               "app_version": env!("CARGO_PKG_VERSION")}),
-    )
-    .await?;
-    emit_state(
+    // ── hand the keyed connection to the shared remote-tab plumbing ────
+    state.tabs.insert(&id, &assist_id, &connection_id, cipher, outbound);
+    state
+        .tabs
+        .send(
+            &id,
+            json!({"kind": "ASSIST_HELLO", "client": "auraterm",
+                   "display_name": display_name.unwrap_or_default().chars().filter(|c| !c.is_control()).take(32).collect::<String>(),
+                   "app_version": env!("CARGO_PKG_VERSION")}),
+        )
+        .await?;
+    state.tabs.emit_state(
         app,
-        GuestStateEvent {
+        TabStateEvent {
             id: id.clone(),
             state: "handshake".into(),
             role: "viewer".into(),
@@ -290,7 +198,7 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
             reason: None,
         },
     );
-    spawn_reader(app.clone(), Arc::clone(&state.sessions), id.clone(), assist_id.clone(), connection_id.clone(), cipher, fingerprint.clone(), stream);
+    state.tabs.spawn_reader(app.clone(), id, fingerprint.clone(), stream);
     Ok(AssistJoinView {
         assist_id,
         connection_id,
@@ -298,276 +206,39 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
     })
 }
 
-fn spawn_reader<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    sessions: Sessions,
-    id: String,
-    assist_id: String,
-    connection_id: String,
-    cipher: PeerCipher,
-    fingerprint: String,
-    mut stream: futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    >,
-) {
-    tauri::async_runtime::spawn(async move {
-        let mut decoder = Utf8StreamDecoder::new();
-        let mut host_label: Option<String> = None;
-        let mut cols: Option<u16> = None;
-        let mut rows: Option<u16> = None;
-        let mut role = "viewer".to_string();
-        let mut end_reason = "disconnected".to_string();
-        while let Some(message) = stream.next().await {
-            let Ok(message) = message else { break };
-            let Message::Text(text) = message else {
-                if matches!(message, Message::Close(_)) {
-                    break;
-                }
-                continue;
-            };
-            let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else {
-                continue;
-            };
-            match frame.get("kind").and_then(|v| v.as_str()) {
-                Some("SESSION_END") => {
-                    end_reason = frame.get("reason").and_then(|v| v.as_str()).unwrap_or("host_ended").to_string();
-                    break;
-                }
-                Some("E2EE_FRAME") => {}
-                _ => continue,
-            }
-            let Ok(inner) = cipher.decrypt(&assist_id, &connection_id, DIRECTION_HOST, &frame) else {
-                continue;
-            };
-            let kind = inner.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            match kind {
-                "ASSIST_STATE" => {
-                    if let Some(label) = inner.get("host_label").and_then(|v| v.as_str()) {
-                        host_label = Some(label.to_string());
-                    }
-                    cols = inner.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16).or(cols);
-                    rows = inner.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16).or(rows);
-                    role = inner.get("role").and_then(|v| v.as_str()).unwrap_or("viewer").to_string();
-                    let fence = inner.get("fence").and_then(|v| v.as_u64());
-                    if let Ok(mut sessions) = sessions.lock() {
-                        if let Some(session) = sessions.get_mut(&id) {
-                            session.role = role.clone();
-                            session.fence = fence.or(session.fence);
-                        }
-                    }
-                    let status = inner.get("state").and_then(|v| v.as_str()).unwrap_or("active").to_string();
-                    if status == "denied" {
-                        end_reason = inner.get("reason").and_then(|v| v.as_str()).unwrap_or("denied").to_string();
-                        emit_state(
-                            &app,
-                            GuestStateEvent {
-                                id: id.clone(),
-                                state: "denied".into(),
-                                role: role.clone(),
-                                cols,
-                                rows,
-                                host_label: host_label.clone(),
-                                fingerprint: Some(fingerprint.clone()),
-                                control_policy: None,
-                                reason: Some(end_reason.clone()),
-                            },
-                        );
-                        break;
-                    }
-                    emit_state(
-                        &app,
-                        GuestStateEvent {
-                            id: id.clone(),
-                            state: status,
-                            role: role.clone(),
-                            cols,
-                            rows,
-                            host_label: host_label.clone(),
-                            fingerprint: Some(fingerprint.clone()),
-                            control_policy: inner.get("control_policy").and_then(|v| v.as_str()).map(str::to_string),
-                            reason: None,
-                        },
-                    );
-                }
-                "TERMINAL_SNAPSHOT" | "OUTPUT" => {
-                    if kind == "TERMINAL_SNAPSHOT" {
-                        cols = inner.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16).or(cols);
-                        rows = inner.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16).or(rows);
-                        // Clear + home so the snapshot replaces whatever was shown.
-                        emit_output(&app, &id, &mut decoder, b"\x1b[2J\x1b[H");
-                        emit_state(
-                            &app,
-                            GuestStateEvent {
-                                id: id.clone(),
-                                state: "active".into(),
-                                role: role.clone(),
-                                cols,
-                                rows,
-                                host_label: host_label.clone(),
-                                fingerprint: Some(fingerprint.clone()),
-                                control_policy: None,
-                                reason: None,
-                            },
-                        );
-                    }
-                    let bytes = decode_hex(inner.get("data_hex").and_then(|v| v.as_str()).unwrap_or(""));
-                    emit_output(&app, &id, &mut decoder, &bytes);
-                }
-                "RESIZE" | "ASSIST_SESSION_SWITCHED" => {
-                    cols = inner.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16).or(cols);
-                    rows = inner.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16).or(rows);
-                    emit_state(
-                        &app,
-                        GuestStateEvent {
-                            id: id.clone(),
-                            state: "active".into(),
-                            role: role.clone(),
-                            cols,
-                            rows,
-                            host_label: host_label.clone(),
-                            fingerprint: Some(fingerprint.clone()),
-                            control_policy: None,
-                            reason: (kind == "ASSIST_SESSION_SWITCHED").then(|| "switched".to_string()),
-                        },
-                    );
-                }
-                "CONTROL_GRANT" | "CONTROL_REVOKE" => {
-                    role = if kind == "CONTROL_GRANT" { "controller" } else { "viewer" }.to_string();
-                    let fence = inner.get("fence").and_then(|v| v.as_u64());
-                    if let Ok(mut sessions) = sessions.lock() {
-                        if let Some(session) = sessions.get_mut(&id) {
-                            session.role = role.clone();
-                            if fence.is_some() {
-                                session.fence = fence;
-                            }
-                        }
-                    }
-                    emit_state(
-                        &app,
-                        GuestStateEvent {
-                            id: id.clone(),
-                            state: "active".into(),
-                            role: role.clone(),
-                            cols,
-                            rows,
-                            host_label: host_label.clone(),
-                            fingerprint: Some(fingerprint.clone()),
-                            control_policy: None,
-                            reason: inner.get("reason").and_then(|v| v.as_str()).map(str::to_string),
-                        },
-                    );
-                }
-                _ => {}
-            }
-        }
-        // Connection over: drop the session, tell the tab.
-        if let Ok(mut sessions) = sessions.lock() {
-            sessions.remove(&id);
-        }
-        emit_state(
-            &app,
-            GuestStateEvent {
-                id: id.clone(),
-                state: "ended".into(),
-                role,
-                cols,
-                rows,
-                host_label,
-                fingerprint: Some(fingerprint),
-                control_policy: None,
-                reason: Some(end_reason.clone()),
-            },
-        );
-        let _ = app.emit(
-            &util::session_event("pty-exit", &id),
-            PtyExitEvent {
-                id: id.clone(),
-                message: format!("Remote assist ended ({end_reason})"),
-            },
-        );
-    });
-}
-
-async fn send_inner(state: &AssistClientState, id: &str, frame: serde_json::Value) -> Result<(), String> {
-    let (cipher, outbound, assist_id, connection_id) = {
-        let sessions = state.sessions.lock().map_err(|e| e.to_string())?;
-        let session = sessions.get(id).ok_or_else(|| "assist session is not connected".to_string())?;
-        (
-            session.cipher.clone(),
-            session.outbound.clone(),
-            session.assist_id.clone(),
-            session.connection_id.clone(),
-        )
-    };
-    let _guard = cipher.send_lock.lock().await;
-    let envelope = cipher.encrypt(&assist_id, &connection_id, DIRECTION_GUEST, &frame)?;
-    outbound
-        .send(Message::Text(envelope.to_string().into()))
-        .await
-        .map_err(|_| "relay connection is closed".to_string())
-}
-
 /// Keystrokes from the tab; dropped unless the host granted control.
 #[tauri::command]
 pub async fn write_assist_input(state: State<'_, AssistClientState>, id: String, data: String) -> Result<(), String> {
-    write_input(state.inner(), &id, &data).await
-}
-
-pub(crate) async fn write_input(state: &AssistClientState, id: &str, data: &str) -> Result<(), String> {
-    if data.is_empty() || data.len() > MAX_INPUT_BYTES {
-        return Ok(());
-    }
-    let (fence, seq) = {
-        let mut sessions = state.sessions.lock().map_err(|e| e.to_string())?;
-        let session = sessions.get_mut(id).ok_or_else(|| "assist session is not connected".to_string())?;
-        if session.role != "controller" {
-            return Ok(());
-        }
-        let Some(fence) = session.fence else { return Ok(()) };
-        session.input_seq += 1;
-        (fence, session.input_seq)
-    };
-    send_inner(
-        state,
-        id,
-        json!({"kind": "INPUT", "fence": fence, "input_seq": seq, "data_hex": encode_hex(data.as_bytes())}),
-    )
-    .await
+    state.inner().tabs.write_input(&id, &data).await
 }
 
 #[tauri::command]
 pub async fn assist_request_control(state: State<'_, AssistClientState>, id: String) -> Result<(), String> {
-    send_inner(state.inner(), &id, json!({"kind": "CONTROL_REQUEST"})).await
+    state.inner().tabs.send(&id, json!({"kind": "CONTROL_REQUEST"})).await
 }
 
 #[tauri::command]
 pub async fn assist_release_control(state: State<'_, AssistClientState>, id: String) -> Result<(), String> {
-    if let Ok(mut sessions) = state.sessions.lock() {
-        if let Some(session) = sessions.get_mut(&id) {
-            session.role = "viewer".into();
-        }
-    }
-    send_inner(state.inner(), &id, json!({"kind": "CONTROL_RELEASE"})).await
+    state.inner().tabs.set_role(&id, "viewer");
+    state.inner().tabs.send(&id, json!({"kind": "CONTROL_RELEASE"})).await
 }
 
 #[tauri::command]
 pub fn close_assist_session(state: State<'_, AssistClientState>, id: String) -> Result<(), String> {
-    // Dropping the outbound sender closes the writer, which closes the socket;
-    // the reader then emits the final state/exit events.
-    state.sessions.lock().map_err(|e| e.to_string())?.remove(&id);
-    Ok(())
+    state.inner().tabs.close(&id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-
     // ── end-to-end guest handshake against an in-process fake server ───────
 
     use crate::e2ee::DIRECTION_HOST;
     use crate::pake::Spake2Keys;
-    use std::sync::Arc;
+    use crate::remote_tab::encode_hex;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tokio::net::TcpListener;
 
     /// Minimal AuraXLab: answers /assist/v1/join with a ticket pointing at
@@ -611,6 +282,8 @@ mod tests {
     /// E2EE frames like the real host would (ASSIST_STATE, snapshot,
     /// CONTROL_GRANT on request, INPUT_ACK + echo on input).
     async fn fake_relay_host(secret: String, assist_id: String, observed: Arc<Mutex<HostSide>>) -> String {
+        use futures_util::{SinkExt, StreamExt};
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         tauri::async_runtime::spawn(async move {
@@ -732,14 +405,14 @@ mod tests {
                 assert_eq!(host.frames_from_guest[0]["client"], "auraterm");
             }
             // Viewer: input is dropped locally, never sent.
-            wait_for(|| state.sessions.lock().unwrap().get("tab-guest").map(|s| s.fence.is_some()).unwrap_or(false), "ASSIST_STATE fence").await;
-            write_input(&state, "tab-guest", "nope").await.unwrap();
+            wait_for(|| state.tabs.fence("tab-guest").is_some(), "ASSIST_STATE fence").await;
+            state.tabs.write_input("tab-guest", "nope").await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert_eq!(observed.lock().unwrap().frames_from_guest.len(), 1);
             // Request control → grant → typing reaches the host with the new fence.
-            send_inner(&state, "tab-guest", json!({"kind": "CONTROL_REQUEST"})).await.unwrap();
-            wait_for(|| state.sessions.lock().unwrap().get("tab-guest").map(|s| s.role == "controller").unwrap_or(false), "CONTROL_GRANT").await;
-            write_input(&state, "tab-guest", "ls\n").await.unwrap();
+            state.tabs.send("tab-guest", json!({"kind": "CONTROL_REQUEST"})).await.unwrap();
+            wait_for(|| state.tabs.role("tab-guest").as_deref() == Some("controller"), "CONTROL_GRANT").await;
+            state.tabs.write_input("tab-guest", "ls\n").await.unwrap();
             wait_for(|| observed.lock().unwrap().frames_from_guest.iter().any(|f| f["kind"] == "INPUT"), "INPUT").await;
             let host = observed.lock().unwrap();
             let input = host.frames_from_guest.iter().find(|f| f["kind"] == "INPUT").unwrap();
@@ -762,7 +435,7 @@ mod tests {
                 .await
                 .expect_err("a wrong secret must not join");
             assert!(error.contains("mismatch"), "{error}");
-            assert!(state.sessions.lock().unwrap().is_empty());
+            assert!(state.tabs.is_empty());
             // The host never got a confirmation (and so never derived keys).
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert!(observed.lock().unwrap().keys.is_none());
@@ -771,12 +444,5 @@ mod tests {
             let unknown = join_session(app.handle(), &state, &origin, "t".into(), "ZZZZ-GHJK-LMNP".into(), None).await.unwrap_err();
             assert!(unknown.contains("invalid"), "{unknown}");
         });
-    }
-
-    #[test]
-    fn hex_helpers_round_trip() {
-        assert_eq!(encode_hex(b"ls\n"), "6c730a");
-        assert_eq!(decode_hex("6c730a"), b"ls\n");
-        assert!(decode_hex("abc").is_empty());
     }
 }

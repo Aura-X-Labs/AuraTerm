@@ -82,6 +82,46 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   maxTokens: null,
 };
 
+/**
+ * Live Relay provider policy (design docs/plans/live-sync-design.md §5.8):
+ * whether this machine may be reached from the account's other AuraTerm
+ * devices, and what they may do. No UI until Phase 4 — every gate defaults
+ * closed except plain attach. A summary is mirrored into the cloud bridge
+ * (`cloud_bridge_set_relay_policy`) and reported with presence pings; the
+ * local process stays the authority on every actual request.
+ */
+export interface LiveRelaySettings {
+  /** Master gate; off means this device is unreachable via Live Relay. */
+  enabled: boolean;
+  /** Allow attaching to sessions this device already shares. */
+  allowAttach: boolean;
+  /** Allow a peer device to open a fresh local shell here. */
+  allowOpenShell: boolean;
+  /** Allow a peer device to open one of this machine's serial ports. */
+  allowOpenSerial: boolean;
+  /** Allow a peer device to start SSH/Telnet from this machine's bookmarks. */
+  allowOpenBookmark: boolean;
+  /** Ask on this machine before admitting each peer. */
+  requireApproval: boolean;
+  /** Allow peer input at all (still clamped by the global `allowRemoteSend` gate). */
+  allowRemoteInput: boolean;
+  maxConcurrentPeers: number;
+  /** Disconnect a peer after this long without input; 0 disables. */
+  idleTimeoutMinutes: number;
+}
+
+export const DEFAULT_LIVE_RELAY: LiveRelaySettings = {
+  enabled: false,
+  allowAttach: true,
+  allowOpenShell: false,
+  allowOpenSerial: false,
+  allowOpenBookmark: false,
+  requireApproval: true,
+  allowRemoteInput: true,
+  maxConcurrentPeers: 3,
+  idleTimeoutMinutes: 30,
+};
+
 export const TERMINAL_THEME_KEYS: Array<keyof TerminalTheme> = [
   "background",
   "foreground",
@@ -236,6 +276,8 @@ export interface AppSettings {
   rememberMasterPassword?: boolean;
   /** AI assistant configuration (API key excluded; stored encrypted separately) */
   aiConfig: AiConfig;
+  /** Live Relay provider policy (no UI yet; defaults keep the device closed). */
+  liveRelay: LiveRelaySettings;
 }
 
 const LEGACY_DEFAULT_THEME: TerminalTheme = {
@@ -566,6 +608,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   credentialsInitialized: false,
   rememberMasterPassword: false,
   aiConfig: DEFAULT_AI_CONFIG,
+  liveRelay: DEFAULT_LIVE_RELAY,
 };
 
 export const MAX_INPUT_HISTORY = 100;
@@ -686,6 +729,23 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     credentialsInitialized: value?.credentialsInitialized ?? DEFAULT_SETTINGS.credentialsInitialized,
     rememberMasterPassword: value?.rememberMasterPassword ?? DEFAULT_SETTINGS.rememberMasterPassword,
     aiConfig: normalizeAiConfig(value?.aiConfig),
+    liveRelay: normalizeLiveRelay(value?.liveRelay),
+  };
+}
+
+export function normalizeLiveRelay(value?: Partial<LiveRelaySettings> | null): LiveRelaySettings {
+  const clampCount = (raw: unknown, fallback: number) =>
+    typeof raw === "number" && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : fallback;
+  return {
+    enabled: value?.enabled === true,
+    allowAttach: value?.allowAttach !== false,
+    allowOpenShell: value?.allowOpenShell === true,
+    allowOpenSerial: value?.allowOpenSerial === true,
+    allowOpenBookmark: value?.allowOpenBookmark === true,
+    requireApproval: value?.requireApproval !== false,
+    allowRemoteInput: value?.allowRemoteInput !== false,
+    maxConcurrentPeers: Math.max(1, clampCount(value?.maxConcurrentPeers, DEFAULT_LIVE_RELAY.maxConcurrentPeers)),
+    idleTimeoutMinutes: clampCount(value?.idleTimeoutMinutes, DEFAULT_LIVE_RELAY.idleTimeoutMinutes),
   };
 }
 

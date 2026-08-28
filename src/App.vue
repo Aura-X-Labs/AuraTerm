@@ -38,6 +38,7 @@ import { aiHasApiKey } from "./ai";
 import {
   cloudBridgeStatus,
   setCloudBridgeAllowRemoteSend,
+  setCloudBridgeRelayPolicy,
   shareSessionToCloud,
   stopCloudShare,
   type CloudBridgeStatus,
@@ -544,9 +545,11 @@ onMounted(async () => {
   hasLoadedSettings.value = true;
 
   if (isMainWindow) {
-    // Mirror the persisted TX gate into the bridge (it fails closed until
-    // this arrives), then resolve the sign-in state for the Cloud menu.
+    // Mirror the persisted TX gate and Live Relay policy into the bridge
+    // (both fail closed until this arrives), then resolve the sign-in state
+    // for the Cloud menu.
     void setCloudBridgeAllowRemoteSend(settings.value.allowRemoteSend).catch(() => {});
+    void setCloudBridgeRelayPolicy(settings.value.liveRelay).catch(() => {});
     void refreshSyncView()
       .catch(() => {})
       .finally(() => syncCloudMenuState());
@@ -1014,6 +1017,13 @@ watch(() => settings.value.allowRemoteSend, (allowed, was) => {
     await refreshCloudBridgeStatus().catch(() => {});
   })();
 });
+
+// Mirror the Live Relay policy into the bridge whenever it changes; the next
+// presence ping carries the updated capability summary to the server.
+watch(() => settings.value.liveRelay, (policy) => {
+  if (!isMainWindow) return;
+  void setCloudBridgeRelayPolicy(policy).catch(() => {});
+}, { deep: true });
 
 function showCloudToast(text: string, error = false) {
   cloudToast.value = { text, error };
