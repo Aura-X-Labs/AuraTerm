@@ -206,6 +206,12 @@ MSIX packaging reads optional environment variables for store metadata:
 - `AURATERM_MSIX_DESCRIPTION`
 - `AURATERM_MSIX_MIN_VERSION`
 - `AURATERM_MSIX_MAX_VERSION_TESTED`
+- `AURATERM_MSIX_DESKTOP_SHORTCUT` — set to `0`/`false`/`no`/`off` to omit the desktop shortcut (on by default)
+
+The package declares a desktop shortcut via the `desktop7` `windows.shortcut` manifest extension. The
+Start menu entry is created automatically from `<Application>`, so only the desktop shortcut is declared.
+`desktop7` is listed in `IgnorableNamespaces`, so Windows builds older than 19645 ignore the extension and
+install the package without a desktop shortcut instead of failing manifest validation.
 
 See `docs/Windows-Release.md` for full Windows release and code-signing instructions.
 

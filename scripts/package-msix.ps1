@@ -161,6 +161,22 @@ function Convert-ToApplicationId {
     return ($normalized -join '.')
 }
 
+function Convert-ToShortcutFileName {
+    param(
+        [string]$Value,
+        [string]$Fallback = 'AuraTerm'
+    )
+
+    # ST_FileName rejects <>:"/\|?* and any segment that ends with a period.
+    $sanitized = ($Value -replace '[<>:"/\\|?*]', ' ')
+    $sanitized = ($sanitized -replace '\s+', ' ').Trim().TrimEnd('.')
+    if (-not $sanitized) {
+        return $Fallback
+    }
+
+    return $sanitized
+}
+
 function New-Directory {
     param([string]$Path)
 
@@ -277,6 +293,13 @@ try {
     $maxVersionTested = if ($env:AURATERM_MSIX_MAX_VERSION_TESTED) { $env:AURATERM_MSIX_MAX_VERSION_TESTED } else { '10.0.26100.0' }
     $publisher = if ($env:AURATERM_MSIX_PUBLISHER) { $env:AURATERM_MSIX_PUBLISHER } else { $defaultMsixPublisher }
 
+    $desktopShortcutSetting = if ($env:AURATERM_MSIX_DESKTOP_SHORTCUT) { $env:AURATERM_MSIX_DESKTOP_SHORTCUT.Trim().ToLowerInvariant() } else { '' }
+    $desktopShortcutEnabled = $desktopShortcutSetting -notin @('0', 'false', 'no', 'off')
+    $shortcutFileName = Convert-ToShortcutFileName -Value $displayName
+    # Built as a literal so PowerShell does not evaluate $(Desktop) as a subexpression when the
+    # manifest here-string is expanded. Windows resolves it to %USERPROFILE%\Desktop at install time.
+    $desktopShortcutFile = '$(Desktop)\' + $shortcutFileName + '.lnk'
+
     $outputDir = if ($env:AURATERM_MSIX_OUTPUT_DIR) {
         $env:AURATERM_MSIX_OUTPUT_DIR
     }
@@ -304,6 +327,30 @@ try {
     Resize-Png -Source $iconSource -Destination (Join-Path $imagesDir 'Square150x150Logo.png') -Width 150 -Height 150
     Resize-Png -Source $iconSource -Destination (Join-Path $imagesDir 'StoreLogo.png') -Width 50 -Height 50
 
+    $applicationExtensionsXml = ''
+    if ($desktopShortcutEnabled) {
+        # A shortcut icon has to be a standalone .ico/.png in the package; Windows will not read the
+        # icon out of the executable's resource section for a manifest-declared shortcut.
+        $shortcutIconSource = Join-Path $repoRoot 'src-tauri\icons\icon.ico'
+        if (Test-Path $shortcutIconSource) {
+            Copy-Item -Path $shortcutIconSource -Destination (Join-Path $imagesDir 'Shortcut.ico')
+            $shortcutIconPath = 'Images\Shortcut.ico'
+        }
+        else {
+            Resize-Png -Source $iconSource -Destination (Join-Path $imagesDir 'Shortcut.png') -Width 256 -Height 256
+            $shortcutIconPath = 'Images\Shortcut.png'
+        }
+
+        $applicationExtensionsXml = @"
+
+      <Extensions>
+        <desktop7:Extension Category="windows.shortcut">
+          <desktop7:Shortcut File="$desktopShortcutFile" Icon="$shortcutIconPath" Description="$description" PinToStartMenu="false" ExcludeFromShowInNewInstall="false" />
+        </desktop7:Extension>
+      </Extensions>
+"@
+    }
+
     Copy-Item -Path $executablePath -Destination (Join-Path $stagingDir $executableName)
 
     $manifestPath = Join-Path $stagingDir 'AppxManifest.xml'
@@ -313,8 +360,9 @@ try {
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:desktop7="http://schemas.microsoft.com/appx/manifest/desktop/windows10/7"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-    IgnorableNamespaces="uap uap10 rescap">
+    IgnorableNamespaces="uap uap10 desktop7 rescap">
   <Identity Name="$packageName" Publisher="$publisher" Version="$packageVersion" ProcessorArchitecture="$processorArchitecture" />
   <Properties>
     <DisplayName>$displayName</DisplayName>
@@ -341,7 +389,7 @@ try {
         Description="$description"
         BackgroundColor="$backgroundColor"
         Square150x150Logo="Images\Square150x150Logo.png"
-        Square44x44Logo="Images\Square44x44Logo.png" />
+        Square44x44Logo="Images\Square44x44Logo.png" />$applicationExtensionsXml
     </Application>
   </Applications>
 </Package>
@@ -390,6 +438,13 @@ try {
     }
 
     Remove-Item -Path $stagingDir -Recurse -Force
+
+    if ($desktopShortcutEnabled) {
+        Write-Host "Desktop shortcut: $desktopShortcutFile (created on Windows 11 / Windows 10 build 19645+)"
+    }
+    else {
+        Write-Host 'Desktop shortcut: disabled via AURATERM_MSIX_DESKTOP_SHORTCUT.'
+    }
 
     Write-Host "MSIX artifact: $msixPath"
     if (Test-Path $appxSymPath) {
