@@ -31,6 +31,9 @@ jobs:
       - name: Run frontend tests
         run: npm test
 
+      - name: Run release script tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
   rust-check:
     name: Rust Check & Tests
     runs-on: ubuntu-latest

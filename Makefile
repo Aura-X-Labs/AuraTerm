@@ -1,4 +1,4 @@
-.PHONY: all build run clean help release upload update
+.PHONY: all build run clean help release test-scripts update
 
 all: help
 
@@ -41,19 +41,21 @@ help:
 	@echo "  run       - Run AuraTerm in development mode"
 	@echo "  clean     - Remove build artifacts"
 	@echo "  update    - Update npm and cargo dependencies to the latest compatible versions"
-	@echo "  release   - Update releases JSON metadata and sync the site changelog copy"
-	@echo "  upload    - Run release then upload target artifacts and JSON"
+	@echo "  release   - Update releases JSON metadata and sync the site changelog + version pin"
+	@echo "  test-scripts - Run the unit tests for the Python release scripts"
 	@echo "  help      - Show this help message"
 
 release:
 	@echo "Updating release metadata JSON..."
 	@python scripts/release.py
-	@echo "Syncing changelog to the AuraXLabs site checkout..."
-	@python scripts/sync_changelog.py
+	@echo "Syncing changelog + version pin to the AuraXLabs site checkout..."
+	@python scripts/sync_site.py
 
-upload: release
-	@echo "Uploading target artifacts..."
-	$(call run_timed,python scripts/upload.py)
+# The release scripts write into a *different* repo (the AuraXLabs checkout);
+# a silent failure there leaves the site on the previous version with nothing
+# in AuraTerm going red, so they carry their own tests.
+test-scripts:
+	@python -m unittest discover -s scripts -p 'test_*.py'
 
 # Bring dependencies up to the newest versions the manifests already allow.
 # `npm install` comes first on purpose: it re-syncs node_modules with
