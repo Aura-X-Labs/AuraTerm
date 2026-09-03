@@ -41,8 +41,7 @@ npm run package:msixupload         # Package MSIX upload bundle
 ### Utility
 ```bash
 make clean             # Remove src-tauri/target and dist directories
-make release           # Update releases/auraterm-releases.json metadata from built artifacts,
-                       # then sync Changelog.md AND the current version into ../AuraXLabs
+make release           # Sync Changelog.md AND the current version into ../AuraXLabs
                        # (site changelog page + AURATERM_LATEST_VERSION pin);
                        # override the site checkout location with AURAXLABS_DIR
 make test-scripts      # Unit tests for the Python release scripts
@@ -127,7 +126,6 @@ AuraTerm follows the standard Tauri architecture: a **Rust backend** that manage
 | `src-tauri/tauri.conf.json` | Tauri app config (window, bundle, build commands) |
 | `src-tauri/capabilities/default.json` | Tauri permission capabilities |
 | `scripts/sync_version.py` | Version sync utility (package.json → tauri.conf.json, Cargo.toml) |
-| `scripts/release.py` | Update `releases/auraterm-releases.json` from build artifacts |
 | `scripts/sync_site.py` | Push the changelog + current version into the AuraXLabs site checkout on release |
 | `scripts/test_sync_site.py` | Tests for the above (`make test-scripts`) |
 | `.github/workflows/ci.yml` | CI: type-check + cross-platform builds |
@@ -197,7 +195,7 @@ sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev 
 ### Prerequisites
 1. **Rust** (stable toolchain) — install via [rustup](https://rustup.rs/)
 2. **Node.js** v18+ (v20 recommended for CI parity)
-3. **Python 3** — required for `scripts/sync_version.py` and `scripts/release.py`
+3. **Python 3** — required for `scripts/sync_version.py` and `scripts/sync_site.py`
 4. **Tauri CLI** — installed as a dev dependency via npm (`@tauri-apps/cli`)
 
 ### Windows MSIX builds
