@@ -52,13 +52,22 @@ npm run sync:version   # Manually sync version across all config files
 
 ## Testing
 
-There is **no automated test suite** in this project. Verification is done through:
+Three suites, all run by CI on every push and PR:
+
+| Suite | Command | Scope |
+|-------|---------|-------|
+| Frontend | `npm test` (Vitest) | 126 tests in `src/__tests__/` — composables, bookmarks, cloud sync, terminal behaviour |
+| Rust | `cd src-tauri && cargo test --bin auraterm` | 233 tests (+5 `#[ignore]`d) in `mod tests` blocks beside the code they cover |
+| Release scripts | `make test-scripts` | `scripts/test_sync_site.py` — the step that writes into the AuraXLabs checkout |
+
+Plus the two checks that are not test suites:
 
 1. **TypeScript type-check:** `npm run build` — runs `vue-tsc --noEmit && vite build`
 2. **Rust compile check:** `cd src-tauri && cargo check`
-3. **Interactive integration testing:** `npm run tauri dev`
 
-The CI pipeline (`.github/workflows/ci.yml`) runs `npm run build` as the lint/type-check step and then performs full Tauri builds across all platforms (Ubuntu, macOS arm64, Windows — macOS x64/Intel is no longer supported).
+Anything touching a live terminal, PTY, or real SSH/serial connection is still verified by hand with `npm run tauri dev` — none of that is covered above.
+
+The CI pipeline (`.github/workflows/ci.yml`) has three jobs: **lint** (type-check + frontend tests + release-script tests), **rust-check** (`cargo check` + `cargo test`), and **build** (full Tauri builds across Ubuntu, macOS arm64, and Windows — macOS x64/Intel is no longer supported).
 
 ---
 
