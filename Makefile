@@ -41,13 +41,11 @@ help:
 	@echo "  run       - Run AuraTerm in development mode"
 	@echo "  clean     - Remove build artifacts"
 	@echo "  update    - Update npm and cargo dependencies to the latest compatible versions"
-	@echo "  release   - Update releases JSON metadata and sync the site changelog + version pin"
+	@echo "  release   - Sync the changelog + current version into the AuraXLabs site checkout"
 	@echo "  test-scripts - Run the unit tests for the Python release scripts"
 	@echo "  help      - Show this help message"
 
 release:
-	@echo "Updating release metadata JSON..."
-	@python scripts/release.py
 	@echo "Syncing changelog + version pin to the AuraXLabs site checkout..."
 	@python scripts/sync_site.py
 
