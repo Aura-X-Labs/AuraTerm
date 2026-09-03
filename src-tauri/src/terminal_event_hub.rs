@@ -69,7 +69,7 @@ impl TerminalEventHub {
         callback: impl FnMut(&TerminalEvent) + Send + 'static,
     ) -> SubscriptionToken {
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self.subscribers.lock().expect("event hub lock poisoned");
+        let mut guard = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .entry(session_id.to_string())
             .or_default()
@@ -85,7 +85,7 @@ impl TerminalEventHub {
 
     #[allow(dead_code)] // used by tests and the Cloud Console agent (next phase)
     pub fn unsubscribe(&self, subscription: &SubscriptionToken) {
-        let mut guard = self.subscribers.lock().expect("event hub lock poisoned");
+        let mut guard = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(list) = guard.get_mut(&subscription.session_id) {
             list.retain(|s| s.token != subscription.token);
             if list.is_empty() {
@@ -99,7 +99,7 @@ impl TerminalEventHub {
     /// a no-op.
     pub fn publish(&self, session_id: &str, event: &TerminalEvent) {
         let callbacks: Vec<Arc<Mutex<Callback>>> = {
-            let guard = self.subscribers.lock().expect("event hub lock poisoned");
+            let guard = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
             match guard.get(session_id) {
                 Some(list) => list.iter().map(|s| Arc::clone(&s.callback)).collect(),
                 None => return,
@@ -115,7 +115,7 @@ impl TerminalEventHub {
     /// Remove every subscriber of `session_id` (used once a session's event
     /// stream has ended for good).
     pub fn drop_session(&self, session_id: &str) {
-        let mut guard = self.subscribers.lock().expect("event hub lock poisoned");
+        let mut guard = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
         guard.remove(session_id);
     }
 }

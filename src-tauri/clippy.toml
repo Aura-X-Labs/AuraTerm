@@ -1,0 +1,5 @@
+# Production code must not `.unwrap()`: the release profile sets
+# `panic = "abort"`, so a stray unwrap takes the whole app down. Tests are
+# compiled with `panic = "unwind"` regardless and may unwrap freely.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

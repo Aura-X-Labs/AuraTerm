@@ -53,11 +53,11 @@ impl SinkSlot {
     }
 
     pub fn get(&self) -> Arc<dyn SerialSink> {
-        self.0.lock().expect("sink slot lock").clone()
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn replace(&self, sink: Arc<dyn SerialSink>) {
-        *self.0.lock().expect("sink slot lock") = sink;
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = sink;
     }
 }
 
@@ -172,12 +172,12 @@ impl SerialSink for LocalSerialSink {
     }
 
     fn status(&self, id: &str) -> SerialStatus {
-        let state = self.state.lock().expect("serial state lock");
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         local_status(id, &state)
     }
 
     fn status_if_changed(&self, id: &str) -> Option<SerialStatus> {
-        let mut state = self.state.lock().expect("serial state lock");
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !std::mem::take(&mut state.dirty) {
             return None;
         }

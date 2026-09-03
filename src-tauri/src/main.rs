@@ -1,5 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The release profile aborts on panic (see Cargo.toml), so a stray `.unwrap()`
+// in production code takes the whole app down. Tests are exempt via clippy.toml.
+#![warn(clippy::unwrap_used)]
 
 use base64::Engine as _;
 #[cfg(unix)]
@@ -1038,6 +1041,41 @@ fn sync_cloud_menu_state(
     rebuild_app_menu(&app, &state)
 }
 
+/// The release profile builds with `panic = "abort"` and, on Windows, without
+/// a console (`windows_subsystem` above), so a panic would otherwise vanish
+/// without a trace. Append the panic message and location (plus a backtrace
+/// when `RUST_BACKTRACE` is set) to `<app config dir>/panic.log` before the
+/// default hook runs and the process aborts.
+fn install_panic_log(app: &tauri::AppHandle) {
+    let Ok(config_dir) = app.path().app_config_dir() else {
+        return;
+    };
+    let log_path = config_dir.join("panic.log");
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let mut entry = format!("[{unix_secs}] AuraTerm {} {info}\n", env!("CARGO_PKG_VERSION"));
+        let backtrace = std::backtrace::Backtrace::capture();
+        if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+            entry.push_str(&backtrace.to_string());
+            entry.push('\n');
+        }
+        // Nothing below may panic: a panic inside the hook aborts on the spot.
+        let _ = std::fs::create_dir_all(&config_dir);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = std::io::Write::write_all(&mut file, entry.as_bytes());
+        }
+        default_hook(info);
+    }));
+}
+
 fn main() {
     // Parse command line arguments for startup directory
     let startup_dir = std::env::args()
@@ -1065,6 +1103,8 @@ fn main() {
 
     tauri::Builder::default()
         .setup(|_app| {
+            install_panic_log(_app.handle());
+
             #[cfg(target_os = "macos")]
             {
                 // Seed the menu model from persisted settings and build the
