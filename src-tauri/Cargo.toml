@@ -1,6 +1,6 @@
 [package]
 name = "auraterm"
-version = "0.3.4"
+version = "0.3.5"
 description = "AuraTerm - A modern, cross-platform terminal emulator built with Tauri"
 authors = ["William Yang"]
 edition = "2021"

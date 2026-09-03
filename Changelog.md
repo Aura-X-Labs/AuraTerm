@@ -1,4 +1,4 @@
-## 0.3.4
+## 0.3.5
 
 ### 新增
 - **Live Sync：云服务功能整合，并新增 Live Relay** —— 菜单栏「云服务」更名为 **Live Sync**，
@@ -32,6 +32,26 @@
     仅观察的设备不受影响——盯着一个长时间构建正是观察者的常态
   - 流量与 Live Console 共用一套计量，账户中心与网页流量页一并显示；
     网页设备页显示每台设备的 Live Relay 开启状态与允许的操作
+- **Microsoft Store 版本安装后也有桌面快捷方式** —— 提交到商店的 MSIX 此前没有声明任何 Extension，从商店安装只得到 Windows 由 `<Application>` 派生的开始菜单项，而官网的 NSIS 安装包一直有桌面图标——同一个应用，从哪里装的决定了装完有没有图标。现在用 `desktop7` 的 `windows.shortcut` 扩展声明桌面快捷方式，这是清单内唯一的机制；图标另存为 `Images\Shortcut.ico`——Windows 不会从 exe 的资源段里取快捷方式图标，指向 `auraterm.exe` 只会得到一个空白 `.lnk`；`desktop7` 列入 `IgnorableNamespaces`，19645 之前的 Windows 忽略这段扩展而不是让清单校验失败（用 10.0.26100 与 10.0.19041 两套 SDK 打包验证）。开始菜单项已经自动生成，故只声明桌面这一处；打包时设 `AURATERM_MSIX_DESKTOP_SHORTCUT=0` 可省略
+
+### 修复
+- **帮助菜单指向手册的新地址** —— 站点把文档从 `/products/auraterm/<page>` 搬到了 `/docs/<page>`。旧地址永久重定向，已发布的版本照常可用，新版本只是省掉那一跳
+
+### 内部
+- 「E2EE 会话 → 本地终端标签页」这段与协议无关的管线从 `assist_client.rs` 抽成 `remote_tab.rs`（中继准入、出站泵、按角色与 fence 门控输入的标签页注册表、读循环）；Live Share 只提供一个 `TabProtocol`（帧分类 + 方向标签），Live Relay 的接入端复用同一接缝
+- 新增 `relay_provider.rs`（被接入侧的本地准入：策略闸门、按对端的敲门与超时、并发上限、踢人；E2EE 握手完成后才裁决，连拒绝都是端到端加密的）与 `relay_client.rs`（接入侧：用签发凭据时回带的身份公钥在本地验 `E2EE_READY` 签名，验不过在渲染任何字节之前就拒绝）
+- 「在对方设备上新建会话」由前端完成而不是后端：后端裁决后发 `relay-open-request`，`App.vue` 把不透明的目标 id 解析回真实可见的标签页、共享它并回报会话 id。裁决函数 `decide_open` 是纯函数（Relay 已开启、该类开关打开、id 已对外列出、并发有余），安全关键的闸门无需任何中继或 HTTP 管线即可单测
+- 中继数据面新增 `relay_controller` 角色：只允许向上游发 E2EE 帧，没有可续期的租约；只读接入仍是 `relay_viewer`，其上行帧被数据面直接丢弃——只读由客户端之下的一层保证。fence 由被接入设备自持（沿用 Live Share 而非 Cloud Console 的做法）：授予递增，撤销 / 踢出 / 断线 / 顶替全部作废
+- 设置新增 `liveRelay` 块（Rust 与 TS 两侧，含归一化，所有闸门默认关闭）与控制权闲置分钟数；`RelayPolicySummary` 镜像进 cloud bridge（失败即关闭），随每次空闲 presence ping 上报，服务端可以提前拒绝注定失败的申请，裁决权仍在设备
+- 断线重连：`remote_tab` 把读循环的结果作为 `TabEnd` 交回调用方而不是一律关标签页，`TabEnd.deliberate` 区分「对方主动结束」与「链路掉了」；中继票据一次性有效，每次重试都是完整的重新准入，审批与控制权也重新申请，不发明「最近批准过」的豁免
+- Live Relay 流量不需要额外接线：中继对端就是普通共享会话上的浏览器通道连接，既有计数器已经包含它们；补一条单测钉住这一点
+- 新增 `LiveRelayDialog.vue`、`LiveRelayKnockDialog.vue`、`liveRelay.ts`；文档新增 `docs/features/Live-Relay.md`，`Features.md` 增补 Live Relay 一节并注明 13–16 节同属 Live Sync 一族
+- 服务端（AuraXLabs）：presence ping 携带的 Live Relay 能力摘要入库、同账号设备的接入授权、`relay_controller` 角色、新建会话请求、设备页显示每台设备的 Live Relay 状态
+- `make release` 现在把 `Changelog.md` 同步到旁边的 AuraXLabs 检出（`app/data/auraterm_changelog.md`），站点的 `/products/auraterm/changelog` 页面由这份副本渲染；位置可用 `AURAXLABS_DIR` 覆盖，找不到检出只告警不失败。内容没变时不写盘（站点按文件 mtime 缓存解析结果）；`package.json` 的版本在 Changelog 里找不到对应条目时会告警
+
+## 0.3.4
+
+### 新增
 - **网络串口（RFC 2217）与裸 TCP** —— 串口会话此前只能连本机插着的那个口。协议选择器从三个增加到五个（SSH / Telnet / 串口 / 网络串口 / 裸 TCP），实验室里的板子从哪里都能接上
   - `rfc2217` 走 Telnet Com Port Control Option（option 44）：波特率、数据位、校验、停止位与流控真的会作用到设备服务器上，已对 ser2net、Moxa NPort、Digi、Lantronix 验证。对端拒绝或忽略 COM-PORT-OPTION 时降级成纯字节管道并说明原因，而不是直接失败
   - `raw-tcp` 是裸字节管道，给只暴露这一种接法的设备服务器；它控制不了线路参数，因此对话框里这些字段一并不显示
