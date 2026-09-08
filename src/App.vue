@@ -21,13 +21,13 @@ import AccountDialog from "./AccountDialog.vue";
 import RemoteAssistDialog from "./RemoteAssistDialog.vue";
 import AssistKnockDialog from "./AssistKnockDialog.vue";
 import JoinAssistDialog from "./JoinAssistDialog.vue";
+import LiveConsoleStatus from "./LiveConsoleStatus.vue";
 import LiveRelayDialog from "./LiveRelayDialog.vue";
 import LiveRelayKnockDialog from "./LiveRelayKnockDialog.vue";
 import {
   assistStatus as fetchAssistStatus,
-  respondAssistJoin,
+  respondAssistKnock,
   revokeAllAssistControl,
-  setAssistRole,
   stopAssist,
   switchAssistSession,
   type AssistKnock,
@@ -62,6 +62,7 @@ import {
   type RelayOpenTarget,
   type RelayProviderStatus,
 } from "./liveRelay";
+import { assistStatusPill as deriveShareStatus, relayStatusPill as deriveRelayStatus } from "./liveSyncStatus";
 import { restoreAccount } from "./account";
 import { cloudSyncNow, getSyncConfig, type SyncConfigView } from "./cloudSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
@@ -484,6 +485,7 @@ onMounted(async () => {
     .catch(() => null)
     .finally(() => void refreshCloudBridgeStatus().catch(() => {}));
   bridgeStatusTimer = setInterval(() => {
+    void refreshRelayStatus();
     void refreshCloudBridgeStatus()
       .then(() => {
         // Self-healing: re-align the auto share slot if a share attempt was
@@ -657,6 +659,7 @@ onMounted(async () => {
     showCloudToast(t("assist.lockedToast"), true);
   }));
   void refreshAssistState();
+  void refreshRelayStatus();
 
   await tunnels.registerTunnelListener();
   cleanupFns.push(() => {
@@ -808,62 +811,9 @@ async function refreshCloudBridgeStatus() {
   bridgeStatus.value = await cloudBridgeStatus();
 }
 
-// ── Cloud status pill: what the cloud can do with this device right now ────
-// Priority ladder mirrors severity: someone holds control > someone watches >
-// link state (online / reconnecting / standby). Peer roles come from the
-// relay's E2EE_INIT frames, so "control" means a controller is attached even
-// while it is not typing. Hidden entirely until the device is bound.
-type CloudPillKind = "control" | "monitor" | "online" | "standby" | "reconnecting" | "offline" | "assist";
-// ── Live Sync status cluster (design 3.3) ─────────────────────────────────
-// Three independent indicators sharing one style, each opening its own
-// panel. They used to be one muxed pill, which hid Live Console state
-// whenever a Live Share was running.
-
-/** Live Console: relay link health plus who is watching this device. */
-const cloudStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
-  const bridge = bridgeStatus.value;
-  if (!bridge.enrolled) return null;
-  // Relay peers ride the same share peer map; count only console viewers so
-  // the two indicators do not double-report the same person.
-  const relayPeers = relayStatus.value.peers.filter((peer) => peer.state === "viewer").length;
-  const watchers = Math.max(0, bridge.shares.reduce((sum, share) => sum + share.viewerCount, 0) - relayPeers);
-  if (bridge.shares.some((share) => share.controllerAttached)) {
-    return { kind: "control", text: t("cloudShare.statusControl") };
-  }
-  if (watchers > 0) {
-    return { kind: "monitor", text: t("cloudShare.statusMonitor", { n: watchers }) };
-  }
-  if (bridge.connected) return { kind: "online", text: t("cloudShare.statusOnline") };
-  if (bridge.reconnecting) return { kind: "reconnecting", text: t("cloudShare.statusReconnecting") };
-  if (bridge.standby) return { kind: "standby", text: t("cloudShare.statusStandby") };
-  return { kind: "offline", text: t("cloudShare.statusOffline") };
-});
-
-/** Live Share: only while a share is actually running. */
-const assistStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
-  const assist = assistState.value;
-  if (!assist) return null;
-  const controllers = assist.guests.filter((g) => g.role === "controller").length;
-  const viewers = assist.guests.filter((g) => g.role === "viewer").length;
-  if (controllers > 0) return { kind: "control", text: t("assist.statusControl", { n: controllers }) };
-  if (viewers > 0) return { kind: "assist", text: t("assist.statusViewers", { n: viewers }) };
-  return { kind: "assist", text: t("assist.statusWaiting") };
-});
-
-/** Live Relay: only while one of the account's own devices is attached. */
-const relayStatusPill = computed<{ kind: CloudPillKind; text: string } | null>(() => {
-  const peers = relayStatus.value.peers;
-  if (peers.length === 0) return null;
-  const pending = peers.filter((peer) => peer.state === "pending").length;
-  if (pending > 0) return { kind: "assist", text: t("liveRelay.statusPending", { n: pending }) };
-  return { kind: "monitor", text: t("liveRelay.statusAttached", { n: peers.length }) };
-});
-
-// Only the main window owns the Live Console switch (see
-// handleToggleCloudConsole); child windows show a read-only pill.
-const cloudPillTitle = computed(() => (
-  isMainWindow ? t("cloudShare.statusTooltipToggle") : t("cloudShare.statusTooltip")
-));
+// Independent feature indicators; derive their labels in a testable module.
+const assistStatusPill = computed(() => deriveShareStatus(assistState.value));
+const relayStatusPill = computed(() => deriveRelayStatus(relayStatus.value));
 
 // ── Remote Assist host wiring ───────────────────────────────────────────────
 async function refreshAssistState() {
@@ -1126,11 +1076,7 @@ function handleOpenRemoteAssist() {
 
 function handleAssistKnockDecision(knock: AssistKnock, decision: "allow_view" | "allow_control" | "deny") {
   assistKnocks.value = assistKnocks.value.filter((k) => k !== knock);
-  const action = knock.kind === "join"
-    ? respondAssistJoin(knock.connectionId, decision)
-    : decision === "allow_control"
-      ? setAssistRole(knock.connectionId, "controller")
-      : Promise.resolve();
+  const action = respondAssistKnock(knock, decision);
   void action.then(() => refreshAssistState()).catch((error) => showCloudToast(String(error), true));
 }
 
@@ -3332,18 +3278,17 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
             </template>
           </div>
           <div class="terminal-statusbar-right">
-            <button
-              v-if="cloudStatusPill"
-              type="button"
-              class="terminal-status-cloud"
-              :class="`cloud-${cloudStatusPill.kind}`"
-              :title="cloudPillTitle"
-              :disabled="!isMainWindow"
-              @click="handleToggleCloudConsole"
-            >
-              <span class="cloud-status-dot" />
-              {{ cloudStatusPill.text }}
-            </button>
+            <LiveConsoleStatus
+              :bridge="bridgeStatus"
+              :enabled="settings.autoShareToCloud"
+              :allow-remote-send="settings.allowRemoteSend"
+              :can-manage="isMainWindow"
+              @refresh="refreshCloudBridgeStatus().catch(() => {})"
+              @toggle-console="handleToggleCloudConsole"
+              @toggle-remote-send="handleToggleRemoteSend"
+              @open-web="handleOpenConsoleWeb"
+              @open-account="showAccount = true"
+            />
             <button
               v-if="assistStatusPill"
               type="button"

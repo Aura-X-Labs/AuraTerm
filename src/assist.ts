@@ -118,3 +118,12 @@ export function extendAssist(seconds?: number): Promise<number> {
 export function reportTerminalSize(localSessionId: string, cols: number, rows: number): Promise<void> {
   return invoke("cloud_bridge_report_size", { localSessionId, cols, rows });
 }
+
+/** Resolve both admission and control knocks through the host state machine. */
+export function respondAssistKnock(knock: AssistKnock, decision: "allow_view" | "allow_control" | "deny"): Promise<void> {
+  return knock.kind === "join"
+    ? respondAssistJoin(knock.connectionId, decision)
+    // A denied control request must clear controlRequested on the host too;
+    // closing its approval dialog alone leaves the status permanently pending.
+    : setAssistRole(knock.connectionId, decision === "allow_control" ? "controller" : "viewer");
+}
