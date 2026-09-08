@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { t } from "./i18n";
 import {
   canAttachTo,
@@ -30,6 +30,7 @@ const devices = ref<RelayDeviceEntry[]>([]);
 const selectedId = ref<string | null>(null);
 const loading = ref(false);
 const error = ref("");
+let refreshGeneration = 0;
 
 const selected = computed(() => devices.value.find((d) => d.device_id === selectedId.value) ?? null);
 
@@ -46,17 +47,20 @@ const attachBlock = computed(() => {
 
 async function refresh() {
   if (!props.enrolled) return;
+  const generation = ++refreshGeneration;
   loading.value = true;
   error.value = "";
   try {
-    devices.value = await relayListDevices();
+    const next = await relayListDevices();
+    if (generation !== refreshGeneration || !props.enrolled) return;
+    devices.value = next;
     if (!devices.value.some((d) => d.device_id === selectedId.value)) {
       selectedId.value = devices.value.find(canAttachTo)?.device_id ?? devices.value[0]?.device_id ?? null;
     }
   } catch (cause) {
-    error.value = String(cause);
+    if (generation === refreshGeneration) error.value = String(cause);
   } finally {
-    loading.value = false;
+    if (generation === refreshGeneration) loading.value = false;
   }
 }
 
@@ -81,7 +85,16 @@ function presenceLabel(device: RelayDeviceEntry): string {
   return t("liveRelay.presenceOffline");
 }
 
-onMounted(refresh);
+watch(() => props.enrolled, (enrolled) => {
+  if (enrolled) void refresh();
+  else {
+    refreshGeneration += 1;
+    devices.value = [];
+    selectedId.value = null;
+    loading.value = false;
+    error.value = "";
+  }
+}, { immediate: true });
 </script>
 
 <template>

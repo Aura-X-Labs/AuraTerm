@@ -1235,6 +1235,9 @@ onMounted(() => {
         }
         ptyId.value = null;
         const errorText = String(error);
+        if (session.protocol === "assist" || session.protocol === "relay") {
+          assistGuest.value = { ...assistGuest.value, state: "ended", role: "viewer", reason: errorText };
+        }
         if (isSerialProtocol(session.protocol)) {
           notifySerialConnectionStateChange("error");
         }

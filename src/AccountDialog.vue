@@ -9,11 +9,17 @@ import {
   refreshAccount,
   type AuraXLabAccountState,
 } from "./account";
+import type { CloudBridgeStatus } from "./cloudBridge";
 import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
 import { t } from "./i18n";
 
-const props = defineProps<{ platform: string }>();
-const emit = defineEmits<{ close: []; openCloudSync: [] }>();
+const props = withDefaults(defineProps<{
+  platform: string;
+  bridgeStatus?: CloudBridgeStatus;
+  returnOnReady?: boolean;
+  requireDevice?: boolean;
+}>(), { requireDevice: true });
+const emit = defineEmits<{ close: []; openCloudSync: []; ready: []; changed: [] }>();
 
 const state = ref<AuraXLabAccountState | null>(null);
 const loading = ref(true);
@@ -31,6 +37,26 @@ const consoleReady = computed(() => state.value?.consistency === "consistent");
 const needsRecovery = computed(() =>
   state.value?.consistency === "sync_only" || state.value?.consistency === "mismatch",
 );
+
+// Use the same live snapshot as the status bar, scoped to this device.
+const connectionStatus = computed(() => {
+  const bridge = props.bridgeStatus;
+  if (bridge?.deviceId && bridge.deviceId === state.value?.console.deviceId) {
+    if (bridge.connected) return "connected";
+    if (bridge.reconnecting) return "reconnecting";
+    if (bridge.standby) return "standby";
+    return "offline";
+  }
+  return state.value?.console.connected ? "connected" : "offline";
+});
+
+function notifyAccountReady(next: AuraXLabAccountState) {
+  emit("changed");
+  const deviceReady = next.consistency === "consistent" && next.console.enrolled;
+  if (props.returnOnReady && next.signedIn && (props.requireDevice === false || deviceReady)) {
+    emit("ready");
+  }
+}
 
 function note(text: string, error = false) {
   message.value = text;
@@ -91,6 +117,7 @@ function onSignedIn(next: AuraXLabAccountState) {
   refreshingProfile.value = false;
   state.value = next;
   note(t("cloudSync.signedIn"));
+  notifyAccountReady(next);
 }
 
 async function recoverConsole() {
@@ -109,6 +136,7 @@ async function recoverConsole() {
       props.platform,
     );
     note(t("account.bound"));
+    notifyAccountReady(state.value);
   } catch (error) {
     note(String(error), true);
   } finally {
@@ -122,6 +150,7 @@ async function pause() {
   try {
     state.value = await pauseConsole();
     note(t("account.offline"));
+    emit("changed");
   } catch (error) {
     note(String(error), true);
   } finally {
@@ -136,6 +165,7 @@ async function signOut() {
   try {
     state.value = await accountLogout();
     note(t("account.signedOut"));
+    emit("changed");
   } catch (error) {
     note(String(error), true);
   } finally {
@@ -197,6 +227,7 @@ onMounted(() => {
                 <input v-model="bindOnLogin" type="checkbox" />
                 <span>{{ t('account.bindOnLogin') }}</span>
               </label>
+              <p v-if="bindOnLogin" class="account-hint">{{ t('account.bindIntroSignedIn') }}</p>
               <label v-if="bindOnLogin" class="account-inline-label">{{ t('account.deviceLabel') }}</label>
               <input v-if="bindOnLogin" v-model="deviceLabel" class="account-input" type="text" />
             </AuraxlabAuthForm>
@@ -208,7 +239,7 @@ onMounted(() => {
               <dt>{{ t('account.email') }}</dt><dd>{{ state?.email }}</dd>
               <dt>{{ t('account.deviceId') }}</dt><dd class="account-mono">{{ state?.console.deviceId || '—' }}</dd>
               <dt>{{ t('account.connection') }}</dt>
-              <dd>{{ state?.console.connected ? t('account.connected') : t('account.offline') }}</dd>
+              <dd>{{ t('account.' + connectionStatus) }}</dd>
             </dl>
 
             <div v-if="needsRecovery" class="account-recovery">
@@ -234,7 +265,7 @@ onMounted(() => {
               <button class="account-btn" type="button" :disabled="busy || refreshingProfile" @click="refreshProfile()">{{ t('account.refresh') }}</button>
               <button class="account-btn" type="button" @click="emit('openCloudSync')">{{ t('account.cloudSyncEntry') }}</button>
               <button class="account-btn" type="button" @click="openExternalUrl('https://auraxlab.com/console')">{{ t('account.openConsole') }}</button>
-              <button v-if="state?.console.connected" class="account-btn" type="button" :disabled="busy" @click="pause">{{ t('account.pauseConsole') }}</button>
+              <button v-if="connectionStatus !== 'offline'" class="account-btn" type="button" :disabled="busy" @click="pause">{{ t('account.pauseConsole') }}</button>
               <button class="account-btn danger" type="button" :disabled="busy" @click="signOut">{{ t('account.signOut') }}</button>
             </div>
           </template>

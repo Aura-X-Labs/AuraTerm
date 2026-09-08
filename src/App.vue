@@ -72,7 +72,8 @@ import {
   type FeatureStatus,
   type SyncRuntime,
 } from "./liveSyncStatus";
-import { restoreAccount } from "./account";
+import { accountState, restoreAccount } from "./account";
+import { useLiveAccountFlow } from "./composables/useLiveAccountFlow";
 import { cloudSyncNow, getSyncConfig, type SyncConfigView } from "./cloudSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
@@ -157,7 +158,6 @@ const connectDialogProtocol = ref<ConnectionProtocol>("ssh");
 const settings = shallowRef<AppSettings>(DEFAULT_SETTINGS);
 const showSettings = ref(false);
 const showCloudSync = ref(false);
-const showAccount = ref(false);
 const showRemoteAssist = ref(false);
 const showJoinAssist = ref(false);
 // Remote Assist host state (design docs/plans/remote-assist-design.md §9.3).
@@ -173,6 +173,25 @@ const relayStatus = ref<RelayProviderStatus>({ enabled: false, peers: [] });
 const statusStale = ref({ console: false, share: false, relay: false, sync: false });
 // Sync has no backend progress events, so the UI owns the phase it shows.
 const syncRuntime = ref<SyncRuntime>({ phase: "idle", message: "", at: null });
+// One trip through the account dialog: where to return afterwards, and
+// whether an explicit Console enable request may complete on the way back.
+const accountFlow = useLiveAccountFlow({
+  refresh: async () => {
+    refreshSyncViewSilently();
+    const [account] = await Promise.all([accountState(), refreshCloudBridgeStatus()]);
+    return account.consistency === "consistent" && bridgeStatus.value.enrolled;
+  },
+  resume: (target) => {
+    if (target === "share") showRemoteAssist.value = true;
+    else if (target === "relay") showLiveRelay.value = true;
+    else if (target === "sync") showCloudSync.value = true;
+    else if (!settings.value.autoShareToCloud) {
+      persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: true });
+      showCloudToast(t("cloudShare.consoleOnAfterBind"));
+    }
+  },
+});
+const { showAccount, returnTarget: accountReturnTarget } = accountFlow;
 // AuraXLab sign-in state drives the Cloud menu (Sign In vs My Account).
 // Refreshed on startup and whenever the account / sync dialogs close.
 const syncView = shallowRef<SyncConfigView | null>(null);
@@ -1262,17 +1281,14 @@ const autoShareConverged = computed(() => {
 // (menu/palette toggle, settings dialog save) funnels through this guard so
 // an unbound click never persists the switch — a persisted-but-unbound switch
 // would start sharing silently after some future sign-in. Instead the intent
-// is parked for one trip through the account dialog (handleAccountClosed
+// is parked for one trip through the account dialog (useLiveAccountFlow
 // enables the switch once binding actually happened, or drops the intent).
 // The guard is deliberately NOT in the autoShareToCloud watch: that watch
 // also fires when persisted settings are restored at startup, where a
 // legitimately-on switch must survive the bridge still reporting unenrolled.
-let pendingCloudConsoleOn = false;
-
 function guardCloudConsoleOn(): boolean {
   if (bridgeStatus.value.enrolled) return true;
-  pendingCloudConsoleOn = true;
-  showAccount.value = true;
+  accountFlow.open("console");
   showCloudToast(t("cloudShare.signInFirst"));
   return false;
 }
@@ -2184,25 +2200,27 @@ function handleOpenCloudSync() {
 
 function handleOpenAccount() {
   closeOpenMenus();
-  showAccount.value = true;
+  accountFlow.open();
 }
 
-// The account dialog is where sign-in and device binding happen. On close,
-// settle a parked Cloud Console intent (guardCloudConsoleOn): flip the switch
-// on if the device is now bound, otherwise drop the intent so a later,
-// unrelated sign-in cannot start sharing silently.
+// Return to retained forms, or complete this trip's explicitly requested
+// Console enable only after fresh account and device reads succeed.
 function handleAccountClosed() {
-  showAccount.value = false;
+  void accountFlow.close();
+}
+
+// Sign-in, sign-out, pause and device binding all change what the menu and
+// the Live Sync panel show; re-read them without waiting for the dialog to close.
+function handleAccountChanged() {
   refreshSyncViewSilently();
-  void (async () => {
-    await refreshCloudBridgeStatus().catch(() => {});
-    if (!pendingCloudConsoleOn) return;
-    pendingCloudConsoleOn = false;
-    if (bridgeStatus.value.enrolled && !settings.value.autoShareToCloud) {
-      persistSettingsSilently({ ...settingsRef.value, autoShareToCloud: true });
-      showCloudToast(t("cloudShare.consoleOnAfterBind"));
-    }
-  })();
+  void refreshCloudBridgeStatus().catch(() => {});
+}
+
+function handleAccountOpenSync() {
+  accountFlow.abandon();
+  showRemoteAssist.value = false;
+  showLiveRelay.value = false;
+  showCloudSync.value = true;
 }
 
 function toggleRemoteFileManager() {
@@ -2552,7 +2570,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "settings", title: t("palette.cmd.settings"), group: t("palette.groups.app"), keywords: "preferences config", run: () => handleOpenSettings() },
     { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync settings backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
     { id: "sync-now", title: t("palette.cmd.syncNow"), group: t("palette.groups.app"), keywords: "sync now cloud push pull bookmarks", run: () => handleSyncNow() },
-    { id: "account", title: auraxlabSignedIn.value ? t("menu.myAccount") : t("menu.signIn"), group: t("palette.groups.app"), keywords: "account login sign in my account traffic bind device cloud console auraxlab enroll", run: () => { showAccount.value = true; } },
+    { id: "account", title: auraxlabSignedIn.value ? t("menu.myAccount") : t("menu.signIn"), group: t("palette.groups.app"), keywords: "account login sign in my account traffic bind device cloud console auraxlab enroll", run: () => handleOpenAccount() },
     { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor share session rx tx remote view follow active", run: () => handleToggleCloudConsole() },
     { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
     { id: "remote-assist", title: assistState.value ? t("assist.paletteManage") : t("assist.paletteStart"), group: t("palette.groups.app"), keywords: "remote assist help support code invite guest share screen pair", run: () => handleOpenRemoteAssist() },
@@ -3408,7 +3426,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
               @toggle-console="handleToggleCloudConsole"
               @toggle-remote-send="handleToggleRemoteSend"
               @open-web="handleOpenConsoleWeb"
-              @open-account="showAccount = true"
+              @open-account="handleOpenAccount"
               @sync-now="handleSyncNow"
               @open-sync="showCloudSync = true"
               @manage-share="handleOpenRemoteAssist"
@@ -3476,27 +3494,34 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     <CloudSyncDialog
       v-if="showCloudSync"
       @close="showCloudSync = false; refreshSyncViewSilently()"
-      @open-account="showCloudSync = false; showAccount = true"
+      @open-account="showCloudSync = false; accountFlow.open('sync')"
     />
     <AccountDialog
       v-if="showAccount"
       :platform="osType"
+      :bridge-status="bridgeStatus"
+      :return-on-ready="accountReturnTarget !== null"
+      :require-device="accountReturnTarget !== 'sync'"
       @close="handleAccountClosed"
-      @open-cloud-sync="showAccount = false; showCloudSync = true"
+      @ready="accountFlow.close(true)"
+      @changed="handleAccountChanged"
+      @open-cloud-sync="handleAccountOpenSync"
     />
     <RemoteAssistDialog
       v-if="showRemoteAssist"
+      v-show="!showAccount"
       :sessions="assistSessionChoices"
       :active-session-id="activeTabId"
       :status="assistState"
       :enrolled="bridgeStatus.enrolled"
       @close="showRemoteAssist = false"
       @changed="refreshAssistState"
-      @open-account="showRemoteAssist = false; showAccount = true"
+      @open-account="accountFlow.open('share')"
     />
     <JoinAssistDialog v-if="showJoinAssist" @close="showJoinAssist = false" @join="handleJoinAssist" />
     <LiveRelayDialog
       v-if="showLiveRelay"
+      v-show="!showAccount"
       :enrolled="bridgeStatus.enrolled"
       :status="relayStatus"
       @close="showLiveRelay = false"
@@ -3504,7 +3529,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       @open="handleRelayOpen"
       @kick="handleRelayKick"
       @set-control="handleRelaySetControl"
-      @open-account="showLiveRelay = false; showAccount = true"
+      @open-account="accountFlow.open('relay')"
     />
     <LiveRelayKnockDialog :queue="relayKnocks" @decide="handleRelayKnockDecision" />
     <AssistKnockDialog
