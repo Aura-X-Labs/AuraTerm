@@ -12,6 +12,10 @@ export interface CloudBridgeShare {
   viewerCount: number;
   /** At least one attached peer connected in the controller role. */
   controllerAttached: boolean;
+  /** Admitted Console viewing connections, excluding every Live Relay peer. */
+  consoleViewerCount: number;
+  /** Console controller connections permitted by local TX gates (INPUT still needs a server lease). */
+  consoleControllerCount: number;
 }
 
 export interface CloudBridgeStatus {

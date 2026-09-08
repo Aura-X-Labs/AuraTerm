@@ -338,6 +338,11 @@ pub struct ShareView {
     viewer_count: usize,
     /// At least one attached peer connected in the controller role.
     controller_attached: bool,
+    /// Console connections only; Relay peers are excluded in this same snapshot.
+    console_viewer_count: usize,
+    /// Controller-role Console connections allowed by the local TX gates.
+    /// A valid server lease is still required for each INPUT frame.
+    console_controller_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -1569,6 +1574,8 @@ pub async fn cloud_bridge_share_session(
         tx_allowed: allow_tx,
         viewer_count: 0,
         controller_attached: false,
+        console_viewer_count: 0,
+        console_controller_count: 0,
     };
     state.inner.lock().map_err(|e| e.to_string())?.shares.insert(
         local_session_id.clone(),
@@ -1937,23 +1944,44 @@ pub fn cloud_bridge_set_relay_policy(
     Ok(())
 }
 
+/// Derive display counts from one locked snapshot, never by subtracting a
+/// separately fetched Relay status. Only admitted E2EE channels are counted.
+fn share_status_view(local: &str, share: &SharedSession, allow_remote_send: bool) -> ShareView {
+    // Preserve tx_allowed's per-share meaning: App.vue uses it to downgrade
+    // writable shares after the global gate is turned off.
+    let tx_allowed = share.policy.allows_tx(std::time::SystemTime::now());
+    let mut console_viewer_count = 0;
+    let mut console_controller_count = 0;
+    for id in share.peers.keys() {
+        match share.peer_roles.get(id).map(String::as_str) {
+            Some("relay_viewer") => {}
+            Some("controller") if allow_remote_send && tx_allowed => console_controller_count += 1,
+            Some("controller" | "shared_viewer" | "observer") => console_viewer_count += 1,
+            _ => {}
+        }
+    }
+    ShareView {
+        local_session_id: local.into(),
+        cloud_session_id: share.cloud_session_id.clone(),
+        label: share.label.clone(),
+        protocol: share.protocol,
+        tx_policy: share.policy.tx.clone(),
+        tx_expires_at: system_time_seconds(share.policy.tx_expires_at),
+        tx_allowed,
+        viewer_count: share.peers.len(),
+        controller_attached: share.peer_roles.values().any(|role| role == "controller"),
+        console_viewer_count,
+        console_controller_count,
+    }
+}
+
 #[tauri::command]
 pub fn cloud_bridge_status(state: State<'_, CloudBridgeState>) -> Result<BridgeStatus, String> {
     let inner = state.inner.lock().map_err(|e| e.to_string())?;
     let mut shares = inner
         .shares
         .iter()
-        .map(|(local, share)| ShareView {
-            local_session_id: local.clone(),
-            cloud_session_id: share.cloud_session_id.clone(),
-            label: share.label.clone(),
-            protocol: share.protocol,
-            tx_policy: share.policy.tx.clone(),
-            tx_expires_at: system_time_seconds(share.policy.tx_expires_at),
-            tx_allowed: share.policy.allows_tx(std::time::SystemTime::now()),
-            viewer_count: share.peers.len(),
-            controller_attached: share.peer_roles.values().any(|role| role == "controller"),
-        })
+        .map(|(local, share)| share_status_view(local, share, inner.allow_remote_send))
         .collect::<Vec<_>>();
     shares.sort_by(|a, b| a.local_session_id.cmp(&b.local_session_id));
     let connected = inner.device.as_ref().is_some_and(|d| !d.relay_connection.is_empty());
@@ -2024,6 +2052,30 @@ mod tests {
             last_input_seq: 0,
         };
         (device, share)
+    }
+
+    #[test]
+    fn status_counts_console_separately_from_relay_and_respects_tx_gates() {
+        let (_, mut share) = fixture();
+        for (id, role) in [("relay", "relay_viewer"), ("browser", "controller"), ("watcher", "observer")] {
+            share.peers.insert(id.into(), PeerCipher::new([1; 32]));
+            share.peer_roles.insert(id.into(), role.into());
+        }
+        share.peer_roles.insert("disconnected".into(), "controller".into());
+        let view = share_status_view("local", &share, true);
+        assert_eq!((view.console_viewer_count, view.console_controller_count), (1, 1));
+        assert_eq!(view.viewer_count, 3);
+        let blocked = share_status_view("local", &share, false);
+        assert_eq!((blocked.console_viewer_count, blocked.console_controller_count), (2, 0));
+        assert!(blocked.tx_allowed); // Per-share policy, independent of the global gate.
+        share.policy.tx = TxPolicy::Temporary;
+        share.policy.tx_expires_at = Some(std::time::UNIX_EPOCH);
+        let expired = share_status_view("local", &share, true);
+        assert_eq!((expired.console_viewer_count, expired.console_controller_count), (2, 0));
+        assert!(!expired.tx_allowed);
+        let json = serde_json::to_value(expired).unwrap();
+        assert_eq!(json["consoleViewerCount"], 2);
+        assert_eq!(json["consoleControllerCount"], 0);
     }
 
     fn lease(_device: &DeviceConfig, fence: u64, exp: i64) -> String {
