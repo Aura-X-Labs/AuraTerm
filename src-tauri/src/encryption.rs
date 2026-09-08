@@ -719,21 +719,52 @@ const SYNC_BLOB_PREFIX: usize = 8 + 1 + SALT_SIZE; // magic + version + salt
 const SHARE_MAGIC: &[u8; 8] = b"AURASHAR";
 const SHARE_BLOB_VERSION: u8 = 1;
 
-/// The shared envelope behind [`encrypt_sync_blob`] and [`encrypt_share_blob`].
+/// Synced saved credentials (`cloud_sync.rs`, design
+/// `docs/plans/sync-passphrase-removal-design.md` §5.2). Tier-2 data inside
+/// an otherwise server-readable `rest-v2` vault: encrypted under the *master
+/// password* before upload, so AuraXLab stores a field it can never open.
+/// The Argon2id output is run through HKDF with a dedicated label, so even a
+/// (practically impossible) salt collision with the local `credentials.enc`
+/// or a legacy `AURASYNC` blob yields a different key.
+const CRED_MAGIC: &[u8; 8] = b"AURACRED";
+const CRED_BLOB_VERSION: u8 = 1;
+const CRED_HKDF_INFO: &[u8] = b"AuraTerm sync credentials v1";
+
+/// Wire label for the credentials envelope inside the `rest-v2` payload.
+pub const CRED_ENVELOPE_FORMAT: &str = "AURACRED/1";
+
+/// Envelope key: Argon2id(passphrase, salt), optionally expanded through
+/// HKDF-SHA256 with a domain label so two envelope kinds can never share a key.
+fn envelope_key(passphrase: &str, salt: &[u8], info: Option<&[u8]>) -> Result<Zeroizing<[u8; 32]>, String> {
+    let ikm = derive_key_v2(passphrase, salt)?;
+    let Some(info) = info else {
+        return Ok(ikm);
+    };
+    let mut key = Zeroizing::new([0u8; 32]);
+    hkdf::Hkdf::<Sha256>::new(None, ikm.as_slice())
+        .expand(info, key.as_mut_slice())
+        .map_err(|_| "HKDF expansion failed".to_string())?;
+    Ok(key)
+}
+
+/// The shared envelope behind [`encrypt_sync_blob`], [`encrypt_share_blob`]
+/// and [`encrypt_credentials_envelope`].
 ///
 /// Format: magic(8) || version(1) || salt(32) || nonce(12)+ciphertext+tag.
-/// Key = Argon2id(passphrase, salt) via the v2 KDF (16 MiB / t=3 / p=1). The
-/// salt is random per blob and travels in the header, so a recipient needs
-/// nothing but the passphrase to open it.
+/// Key = Argon2id(passphrase, salt) via the v2 KDF (16 MiB / t=3 / p=1),
+/// optionally HKDF-expanded with `info`. The salt is random per blob and
+/// travels in the header, so a recipient needs nothing but the passphrase to
+/// open it.
 fn encrypt_envelope(
     plaintext: &[u8],
     passphrase: &str,
     magic: &[u8; 8],
     version: u8,
+    info: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     let mut rng = rand::thread_rng();
     let salt: Vec<u8> = (0..SALT_SIZE).map(|_| rng.gen()).collect();
-    let key = derive_key_v2(passphrase, &salt)?;
+    let key = envelope_key(passphrase, &salt, info)?;
     let encrypted = encrypt_data(plaintext, &key)?;
 
     let mut out = Vec::with_capacity(8 + 1 + SALT_SIZE + encrypted.len());
@@ -749,6 +780,7 @@ fn decrypt_envelope(
     passphrase: &str,
     magic: &[u8; 8],
     version: u8,
+    info: Option<&[u8]>,
     kind: &str,
 ) -> Result<Vec<u8>, String> {
     let prefix = 8 + 1 + SALT_SIZE;
@@ -765,8 +797,30 @@ fn decrypt_envelope(
         ));
     }
     let salt = &blob[9..9 + SALT_SIZE];
-    let key = derive_key_v2(passphrase, salt)?;
+    let key = envelope_key(passphrase, salt, info)?;
     decrypt_data(&blob[prefix..], &key)
+}
+
+/// Encrypt the synced credential list under the master password.
+pub fn encrypt_credentials_envelope(plaintext: &[u8], master_password: &str) -> Result<Vec<u8>, String> {
+    if master_password.is_empty() {
+        return Err("Master password must not be empty".to_string());
+    }
+    encrypt_envelope(plaintext, master_password, CRED_MAGIC, CRED_BLOB_VERSION, Some(CRED_HKDF_INFO))
+}
+
+/// Decrypt a credentials envelope. A master password that differs from the
+/// uploading device's is the overwhelmingly likely cause of a failure, and the
+/// message says so; format problems keep their specific text.
+pub fn decrypt_credentials_envelope(blob: &[u8], master_password: &str) -> Result<Vec<u8>, String> {
+    decrypt_envelope(blob, master_password, CRED_MAGIC, CRED_BLOB_VERSION, Some(CRED_HKDF_INFO), "credentials envelope")
+        .map_err(|error| {
+            if error.contains("magic") || error.contains("version") || error.contains("short") {
+                error
+            } else {
+                "The synced credentials were encrypted with a different master password".to_string()
+            }
+        })
 }
 
 /// Encrypt a bookmark share bundle under the share code's secret segment.
@@ -780,12 +834,12 @@ pub fn encrypt_share_blob(plaintext: &[u8], secret: &str) -> Result<Vec<u8>, Str
     if secret.is_empty() {
         return Err("Share secret must not be empty".to_string());
     }
-    encrypt_envelope(plaintext, secret, SHARE_MAGIC, SHARE_BLOB_VERSION)
+    encrypt_envelope(plaintext, secret, SHARE_MAGIC, SHARE_BLOB_VERSION, None)
 }
 
 /// Decrypt a share bundle. A wrong code, or any tampering, is one opaque error.
 pub fn decrypt_share_blob(blob: &[u8], secret: &str) -> Result<Vec<u8>, String> {
-    decrypt_envelope(blob, secret, SHARE_MAGIC, SHARE_BLOB_VERSION, "share bundle")
+    decrypt_envelope(blob, secret, SHARE_MAGIC, SHARE_BLOB_VERSION, None, "share bundle")
         .map_err(|error| {
             if error.contains("magic") || error.contains("version") || error.contains("short") {
                 error
@@ -796,14 +850,21 @@ pub fn decrypt_share_blob(blob: &[u8], secret: &str) -> Result<Vec<u8>, String> 
 }
 
 /// Encrypt `plaintext` under `passphrase`, returning a portable sync blob.
+///
+/// **Legacy (`e2e-v1`).** New uploads are `rest-v2` payloads (`cloud_sync.rs`);
+/// this only exists so tests can build fixtures for the one-time migration in
+/// `cloud_sync_legacy.rs`. Phase 3 of the sync-passphrase-removal design
+/// deletes it together with that module.
+#[cfg(test)]
 pub fn encrypt_sync_blob(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
     if passphrase.is_empty() {
         return Err("Sync passphrase must not be empty".to_string());
     }
-    encrypt_envelope(plaintext, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION)
+    encrypt_envelope(plaintext, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION, None)
 }
 
-/// Decrypt a sync blob produced by [`encrypt_sync_blob`] using `passphrase`.
+/// Decrypt a legacy `e2e-v1` sync blob using the old sync passphrase. Only
+/// the one-time migration (`cloud_sync_legacy.rs`) still calls this.
 /// A wrong passphrase (or any tampering) surfaces as a single opaque error.
 pub fn decrypt_sync_blob(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
     if blob.len() < SYNC_BLOB_PREFIX {
@@ -818,8 +879,13 @@ pub fn decrypt_sync_blob(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, Strin
             blob[8]
         ));
     }
-    decrypt_envelope(blob, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION, "sync blob")
+    decrypt_envelope(blob, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION, None, "sync blob")
         .map_err(|_| "Incorrect sync passphrase, or the synced data is corrupt".to_string())
+}
+
+/// Sniff a downloaded vault body: legacy `e2e-v1` blobs start with `AURASYNC`.
+pub fn is_legacy_sync_blob(blob: &[u8]) -> bool {
+    blob.len() >= 8 && &blob[0..8] == SYNC_MAGIC
 }
 
 #[cfg(test)]
@@ -1369,6 +1435,40 @@ mod tests {
         let mut blob = encrypt_sync_blob(b"x", "pw").unwrap();
         blob[0] = b'X';
         assert!(decrypt_sync_blob(&blob, "pw").is_err());
+    }
+
+    // ========== 同步凭据信封 (AURACRED) ==========
+
+    #[test]
+    fn credentials_envelope_roundtrip_and_layout() {
+        let blob = encrypt_credentials_envelope(b"[{\"connectionId\":\"a\"}]", "master").unwrap();
+        assert_eq!(&blob[0..8], b"AURACRED");
+        assert!(!is_legacy_sync_blob(&blob));
+        assert_eq!(decrypt_credentials_envelope(&blob, "master").unwrap(), b"[{\"connectionId\":\"a\"}]");
+        assert!(encrypt_credentials_envelope(b"x", "").is_err());
+    }
+
+    #[test]
+    fn credentials_envelope_wrong_master_password_is_named() {
+        let blob = encrypt_credentials_envelope(b"secret", "one").unwrap();
+        let err = decrypt_credentials_envelope(&blob, "two").unwrap_err();
+        assert!(err.contains("different master password"), "got: {err}");
+    }
+
+    #[test]
+    fn credentials_envelope_is_domain_separated_from_sync_and_share() {
+        // Same passphrase, three envelope kinds: none opens as another.
+        let cred = encrypt_credentials_envelope(b"c", "pw").unwrap();
+        assert!(decrypt_sync_blob(&cred, "pw").is_err());
+        assert!(decrypt_share_blob(&cred, "pw").is_err());
+        let sync = encrypt_sync_blob(b"s", "pw").unwrap();
+        assert!(is_legacy_sync_blob(&sync));
+        let err = decrypt_credentials_envelope(&sync, "pw").unwrap_err();
+        assert!(err.contains("magic"), "got: {err}");
+        // Even with the header rewritten, the HKDF label keeps the keys apart.
+        let mut forged = sync.clone();
+        forged[0..8].copy_from_slice(b"AURACRED");
+        assert!(decrypt_credentials_envelope(&forged, "pw").is_err());
     }
 
     // ========== 本地密钥模式 (v3) ==========

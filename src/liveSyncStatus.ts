@@ -1,7 +1,7 @@
 import type { CloudBridgeShare, CloudBridgeStatus } from "./cloudBridge";
 import type { RelayProviderStatus } from "./liveRelay";
 import type { AssistStatus } from "./assist";
-import type { SyncConfigView } from "./cloudSync";
+import type { CredentialsSkipReason, SyncConfigView, SyncErrorKind } from "./cloudSync";
 import { t } from "./i18n";
 
 /**
@@ -58,6 +58,10 @@ export interface SyncRuntime {
   phase: "idle" | "syncing" | "ok" | "error";
   message: string;
   at: number | null;
+  /** What kind of failure `message` is, when the phase is `error`. */
+  code?: SyncErrorKind | null;
+  /** The last successful run skipped the credentials part for this reason. */
+  credentialsSkipped?: CredentialsSkipReason | null;
 }
 
 export const IDLE_SYNC_RUNTIME: SyncRuntime = { phase: "idle", message: "", at: null };
@@ -187,13 +191,18 @@ export function relayStatus(relay: RelayProviderStatus, outbound = 0, stale = fa
   });
 }
 
-/** Configuration sync: the whole run, not just its closing toast. */
+/**
+ * Configuration sync: the whole run, not just its closing toast. Signing in
+ * is the configuration; there is no passphrase state any more. A run that
+ * synced everything but the credentials is a partial success, not a failure:
+ * the last-result phrase stays and the skip reason is appended.
+ */
 export function syncStatus(
   view: SyncConfigView | null,
   runtime: SyncRuntime = IDLE_SYNC_RUNTIME,
   stale = false,
 ): FeatureStatus {
-  const mode: FeatureMode = !view ? "unconfigured" : view.provider ? "on" : "unconfigured";
+  const mode: FeatureMode = !view ? "unconfigured" : view.auraxlab.tokenSet ? "on" : "unconfigured";
   if (mode === "unconfigured") {
     return finish({
       feature: "sync", name: "Sync", mode, link: "unknown", controllers: 0, viewers: 0, pending: 0, stale,
@@ -202,14 +211,18 @@ export function syncStatus(
     });
   }
   // Ordered by what the user has to act on first.
-  const [phrase, kind, link]: [string, CloudPillKind | null, LinkState] =
-    runtime.phase === "syncing" ? [t("liveSync.syncRunning"), "monitor", "connected"]
-      : runtime.phase === "error" ? [t("liveSync.syncFailed", { message: runtime.message }), "error", "error"]
-        : !view!.passphraseUnlocked ? [t("liveSync.syncLocked"), "assist", "standby"]
-          : [view!.lastSyncAt
+  const [parts, kind, link]: [string[], CloudPillKind | null, LinkState] =
+    runtime.phase === "syncing" ? [[t("liveSync.syncRunning")], "monitor", "connected"]
+      : runtime.phase === "error" && runtime.code === "signIn" ? [[t("liveSync.syncSignIn")], "assist", "error"]
+        : runtime.phase === "error" ? [[t("liveSync.syncFailed", { message: runtime.message })], "error", "error"]
+          : [[view!.lastSyncAt
             ? t("liveSync.syncLastOk", { time: formatSyncTime(view!.lastSyncAt) })
-            : t("liveSync.syncNever"), null, "connected"];
-  return finish({ feature: "sync", name: "Sync", parts: [phrase], mode, link, controllers: 0, viewers: 0, pending: 0, stale, kind });
+            : t("liveSync.syncNever")], null, "connected"];
+  if (runtime.phase !== "syncing" && runtime.phase !== "error" && runtime.credentialsSkipped) {
+    parts.push(t(`liveSync.credentialsSkipped.${runtime.credentialsSkipped}`));
+    return finish({ feature: "sync", name: "Sync", parts, mode, link, controllers: 0, viewers: 0, pending: 0, stale, kind: "assist" });
+  }
+  return finish({ feature: "sync", name: "Sync", parts, mode, link, controllers: 0, viewers: 0, pending: 0, stale, kind });
 }
 
 function formatSyncTime(at: number): string {
@@ -264,8 +277,9 @@ export function liveSyncLabel(statuses: FeatureStatus[], verbose = true): LiveSy
     if (controllers > 0) counts.push(t("liveStatus.control", { n: controllers }));
     if (pending > 0) counts.push(t("liveStatus.pending", { n: pending }));
     if (problems > 0) counts.push(t("liveSync.problems", { n: problems }));
-    // A state that needs an answer but has nothing to count — a locked sync —
-    // would summarise to an empty string, so fall through to the named form.
+    // A state that needs an answer but has nothing to count — a sync waiting
+    // for a sign-in — would summarise to an empty string, so fall through to
+    // the named form.
     if (counts.length) {
       return { kind: primary.pill!.kind, text: [entry, ...counts].join(" · "), feature: primary.feature };
     }

@@ -74,7 +74,8 @@ import {
 } from "./liveSyncStatus";
 import { accountState, restoreAccount } from "./account";
 import { useLiveAccountFlow } from "./composables/useLiveAccountFlow";
-import { cloudSyncNow, getSyncConfig, type SyncConfigView } from "./cloudSync";
+import { cloudSyncNow, getSyncConfig, classifySyncError, type SyncConfigView, type SyncResult } from "./cloudSync";
+import { BOOKMARKS_CHANGED_EVENT, createAutoSync, notifyBookmarksChanged } from "./composables/useAutoSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useSshTunnels } from "./composables/useSshTunnels";
@@ -197,6 +198,17 @@ const { showAccount, returnTarget: accountReturnTarget } = accountFlow;
 const syncView = shallowRef<SyncConfigView | null>(null);
 const auraxlabSignedIn = computed(() => syncView.value?.auraxlab.tokenSet ?? false);
 const syncNowBusy = ref(false);
+// Opened the sync dialog because a run found a passphrase-era vault.
+const cloudSyncLegacy = ref(false);
+// Unattended sync (design §7.3): signed in and switched on in Sync settings.
+const autoSync = createAutoSync({
+  enabled: () => isMainWindow && Boolean(syncView.value?.autoSync && syncView.value?.auraxlab.tokenSet),
+  run: () => runSyncNow(true),
+});
+watch(syncView, () => autoSync.refresh());
+function handleBookmarksChanged() {
+  autoSync.notifyChange();
+}
 // Transient result banner for menu-triggered "Sync Now" (auto-dismisses).
 const cloudToast = ref<{ text: string; error: boolean } | null>(null);
 let cloudToastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -630,7 +642,11 @@ onMounted(async () => {
     void refreshRelayOpenTargets();
     void refreshSyncView()
       .catch(() => {})
-      .finally(() => syncCloudMenuState());
+      .finally(() => {
+        syncCloudMenuState();
+        autoSync.start();
+      });
+    window.addEventListener(BOOKMARKS_CHANGED_EVENT, handleBookmarksChanged);
   }
 
   void refreshAiKeyState();
@@ -729,6 +745,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  autoSync.stop();
+  window.removeEventListener(BOOKMARKS_CHANGED_EVENT, handleBookmarksChanged);
   if (hasLoadedSettings.value) {
     const finalSettings = prepareSettingsForSave(settingsRef.value);
     void invoke("save_settings", { settings: finalSettings }).catch((error) => {
@@ -1371,31 +1389,51 @@ function refreshSyncViewSilently() {
 // the sync settings dialog instead of failing silently.
 function handleSyncNow() {
   if (!isMainWindow || syncNowBusy.value) return;
-  void (async () => {
-    await refreshSyncView().catch(() => {});
-    if (!syncView.value?.provider) {
+  void runSyncNow(false);
+}
+
+/**
+ * One two-way sync. A manual run opens whatever the failure asks for (the
+ * account center, the migration step); an automatic run only records the
+ * outcome for the Live Sync panel and never pops a dialog.
+ */
+async function runSyncNow(auto: boolean) {
+  if (!isMainWindow || syncNowBusy.value) return;
+  await refreshSyncView().catch(() => {});
+  if (!syncView.value?.auraxlab.tokenSet) {
+    if (!auto) showCloudSync.value = true;
+    return;
+  }
+  syncNowBusy.value = true;
+  // The panel shows the whole run, not just the toast at the end.
+  syncRuntime.value = { phase: "syncing", message: "", at: Date.now() };
+  try {
+    const result = await cloudSyncNow();
+    recordSyncResult(result);
+    if (!auto) showCloudToast(t("cloudShare.syncNowDone", { message: result.message }));
+    refreshSyncViewSilently();
+  } catch (error) {
+    const text = String(error);
+    const code = classifySyncError(error);
+    syncRuntime.value = { phase: "error", message: text, at: Date.now(), code };
+    if (auto) return;
+    showCloudToast(t("cloudShare.syncNowFailed", { message: text }), true);
+    if (code === "signIn") {
+      accountFlow.open("sync");
+    } else if (code === "legacyVault") {
+      cloudSyncLegacy.value = true;
       showCloudSync.value = true;
-      return;
+    } else if (code === "notSignedIn") {
+      showCloudSync.value = true;
     }
-    syncNowBusy.value = true;
-    // The panel shows the whole run, not just the toast at the end.
-    syncRuntime.value = { phase: "syncing", message: "", at: Date.now() };
-    try {
-      const result = await cloudSyncNow();
-      syncRuntime.value = { phase: "ok", message: result.message, at: Date.now() };
-      showCloudToast(t("cloudShare.syncNowDone", { message: result.message }));
-      refreshSyncViewSilently();
-    } catch (error) {
-      const text = String(error);
-      syncRuntime.value = { phase: "error", message: text, at: Date.now() };
-      showCloudToast(t("cloudShare.syncNowFailed", { message: text }), true);
-      if (/passphrase|locked/i.test(text)) {
-        showCloudSync.value = true;
-      }
-    } finally {
-      syncNowBusy.value = false;
-    }
-  })();
+  } finally {
+    syncNowBusy.value = false;
+  }
+}
+
+/** A finished run, from the menu or the dialog: keep the partial-success detail. */
+function recordSyncResult(result: SyncResult) {
+  syncRuntime.value = { phase: "ok", message: result.message, at: Date.now(), credentialsSkipped: result.credentialsSkipped };
 }
 
 // Keep the native (macOS) Cloud menu's account label and checkmarks canonical.
@@ -2420,6 +2458,7 @@ async function handleConnectResult(result: ConnectResult) {
 
   try {
     await invoke("save_connection", { connection });
+    notifyBookmarksChanged();
     sidebarExpandGroup.value = connection.group?.trim() || "Ungrouped";
     sidebarRefreshToken.value += 1;
     sidebarOpen.value = true;
@@ -2495,6 +2534,7 @@ async function handleUpdateTunnels(nextTunnels: TunnelConfig[]) {
     const target = connections.find((connection) => connection.id === savedConnectionId);
     if (target) {
       await invoke("save_connection", { connection: { ...target, tunnels: nextTunnels } });
+      notifyBookmarksChanged();
       sidebarRefreshToken.value += 1;
     }
   } catch (error) {
@@ -2568,7 +2608,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "font-reset", title: t("menu.resetFontSize"), group: t("palette.groups.view"), keywords: "zoom", run: () => handleResetTerminalFontSize() },
     { id: "fullscreen", title: t("palette.cmd.fullscreen"), group: t("palette.groups.view"), run: () => { void handleToggleFullScreen(); } },
     { id: "settings", title: t("palette.cmd.settings"), group: t("palette.groups.app"), keywords: "preferences config", run: () => handleOpenSettings() },
-    { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync settings backup gist gitee webdav e2e encrypt bookmarks", run: () => { showCloudSync.value = true; } },
+    { id: "cloud-sync", title: t("palette.cmd.cloudSync"), group: t("palette.groups.app"), keywords: "sync settings backup auraxlab account bookmarks credentials", run: () => { showCloudSync.value = true; } },
     { id: "sync-now", title: t("palette.cmd.syncNow"), group: t("palette.groups.app"), keywords: "sync now cloud push pull bookmarks", run: () => handleSyncNow() },
     { id: "account", title: auraxlabSignedIn.value ? t("menu.myAccount") : t("menu.signIn"), group: t("palette.groups.app"), keywords: "account login sign in my account traffic bind device cloud console auraxlab enroll", run: () => handleOpenAccount() },
     { id: "cloud-console-toggle", title: settings.value.autoShareToCloud ? t("cloudShare.consoleOff") : t("cloudShare.consoleOn"), group: t("palette.groups.app"), keywords: "cloud console monitor share session rx tx remote view follow active", run: () => handleToggleCloudConsole() },
@@ -3493,7 +3533,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     <SettingsDialog v-if="showSettings" :initial="settings" @save="handleSaveSettings" @cancel="showSettings = false" />
     <CloudSyncDialog
       v-if="showCloudSync"
-      @close="showCloudSync = false; refreshSyncViewSilently()"
+      :legacy-vault="cloudSyncLegacy"
+      @close="showCloudSync = false; cloudSyncLegacy = false; refreshSyncViewSilently()"
+      @synced="recordSyncResult"
       @open-account="showCloudSync = false; accountFlow.open('sync')"
     />
     <AccountDialog

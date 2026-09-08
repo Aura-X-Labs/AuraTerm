@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { notifyBookmarksChanged } from "./useAutoSync";
 import { collectGroupPaths } from "../bookmarks";
 import { reviewImport, type ImportPlan } from "../importPreview";
 import type { SavedConnection } from "../types";
@@ -149,12 +150,14 @@ async function save(connection: SavedConnection) {
   requireUnlocked();
   await invoke("save_connection", { connection });
   replaceLocal(connection);
+  notifyBookmarksChanged();
 }
 
 async function remove(id: string) {
   requireUnlocked();
   await invoke("delete_connection", { id });
   connections.value = connections.value.filter((connection) => connection.id !== id);
+  notifyBookmarksChanged();
 }
 
 /** Delete several bookmarks in one backend call — one rewrite of the metadata
@@ -167,6 +170,7 @@ async function removeMany(ids: readonly string[]): Promise<number> {
   const removed = await invoke<number>("delete_connections", { ids: [...ids] });
   const deleted = new Set(ids);
   connections.value = connections.value.filter((connection) => !deleted.has(connection.id));
+  if (removed > 0) notifyBookmarksChanged();
   return removed;
 }
 
@@ -179,6 +183,7 @@ async function moveMany(ids: readonly string[], group: string | undefined): Prom
   const moved = await invoke<number>("move_connections", { ids: [...ids], group: group ?? null });
   if (moved > 0) {
     await refresh();
+    notifyBookmarksChanged();
   }
   return moved;
 }
@@ -188,6 +193,7 @@ async function renameGroup(from: string, to: string): Promise<number> {
   const renamed = await invoke<number>("rename_group", { from, to });
   if (renamed > 0) {
     await refresh();
+    notifyBookmarksChanged();
   }
   return renamed;
 }
@@ -205,6 +211,7 @@ async function duplicateMany(ids: readonly string[], nameFor: (name: string) => 
   }
   if (created.length > 0) {
     await refresh();
+    notifyBookmarksChanged();
   }
   return created;
 }
@@ -284,6 +291,7 @@ async function importWithPreview(
     trust: review.trust,
   });
   await refresh(review.group || undefined);
+  notifyBookmarksChanged();
   return { result, plan };
 }
 
@@ -294,6 +302,7 @@ async function importBookmarks(format: string, content: string, group: string | 
     group: group ?? null,
   });
   await refresh(group);
+  notifyBookmarksChanged();
   return result;
 }
 

@@ -141,7 +141,7 @@ const rowTitles: Record<LiveSyncFeature, string> = {
                 {{ t('liveSync.syncNow') }}
               </button>
               <button type="button" @click="close(); emit('openSync')">
-                {{ sync && !sync.passphraseUnlocked ? t('liveSync.unlock') : t('liveSync.syncSettings') }}
+                {{ sync && !sync.auraxlab.tokenSet ? t('liveSync.signIn') : t('liveSync.syncSettings') }}
               </button>
             </div>
           </template>

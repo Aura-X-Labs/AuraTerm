@@ -23,6 +23,7 @@ mod logging;
 mod account;
 mod ai;
 mod cloud_sync;
+mod cloud_sync_legacy;
 mod cloud_bridge;
 mod e2ee;
 mod pake;
@@ -1205,7 +1206,6 @@ fn main() {
         .manage(zmodem::ZmodemState::default())
         .manage(encryption::MasterPasswordState::default())
         .manage(connections::ImportPlanState::default())
-        .manage(cloud_sync::SyncState::default())
         .manage(ai::AiState::default())
         .invoke_handler(tauri::generate_handler![
             get_version_info,
@@ -1331,9 +1331,8 @@ fn main() {
             connections::duplicate_connection,
             cloud_sync::get_sync_config,
             cloud_sync::set_sync_config,
-            cloud_sync::set_sync_passphrase,
-            cloud_sync::lock_sync_passphrase,
-            cloud_sync::is_sync_unlocked,
+            cloud_sync::acknowledge_legacy_provider_notice,
+            cloud_sync_legacy::cloud_sync_migrate_legacy,
             cloud_sync::cloud_sync_push,
             cloud_sync::cloud_sync_pull,
             cloud_sync::cloud_sync_now,
