@@ -188,6 +188,13 @@
   flex-shrink: 0;
 }
 
+/* ── Live Sync colour semantics (design live-sync-status-bar-design.md §4) ──
+   Normal activity uses the accent, approvals and reconnects use the warning
+   colour, control gets one fixed, unmissable marker (chip + square dot, never
+   blinking), and trouble uses the danger colour with a dashed edge so it is
+   still separable from control without relying on hue alone. Every state also
+   carries words in the pill itself. */
+
 .terminal-status-cloud.cloud-online .cloud-status-dot {
   background: var(--app-success);
 }
@@ -197,8 +204,14 @@
   border: 1.5px solid var(--app-success);
 }
 
+.terminal-status-cloud.cloud-reconnecting {
+  border-color: var(--app-warning);
+  color: var(--app-warning);
+}
+
 .terminal-status-cloud.cloud-reconnecting .cloud-status-dot {
   background: var(--app-warning);
+  /* Reconnecting is transient, so a pulse here does not nag indefinitely. */
   animation: cloud-status-pulse 1.2s ease-in-out infinite;
 }
 
@@ -211,17 +224,20 @@
   background: var(--app-accent);
 }
 
+/* Someone can type on this machine: loud, but steady. */
 .terminal-status-cloud.cloud-control {
   border-color: var(--app-danger);
+  background: var(--app-danger-soft-strong);
   color: var(--app-danger);
+  font-weight: 600;
 }
 
 .terminal-status-cloud.cloud-control .cloud-status-dot {
   background: var(--app-danger);
-  animation: cloud-status-pulse 1.2s ease-in-out infinite;
+  border-radius: 2px;
 }
 
-/* Remote Assist: a guest session is open (waiting or watching). */
+/* Something needs an answer: an approval, or a control request. */
 .terminal-status-cloud.cloud-assist {
   border-color: var(--app-warning);
   color: var(--app-warning);
@@ -229,6 +245,25 @@
 
 .terminal-status-cloud.cloud-assist .cloud-status-dot {
   background: var(--app-warning);
+}
+
+/* Something is wrong: the link is down while the feature is on, a sync failed. */
+.terminal-status-cloud.cloud-error {
+  border: 1px dashed var(--app-danger);
+  color: var(--app-danger);
+}
+
+.terminal-status-cloud.cloud-error .cloud-status-dot {
+  background: transparent;
+  border: 1.5px solid var(--app-danger);
+}
+
+.terminal-status-cloud.live-sync-entry {
+  gap: 4px;
+}
+
+.terminal-statusbar-empty {
+  color: var(--app-text-dim);
 }
 
 @keyframes cloud-status-pulse {

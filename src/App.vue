@@ -21,7 +21,7 @@ import AccountDialog from "./AccountDialog.vue";
 import RemoteAssistDialog from "./RemoteAssistDialog.vue";
 import AssistKnockDialog from "./AssistKnockDialog.vue";
 import JoinAssistDialog from "./JoinAssistDialog.vue";
-import LiveConsoleStatus from "./LiveConsoleStatus.vue";
+import LiveSyncStatusBar from "./LiveSyncStatusBar.vue";
 import LiveRelayDialog from "./LiveRelayDialog.vue";
 import LiveRelayKnockDialog from "./LiveRelayKnockDialog.vue";
 import {
@@ -62,7 +62,16 @@ import {
   type RelayOpenTarget,
   type RelayProviderStatus,
 } from "./liveRelay";
-import { assistStatusPill as deriveShareStatus, relayStatusPill as deriveRelayStatus } from "./liveSyncStatus";
+import {
+  consoleStatus as deriveConsoleStatus,
+  relayStatus as deriveRelayStatus,
+  shareStatus as deriveShareStatus,
+  syncStatus as deriveSyncStatus,
+  sessionShareLabel,
+  REMOTE_TX_WINDOW_MS,
+  type FeatureStatus,
+  type SyncRuntime,
+} from "./liveSyncStatus";
 import { restoreAccount } from "./account";
 import { cloudSyncNow, getSyncConfig, type SyncConfigView } from "./cloudSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
@@ -159,6 +168,11 @@ const assistKnocks = ref<AssistKnock[]>([]);
 const showLiveRelay = ref(false);
 const relayKnocks = ref<RelayKnock[]>([]);
 const relayStatus = ref<RelayProviderStatus>({ enabled: false, peers: [] });
+// P2: a failed refresh keeps the previous snapshot and marks it, so a poll
+// error never reads as "the share ended".
+const statusStale = ref({ console: false, share: false, relay: false, sync: false });
+// Sync has no backend progress events, so the UI owns the phase it shows.
+const syncRuntime = ref<SyncRuntime>({ phase: "idle", message: "", at: null });
 // AuraXLab sign-in state drives the Cloud menu (Sign In vs My Account).
 // Refreshed on startup and whenever the account / sync dialogs close.
 const syncView = shallowRef<SyncConfigView | null>(null);
@@ -282,6 +296,13 @@ const termRefs = new Map<string, TerminalHandle>();
 const paneViewportRefs = new Map<string, HTMLElement>();
 const cleanupFns: Array<() => void> = [];
 let paneResizeObserver: ResizeObserver | null = null;
+// Narrow windows fold the Live Sync pills into their entry (design §2 rule 5).
+// Hysteresis keeps the fold from flapping when the two layouts differ slightly.
+const statusbarEl = ref<HTMLElement | null>(null);
+const statusbarNarrow = ref(false);
+let statusbarResizeObserver: ResizeObserver | null = null;
+const STATUSBAR_FOLD_BELOW = 760;
+const STATUSBAR_UNFOLD_ABOVE = 820;
 let pendingFitFrame: number | null = null;
 const pendingFitTabIds = new Set<string>();
 const hasLoadedSettings = ref(false);
@@ -513,6 +534,17 @@ onMounted(async () => {
     for (const element of paneViewportRefs.values()) {
       paneResizeObserver.observe(element);
     }
+
+    statusbarResizeObserver = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      if (width <= 0) return;
+      if (width < STATUSBAR_FOLD_BELOW) statusbarNarrow.value = true;
+      else if (width > STATUSBAR_UNFOLD_ABOVE) statusbarNarrow.value = false;
+    });
+    watch(statusbarEl, (element, previous) => {
+      if (previous) statusbarResizeObserver?.unobserve(previous);
+      if (element) statusbarResizeObserver?.observe(element);
+    }, { immediate: true });
   }
 
   try {
@@ -617,6 +649,7 @@ onMounted(async () => {
         ...remoteTxActivity.value,
         [payload.localSessionId]: { byteCount: payload.byteCount, at: Date.now() },
       };
+      scheduleRemoteTxPrune();
     },
   ));
   // Viewer/controller attach + detach and reconnects update the status pill
@@ -695,6 +728,12 @@ onBeforeUnmount(() => {
   }
   paneResizeObserver?.disconnect();
   paneResizeObserver = null;
+  statusbarResizeObserver?.disconnect();
+  statusbarResizeObserver = null;
+  if (remoteTxPruneTimer !== null) {
+    clearTimeout(remoteTxPruneTimer);
+    remoteTxPruneTimer = null;
+  }
   while (cleanupFns.length > 0) {
     const cleanup = cleanupFns.pop();
     cleanup?.();
@@ -806,21 +845,57 @@ const activeCloudShare = computed(() => (
 const activeRemoteTx = computed(() => (
   activeTabId.value ? remoteTxActivity.value[activeTabId.value] : undefined
 ));
+// Session scope: what this tab granted the cloud. Lives in the left half of
+// the bar next to the rest of the session's facts (design §7.3 E).
+const activeSessionShare = computed(() => sessionShareLabel(activeCloudShare.value, activeRemoteTx.value));
 
-async function refreshCloudBridgeStatus() {
-  bridgeStatus.value = await cloudBridgeStatus();
+// Remote input is a burst, not a permanent state: drop it once it goes quiet,
+// instead of leaving the byte count on screen for the life of the tab.
+let remoteTxPruneTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleRemoteTxPrune() {
+  if (remoteTxPruneTimer) return;
+  remoteTxPruneTimer = setTimeout(() => {
+    remoteTxPruneTimer = null;
+    const cutoff = Date.now() - REMOTE_TX_WINDOW_MS;
+    const entries = Object.entries(remoteTxActivity.value);
+    const kept = entries.filter(([, activity]) => activity.at > cutoff);
+    if (kept.length !== entries.length) remoteTxActivity.value = Object.fromEntries(kept);
+    if (kept.length) scheduleRemoteTxPrune();
+  }, REMOTE_TX_WINDOW_MS);
 }
 
-// Independent feature indicators; derive their labels in a testable module.
-const assistStatusPill = computed(() => deriveShareStatus(assistState.value));
-const relayStatusPill = computed(() => deriveRelayStatus(relayStatus.value));
+async function refreshCloudBridgeStatus() {
+  try {
+    bridgeStatus.value = await cloudBridgeStatus();
+    statusStale.value = { ...statusStale.value, console: false };
+  } catch (error) {
+    statusStale.value = { ...statusStale.value, console: true };
+    throw error;
+  }
+}
+
+// ── Live Sync status cluster (design live-sync-status-bar-design.md) ───────
+// Three dimensions per feature, derived in a testable module; the status bar
+// only renders what comes out. Relay tabs opened *from* this machine are the
+// consumer side and stay out of the provider pills.
+const outboundRelayTabs = computed(() => tabs.value
+  .filter((tab) => tab.session.protocol === "relay")
+  .map((tab) => ({ id: tab.id, title: tab.title })));
+const liveSyncStatuses = computed<FeatureStatus[]>(() => [
+  deriveSyncStatus(syncView.value, syncRuntime.value, statusStale.value.sync),
+  deriveConsoleStatus(bridgeStatus.value, settings.value.autoShareToCloud, statusStale.value.console),
+  deriveShareStatus(assistState.value, statusStale.value.share),
+  deriveRelayStatus(relayStatus.value, outboundRelayTabs.value.length, statusStale.value.relay),
+]);
 
 // ── Remote Assist host wiring ───────────────────────────────────────────────
 async function refreshAssistState() {
   try {
     assistState.value = await fetchAssistStatus();
+    statusStale.value = { ...statusStale.value, share: false };
   } catch {
-    assistState.value = null;
+    // Keep the last known share rather than claiming it ended.
+    statusStale.value = { ...statusStale.value, share: true };
   }
 }
 
@@ -1034,8 +1109,10 @@ async function shareWhenReady(localSessionId: string, label: string): Promise<st
 async function refreshRelayStatus() {
   try {
     relayStatus.value = await relayProviderStatus();
+    statusStale.value = { ...statusStale.value, relay: false };
   } catch {
-    relayStatus.value = { enabled: false, peers: [] };
+    // Same rule as Live Share: keep the peers, mark the snapshot instead.
+    statusStale.value = { ...statusStale.value, relay: true };
   }
 }
 
@@ -1078,6 +1155,20 @@ function handleAssistKnockDecision(knock: AssistKnock, decision: "allow_view" | 
   assistKnocks.value = assistKnocks.value.filter((k) => k !== knock);
   const action = respondAssistKnock(knock, decision);
   void action.then(() => refreshAssistState()).catch((error) => showCloudToast(String(error), true));
+}
+
+/** Opening the Live Sync panel re-reads every feature it shows. */
+function handleRefreshLiveSync() {
+  void refreshCloudBridgeStatus().catch(() => {});
+  void refreshAssistState();
+  void refreshRelayStatus();
+  refreshSyncViewSilently();
+}
+
+/** End the running Live Share from the Live Sync panel. */
+function handleStopAssistFromPanel() {
+  if (!isMainWindow || !assistState.value) return;
+  void stopAssist("host_ended").then(() => refreshAssistState()).catch((error) => showCloudToast(String(error), true));
 }
 
 function handleRevokeAllAssistControl() {
@@ -1246,7 +1337,13 @@ function showCloudToast(text: string, error = false) {
 }
 
 async function refreshSyncView() {
-  syncView.value = await getSyncConfig();
+  try {
+    syncView.value = await getSyncConfig();
+    statusStale.value = { ...statusStale.value, sync: false };
+  } catch (error) {
+    statusStale.value = { ...statusStale.value, sync: true };
+    throw error;
+  }
 }
 
 function refreshSyncViewSilently() {
@@ -1265,12 +1362,16 @@ function handleSyncNow() {
       return;
     }
     syncNowBusy.value = true;
+    // The panel shows the whole run, not just the toast at the end.
+    syncRuntime.value = { phase: "syncing", message: "", at: Date.now() };
     try {
       const result = await cloudSyncNow();
+      syncRuntime.value = { phase: "ok", message: result.message, at: Date.now() };
       showCloudToast(t("cloudShare.syncNowDone", { message: result.message }));
       refreshSyncViewSilently();
     } catch (error) {
       const text = String(error);
+      syncRuntime.value = { phase: "error", message: text, at: Date.now() };
       showCloudToast(t("cloudShare.syncNowFailed", { message: text }), true);
       if (/passphrase|locked/i.test(text)) {
         showCloudSync.value = true;
@@ -3228,8 +3329,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           @resize="fitActiveTerminal"
         />
 
-        <div v-if="activeTab" class="terminal-statusbar">
-          <div class="terminal-statusbar-left">
+        <div ref="statusbarEl" class="terminal-statusbar">
+          <div v-if="activeTab" class="terminal-statusbar-left">
             <span class="terminal-status-indicator" :class="activeSerialConnectionState ?? 'connected'" />
             <span>{{ activeSerialConfig?.portName ?? activeTab.title }}</span>
             <span class="terminal-status-pill">{{ activeSerialConnectionState ?? activeTab.session.protocol }}</span>
@@ -3276,50 +3377,46 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                 @click="handleSendSerialBreak"
               >BREAK</button>
             </template>
+
+            <!-- No live serial status: fall back to the configured frame, which
+                 used to be duplicated on the device-status side of the bar. -->
+            <template v-else-if="activeSerialConfig">
+              <span class="terminal-status-pill">{{ activeSerialConfig.baudRate }} baud</span>
+              <span class="terminal-status-pill">{{ formatSerialFrame(activeSerialConfig) }}</span>
+              <span class="terminal-status-pill">{{ activeSerialConfig.flowControl }}</span>
+            </template>
+
+            <span v-if="activeSessionShare" class="terminal-status-pill">{{ activeSessionShare }}</span>
+          </div>
+          <div v-else class="terminal-statusbar-left terminal-statusbar-empty">
+            <span>{{ $t('liveSync.noSession') }}</span>
           </div>
           <div class="terminal-statusbar-right">
-            <LiveConsoleStatus
+            <LiveSyncStatusBar
+              :statuses="liveSyncStatuses"
               :bridge="bridgeStatus"
-              :enabled="settings.autoShareToCloud"
+              :assist="assistState"
+              :relay="relayStatus"
+              :sync="syncView"
+              :sync-busy="syncNowBusy"
+              :console-enabled="settings.autoShareToCloud"
               :allow-remote-send="settings.allowRemoteSend"
+              :outbound="outboundRelayTabs"
               :can-manage="isMainWindow"
-              @refresh="refreshCloudBridgeStatus().catch(() => {})"
+              :compact="statusbarNarrow"
+              @refresh="handleRefreshLiveSync"
               @toggle-console="handleToggleCloudConsole"
               @toggle-remote-send="handleToggleRemoteSend"
               @open-web="handleOpenConsoleWeb"
               @open-account="showAccount = true"
+              @sync-now="handleSyncNow"
+              @open-sync="showCloudSync = true"
+              @manage-share="handleOpenRemoteAssist"
+              @stop-share="handleStopAssistFromPanel"
+              @revoke-share-control="handleRevokeAllAssistControl"
+              @manage-relay="handleOpenLiveRelay"
+              @revoke-relay-control="handleRelayRevokeAllControl"
             />
-            <button
-              v-if="assistStatusPill"
-              type="button"
-              class="terminal-status-cloud"
-              :class="`cloud-${assistStatusPill.kind}`"
-              :title="$t('assist.statusTooltip')"
-              @click="handleOpenRemoteAssist"
-            >
-              <span class="cloud-status-dot" />
-              {{ assistStatusPill.text }}
-            </button>
-            <button
-              v-if="relayStatusPill"
-              type="button"
-              class="terminal-status-cloud"
-              :class="`cloud-${relayStatusPill.kind}`"
-              :title="$t('liveRelay.statusTooltip')"
-              @click="handleOpenLiveRelay"
-            >
-              <span class="cloud-status-dot" />
-              {{ relayStatusPill.text }}
-            </button>
-            <span v-if="activeCloudShare" class="terminal-status-pill">
-              {{ activeCloudShare.txAllowed ? t('cloudShare.rxTx', { policy: activeCloudShare.txPolicy }) : t('cloudShare.rxOnly') }}
-            </span>
-            <span v-if="activeRemoteTx" class="terminal-status-pill">
-              {{ t('cloudShare.remoteTx', { count: activeRemoteTx.byteCount }) }}
-            </span>
-            <span v-if="activeSerialConfig">{{ activeSerialConfig.baudRate }} baud</span>
-            <span v-if="activeSerialConfig">{{ formatSerialFrame(activeSerialConfig) }}</span>
-            <span v-if="activeSerialConfig">{{ activeSerialConfig.flowControl }}</span>
           </div>
         </div>
       </div>
