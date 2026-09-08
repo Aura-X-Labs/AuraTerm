@@ -1,27 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * Cloud sync IPC layer.
+ * Configuration sync IPC layer (design docs/plans/sync-passphrase-removal-design.md).
  *
- * AuraTerm syncs bookmarks / settings / known-hosts as a single blob that is
- * end-to-end encrypted with a user-chosen *sync passphrase* before it ever
- * leaves the device. The storage provider (a GitHub/Gitee Gist, a WebDAV
- * server, or an AuraXLab account) only ever sees ciphertext. All crypto and
- * networking happen in the Rust backend; this module is a thin typed wrapper.
+ * Signing in to the AuraXLab account *is* the configuration: the backend
+ * keeps the scoped sync credential, and there is no separate sync passphrase
+ * any more. Bookmarks, the settings subset and known-hosts travel as plain
+ * JSON that the server encrypts at rest; saved credentials are sealed under
+ * the master password before upload (`AURACRED`) and the server never opens
+ * them. All crypto and networking happen in the Rust backend; this module is
+ * a thin typed wrapper.
  */
 
-export type SyncProvider = "" | "github" | "gitee" | "webdav" | "auraxlab";
+export type SyncProvider = "" | "auraxlab";
 
-export interface GistView {
-  tokenSet: boolean;
-  gistId: string;
-}
+/** Which key protects the local credential store; only the former can sync credentials. */
+export type CredentialsMode = "masterPassword" | "localKey";
 
-export interface WebdavView {
-  url: string;
-  username: string;
-  passwordSet: boolean;
-}
+/** Why the credentials part of a sync did not run (`cloud_sync::skip`). */
+export type CredentialsSkipReason = "localKeyMode" | "masterLocked" | "mismatch" | "corrupt";
 
 export interface AuraxlabView {
   username: string;
@@ -29,7 +26,7 @@ export interface AuraxlabView {
   tokenSet: boolean;
 }
 
-/** Redacted view of the persisted sync config (secrets are reduced to flags). */
+/** Redacted view of the persisted sync config (the credential is reduced to a flag). */
 export interface SyncConfigView {
   provider: SyncProvider;
   includeSettings: boolean;
@@ -40,31 +37,20 @@ export interface SyncConfigView {
   deviceLabel: string;
   lastSyncAt: number | null;
   lastRemoteVersion: string | null;
-  passphraseUnlocked: boolean;
-  github: GistView;
-  gitee: GistView;
-  webdav: WebdavView;
+  credentialsMode: CredentialsMode;
+  masterUnlocked: boolean;
+  /** A removed provider (Gist / WebDAV) was found in the stored config. */
+  legacyProviderNotice: boolean;
   auraxlab: AuraxlabView;
 }
 
-/**
- * Editable config patch. Secret fields are `string | null`: `null` keeps the
- * stored value, `""` clears it, a value replaces it.
- */
+/** Editable config patch. Provider and credentials are not part of it. */
 export interface SyncSettingsInput {
-  provider: SyncProvider;
   includeSettings: boolean;
   includeKnownHosts: boolean;
   includeCredentials: boolean;
   autoSync: boolean;
   deviceLabel: string;
-  githubToken: string | null;
-  githubGistId: string | null;
-  giteeToken: string | null;
-  giteeGistId: string | null;
-  webdavUrl: string | null;
-  webdavUsername: string | null;
-  webdavPassword: string | null;
 }
 
 export interface SyncResult {
@@ -74,6 +60,7 @@ export interface SyncResult {
   bookmarksAdded: number;
   knownHostsAdded: number;
   credentialsSynced: number;
+  credentialsSkipped: CredentialsSkipReason | null;
   settingsApplied: boolean;
   remoteVersion: string | null;
   message: string;
@@ -87,32 +74,33 @@ export function setSyncConfig(input: SyncSettingsInput): Promise<SyncConfigView>
   return invoke<SyncConfigView>("set_sync_config", { input });
 }
 
-export function setSyncPassphrase(passphrase: string): Promise<void> {
-  return invoke("set_sync_passphrase", { passphrase });
+export function acknowledgeLegacyProviderNotice(): Promise<void> {
+  return invoke("acknowledge_legacy_provider_notice");
 }
 
-export function lockSyncPassphrase(): Promise<void> {
-  return invoke("lock_sync_passphrase");
+export function cloudSyncPush(): Promise<SyncResult> {
+  return invoke<SyncResult>("cloud_sync_push");
 }
 
-export function isSyncUnlocked(): Promise<boolean> {
-  return invoke<boolean>("is_sync_unlocked");
+export function cloudSyncPull(replace: boolean): Promise<SyncResult> {
+  return invoke<SyncResult>("cloud_sync_pull", { replace });
 }
 
-export function cloudSyncPush(passphrase?: string | null): Promise<SyncResult> {
-  return invoke<SyncResult>("cloud_sync_push", { passphrase: passphrase ?? null });
-}
-
-export function cloudSyncPull(replace: boolean, passphrase?: string | null): Promise<SyncResult> {
-  return invoke<SyncResult>("cloud_sync_pull", { passphrase: passphrase ?? null, replace });
-}
-
-export function cloudSyncNow(passphrase?: string | null): Promise<SyncResult> {
-  return invoke<SyncResult>("cloud_sync_now", { passphrase: passphrase ?? null });
+export function cloudSyncNow(): Promise<SyncResult> {
+  return invoke<SyncResult>("cloud_sync_now");
 }
 
 export function cloudSyncTestConnection(): Promise<string> {
   return invoke<string>("cloud_sync_test_connection");
+}
+
+/**
+ * One-time migration of a vault uploaded by a passphrase-era build. Either
+ * decrypt it with the old passphrase and merge, or overwrite it with this
+ * device's data. Removed in Phase 3 together with the backend module.
+ */
+export function cloudSyncMigrateLegacy(passphrase: string | null, overwrite: boolean): Promise<SyncResult> {
+  return invoke<SyncResult>("cloud_sync_migrate_legacy", { passphrase, overwrite });
 }
 
 export function auraxlabRequestEmailCode(email: string): Promise<string> {
@@ -134,12 +122,23 @@ export function auraxlabRegister(
   return invoke<string>("auraxlab_register", { email, username, password });
 }
 
-export const PROVIDER_LABELS: Record<Exclude<SyncProvider, "">, string> = {
-  github: "GitHub Gist",
-  gitee: "Gitee Gist",
-  webdav: "WebDAV",
-  auraxlab: "AuraXLab Account",
-};
+// ---------------------------------------------------------------------------
+// Error classification
+//
+// The backend returns plain strings; a few of them drive UI decisions (open
+// the account center, open the migration step). The patterns mirror the
+// ERR_* constants in `src-tauri/src/cloud_sync.rs` — keep them in sync.
+// ---------------------------------------------------------------------------
+
+export type SyncErrorKind = "signIn" | "notSignedIn" | "legacyVault" | "other";
+
+export function classifySyncError(message: unknown): SyncErrorKind {
+  const text = String(message);
+  if (/old sync passphrase format/i.test(text)) return "legacyVault";
+  if (/sign in to your auraxlab account again/i.test(text)) return "signIn";
+  if (/sign in to your auraxlab account first/i.test(text)) return "notSignedIn";
+  return "other";
+}
 
 // ---------------------------------------------------------------------------
 // Registration validation
@@ -176,21 +175,13 @@ export function validateRegistration(
   return null;
 }
 
-/** Build a fresh input patch from a view, leaving all secret fields untouched. */
+/** Build a fresh input patch from a view. */
 export function inputFromView(view: SyncConfigView): SyncSettingsInput {
   return {
-    provider: view.provider,
     includeSettings: view.includeSettings,
     includeKnownHosts: view.includeKnownHosts,
     includeCredentials: view.includeCredentials,
     autoSync: view.autoSync,
     deviceLabel: view.deviceLabel,
-    githubToken: null,
-    githubGistId: view.github.gistId,
-    giteeToken: null,
-    giteeGistId: view.gitee.gistId,
-    webdavUrl: view.webdav.url,
-    webdavUsername: view.webdav.username,
-    webdavPassword: null,
   };
 }

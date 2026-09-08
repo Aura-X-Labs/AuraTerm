@@ -21,12 +21,10 @@ const assist: AssistStatus = {
   failedAttempts: 0, fence: 1, locked: false, guests: [guest],
 };
 const sync: SyncConfigView = {
-  provider: "webdav", includeSettings: true, includeKnownHosts: true, includeCredentials: false,
+  provider: "auraxlab", includeSettings: true, includeKnownHosts: true, includeCredentials: false,
   autoSync: false, deviceId: "dev", deviceLabel: "Mac", lastSyncAt: null, lastRemoteVersion: null,
-  passphraseUnlocked: true,
-  github: { tokenSet: false, gistId: "" }, gitee: { tokenSet: false, gistId: "" },
-  webdav: { url: "https://dav", username: "u", passwordSet: true },
-  auraxlab: { username: "", email: "", tokenSet: false },
+  credentialsMode: "masterPassword", masterUnlocked: true, legacyProviderNotice: false,
+  auraxlab: { username: "alice", email: "alice@example.com", tokenSet: true },
 };
 
 const wrappers: ReturnType<typeof mount>[] = [];
@@ -101,16 +99,21 @@ describe("Live Sync cluster", () => {
     expect(wrapper.emitted("toggleConsole")).toBeUndefined();
   });
 
-  it("offers unlocking and blocks a second run while one is in flight", async () => {
-    const locked = { ...sync, passphraseUnlocked: false };
-    const wrapper = render({ sync: locked, syncBusy: true }, [
-      syncStatus(locked, { phase: "syncing", message: "", at: 1 }),
+  it("offers signing in and blocks a second run while one is in flight", async () => {
+    const signedOut = { ...sync, auraxlab: { ...sync.auraxlab, tokenSet: false } };
+    const wrapper = render({ sync: signedOut, syncBusy: true }, [
+      syncStatus(signedOut, { phase: "syncing", message: "", at: 1 }),
       consoleStatus(bridge, true), shareStatus(null), relayStatus(relay),
     ]);
     await chip(wrapper).trigger("click");
+    expect(wrapper.get(".live-sync-row").text()).toContain("not signed in");
     const buttons = wrapper.findAll(".live-sync-row button");
     expect(buttons.find((button) => button.text() === "Sync now")!.attributes("disabled")).toBeDefined();
-    expect(buttons.some((button) => button.text() === "Unlock…")).toBe(true);
+    expect(buttons.some((button) => button.text() === "Sign in…")).toBe(true);
+    // Signed in, the same button opens the settings instead.
+    const signedIn = render({ sync });
+    await chip(signedIn).trigger("click");
+    expect(signedIn.findAll(".live-sync-row button").some((button) => button.text() === "Sync settings…")).toBe(true);
   });
 
   it("labels a stale row instead of hiding what it last knew", async () => {

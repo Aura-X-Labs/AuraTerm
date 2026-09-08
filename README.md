@@ -32,7 +32,7 @@
 - **📋 Session Logging**: Flexible log saving with customizable filename templates.
 - **🔄 Enhanced Reconnection**: SSH auto-reconnect and tmux/screen session persistence.
 - **🔐 Encrypted Credentials**: Secrets stored apart from metadata with AES-256-GCM + Argon2id and an optional master password.
-- **☁️ End-to-End Encrypted Cloud Sync**: No backend to host — sync bookmarks/settings/known-hosts across devices via GitHub Gist, Gitee Gist, WebDAV, or an AuraXLab account. Encrypted with a dedicated sync passphrase before upload; the provider/server stays zero-knowledge.
+- **☁️ Account Cloud Sync**: Sign in to an AuraXLab account and bookmarks/settings/known-hosts follow you across devices — no second passphrase, and an email password reset keeps your data. Saved credentials are end-to-end encrypted under your master password before upload; the server never reads them.
 
 ---
 

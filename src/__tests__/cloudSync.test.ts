@@ -1,4 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { classifySyncError } from "../cloudSync";
+
+describe("classifySyncError (mirrors cloud_sync.rs ERR_* texts)", () => {
+  it("recognises the states the UI acts on", () => {
+    expect(classifySyncError("Sign in to your AuraXLab account again — the saved credential is no longer valid.")).toBe("signIn");
+    expect(classifySyncError("Sign in to your AuraXLab account first.")).toBe("notSignedIn");
+    expect(classifySyncError(new Error("The cloud copy still uses the old sync passphrase format; migrate it once from Sync settings.")))
+      .toBe("legacyVault");
+  });
+  it("leaves everything else alone", () => {
+    expect(classifySyncError("Network error: timeout")).toBe("other");
+    expect(classifySyncError("The server has newer data than this device. Pull first, then push again.")).toBe("other");
+    expect(classifySyncError(undefined)).toBe("other");
+  });
+});
 
 import {
   SYNC_EMAIL_RE,

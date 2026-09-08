@@ -3,57 +3,45 @@ import { ref, computed, onMounted } from "vue";
 import {
   getSyncConfig,
   setSyncConfig,
-  setSyncPassphrase,
-  lockSyncPassphrase,
+  acknowledgeLegacyProviderNotice,
   cloudSyncPush,
   cloudSyncPull,
   cloudSyncNow,
   cloudSyncTestConnection,
+  cloudSyncMigrateLegacy,
+  classifySyncError,
   inputFromView,
-  PROVIDER_LABELS,
   type SyncConfigView,
-  type SyncProvider,
   type SyncResult,
 } from "./cloudSync";
 import { confirmDialog } from "./nativeDialogs";
 import { t } from "./i18n";
 
-const emit = defineEmits<{ close: []; openAccount: [] }>();
+const props = defineProps<{
+  /** Opened because a sync found a passphrase-era vault: show the migration step. */
+  legacyVault?: boolean;
+}>();
+const emit = defineEmits<{ close: []; openAccount: []; synced: [result: SyncResult] }>();
 
 const view = ref<SyncConfigView | null>(null);
 const busy = ref(false);
 const message = ref("");
 const isError = ref(false);
 
-// Passphrase (held only in memory; never persisted or uploaded).
-const passphrase = ref("");
-
-// Editable form mirror of the config (non-secret fields).
-const provider = ref<SyncProvider>("");
+// Editable form mirror of the config.
 const deviceLabel = ref("");
 const includeSettings = ref(true);
 const includeKnownHosts = ref(true);
 const includeCredentials = ref(false);
 const autoSync = ref(false);
 
-// Secret inputs — left blank means "keep what's stored".
-const githubToken = ref("");
-const githubGistId = ref("");
-const giteeToken = ref("");
-const giteeGistId = ref("");
-const webdavUrl = ref("");
-const webdavUsername = ref("");
-const webdavPassword = ref("");
+// One-time migration of a vault uploaded by a passphrase-era build.
+const migrationNeeded = ref(props.legacyVault ?? false);
+const legacyPassphrase = ref("");
 
-// AuraXLab (the official account-based service) is featured first.
-const providers: Array<Exclude<SyncProvider, "">> = ["auraxlab", "github", "gitee", "webdav"];
-
-function providerLabel(p: Exclude<SyncProvider, "">): string {
-  return PROVIDER_LABELS[p];
-}
-
-const passphraseUnlocked = computed(() => view.value?.passphraseUnlocked ?? false);
-const auraxlabSignedIn = computed(() => view.value?.auraxlab.tokenSet ?? false);
+const signedIn = computed(() => view.value?.auraxlab.tokenSet ?? false);
+const credentialsAvailable = computed(() => view.value?.credentialsMode === "masterPassword");
+const masterUnlocked = computed(() => view.value?.masterUnlocked ?? false);
 
 const lastSyncText = computed(() => {
   const ts = view.value?.lastSyncAt;
@@ -68,21 +56,11 @@ function flash(text: string, error = false) {
 
 function hydrate(next: SyncConfigView) {
   view.value = next;
-  // Feature the official AuraXLab account by default when nothing is configured.
-  provider.value = next.provider || "auraxlab";
   deviceLabel.value = next.deviceLabel;
   includeSettings.value = next.includeSettings;
   includeKnownHosts.value = next.includeKnownHosts;
   includeCredentials.value = next.includeCredentials;
   autoSync.value = next.autoSync;
-  githubGistId.value = next.github.gistId;
-  giteeGistId.value = next.gitee.gistId;
-  webdavUrl.value = next.webdav.url;
-  webdavUsername.value = next.webdav.username;
-  // Secret inputs intentionally left blank.
-  githubToken.value = "";
-  giteeToken.value = "";
-  webdavPassword.value = "";
 }
 
 onMounted(async () => {
@@ -93,43 +71,28 @@ onMounted(async () => {
   }
 });
 
-/** Empty string -> null (keep stored secret); otherwise send the new value. */
-function secret(value: string): string | null {
-  return value.trim().length > 0 ? value : null;
-}
-
 async function withBusy<T>(fn: () => Promise<T>): Promise<T | undefined> {
   if (busy.value) return undefined;
   busy.value = true;
   try {
     return await fn();
   } catch (e) {
-    flash(String(e), true);
+    reportError(e);
     return undefined;
   } finally {
     busy.value = false;
   }
 }
 
-async function unlockPassphrase() {
-  if (passphrase.value.trim().length === 0) {
-    flash(t("cloudSync.enterPassphrase"), true);
+/** A legacy vault turns the error into the migration step; everything else is shown as-is. */
+function reportError(error: unknown) {
+  const kind = classifySyncError(error);
+  if (kind === "legacyVault") {
+    migrationNeeded.value = true;
+    flash(t("cloudSync.migrationNeeded"), true);
     return;
   }
-  await withBusy(async () => {
-    await setSyncPassphrase(passphrase.value);
-    hydrate(await getSyncConfig());
-    flash(t("cloudSync.passphraseSet"));
-  });
-}
-
-async function lockPassphrase() {
-  await withBusy(async () => {
-    await lockSyncPassphrase();
-    passphrase.value = "";
-    hydrate(await getSyncConfig());
-    flash(t("cloudSync.syncLockedMsg"));
-  });
+  flash(String(error), true);
 }
 
 async function saveConfig(): Promise<boolean> {
@@ -138,19 +101,11 @@ async function saveConfig(): Promise<boolean> {
   const next = await withBusy(async () => {
     const updated = await setSyncConfig({
       ...base,
-      provider: provider.value,
       deviceLabel: deviceLabel.value,
       includeSettings: includeSettings.value,
       includeKnownHosts: includeKnownHosts.value,
       includeCredentials: includeCredentials.value,
       autoSync: autoSync.value,
-      githubToken: secret(githubToken.value),
-      githubGistId: githubGistId.value,
-      giteeToken: secret(giteeToken.value),
-      giteeGistId: giteeGistId.value,
-      webdavUrl: webdavUrl.value,
-      webdavUsername: webdavUsername.value,
-      webdavPassword: secret(webdavPassword.value),
     });
     hydrate(updated);
     flash(t("cloudSync.settingsSaved"));
@@ -169,37 +124,31 @@ function describeResult(result: SyncResult): string {
     parts.push(")");
   }
   if (result.pushed) parts.push(`pushed (${result.bookmarksTotal} bookmarks)`);
-  return `${result.message} ${parts.join(" ")}`.trim();
+  const summary = `${result.message} ${parts.join(" ")}`.trim();
+  return result.credentialsSkipped
+    ? `${summary} — ${t(`cloudSync.skipped.${result.credentialsSkipped}`)}`
+    : summary;
 }
 
-async function doSyncNow() {
+async function runAction(action: () => Promise<SyncResult>) {
   if (!(await saveConfig())) return;
   await withBusy(async () => {
-    const result = await cloudSyncNow(passphrase.value || null);
+    const result = await action();
     hydrate(await getSyncConfig());
-    flash(describeResult(result));
+    flash(describeResult(result), Boolean(result.credentialsSkipped));
+    migrationNeeded.value = false;
+    emit("synced", result);
   });
 }
 
-async function doPush() {
-  if (!(await saveConfig())) return;
-  await withBusy(async () => {
-    const result = await cloudSyncPush(passphrase.value || null);
-    hydrate(await getSyncConfig());
-    flash(describeResult(result));
-  });
-}
+const doSyncNow = () => runAction(cloudSyncNow);
+const doPush = () => runAction(cloudSyncPush);
 
 async function doPull(replace: boolean) {
   if (replace && !(await confirmDialog(t("cloudSync.confirmReplace")))) {
     return;
   }
-  if (!(await saveConfig())) return;
-  await withBusy(async () => {
-    const result = await cloudSyncPull(replace, passphrase.value || null);
-    hydrate(await getSyncConfig());
-    flash(describeResult(result));
-  });
+  await runAction(() => cloudSyncPull(replace));
 }
 
 async function testConnection() {
@@ -209,6 +158,23 @@ async function testConnection() {
   });
 }
 
+async function migrate(overwrite: boolean) {
+  if (overwrite) {
+    if (!(await confirmDialog(t("cloudSync.confirmMigrateOverwrite")))) return;
+  } else if (legacyPassphrase.value.trim().length === 0) {
+    flash(t("cloudSync.enterLegacyPassphrase"), true);
+    return;
+  }
+  await runAction(() => cloudSyncMigrateLegacy(overwrite ? null : legacyPassphrase.value, overwrite));
+  legacyPassphrase.value = "";
+}
+
+async function dismissNotice() {
+  await withBusy(async () => {
+    await acknowledgeLegacyProviderNotice();
+    hydrate(await getSyncConfig());
+  });
+}
 </script>
 
 <template>
@@ -223,103 +189,72 @@ async function testConnection() {
       </div>
 
       <div class="sync-body">
-        <!-- Passphrase -->
+        <!-- Removed providers (one-time notice) -->
+        <section v-if="view?.legacyProviderNotice" class="sync-section sync-notice" data-testid="legacy-provider-notice">
+          <p class="sync-hint">{{ $t('cloudSync.legacyProviderNotice') }}</p>
+          <button class="sync-btn" type="button" :disabled="busy" @click="dismissNotice">{{ $t('cloudSync.dismiss') }}</button>
+        </section>
+
+        <!-- Account -->
         <section class="sync-section">
-          <h3>{{ $t('cloudSync.step1') }}</h3>
-          <p class="sync-hint">
-            {{ $t('cloudSync.passphraseHint') }}
-          </p>
+          <h3>{{ $t('cloudSync.accountSection') }}</h3>
+          <template v-if="signedIn">
+            <p class="sync-hint">
+              {{ $t('cloudSync.signedInAs', { username: view?.auraxlab.username ?? '' }) }}
+            </p>
+          </template>
+          <template v-else>
+            <p class="sync-hint">{{ $t('cloudSync.signInInAccount') }}</p>
+            <button class="sync-btn primary" type="button" @click="emit('openAccount')">
+              {{ $t('cloudSync.openAccount') }}
+            </button>
+          </template>
+          <p class="sync-hint">{{ $t('cloudSync.howItWorks') }}</p>
+        </section>
+
+        <!-- One-time migration of a passphrase-era vault -->
+        <section v-if="migrationNeeded && signedIn" class="sync-section sync-migration" data-testid="legacy-migration">
+          <h3>{{ $t('cloudSync.migrationTitle') }}</h3>
+          <p class="sync-hint">{{ $t('cloudSync.migrationHint') }}</p>
           <div class="sync-row">
-            <span class="sync-badge" :data-on="passphraseUnlocked">
-              {{ passphraseUnlocked ? $t('cloudSync.unlocked') : $t('cloudSync.locked') }}
-            </span>
             <input
-              v-model="passphrase"
+              v-model="legacyPassphrase"
               class="sync-input"
               type="password"
               autocomplete="off"
-              :placeholder="$t('cloudSync.passphrasePlaceholder')"
-              @keyup.enter="unlockPassphrase"
+              :placeholder="$t('cloudSync.migrationPassphrase')"
+              @keyup.enter="migrate(false)"
             />
-            <button class="sync-btn" type="button" :disabled="busy" @click="unlockPassphrase">{{ $t('cloudSync.set') }}</button>
-            <button v-if="passphraseUnlocked" class="sync-btn" type="button" :disabled="busy" @click="lockPassphrase">
-              {{ $t('cloudSync.lock') }}
-            </button>
-          </div>
-        </section>
-
-        <!-- Provider -->
-        <section class="sync-section">
-          <h3>{{ $t('cloudSync.step2') }}</h3>
-          <div class="sync-provider-tabs">
-            <button
-              v-for="p in providers"
-              :key="p"
-              type="button"
-              class="sync-provider-tab"
-              :class="{ active: provider === p }"
-              @click="provider = p"
-            >
-              {{ providerLabel(p) }}
-            </button>
-          </div>
-
-          <div v-if="provider === 'github'" class="sync-fields">
-            <label>{{ $t('cloudSync.patLabel') }} <span class="sync-muted">{{ $t('cloudSync.scopeGist') }}</span></label>
-            <input v-model="githubToken" class="sync-input" type="password" autocomplete="off"
-              :placeholder="view?.github.tokenSet ? $t('cloudSync.storedKeep') : 'ghp_…'" />
-            <label>{{ $t('cloudSync.gistIdLabel') }} <span class="sync-muted">{{ $t('cloudSync.autoFilled') }}</span></label>
-            <input v-model="githubGistId" class="sync-input" type="text" :placeholder="$t('cloudSync.optional')" />
-          </div>
-
-          <div v-else-if="provider === 'gitee'" class="sync-fields">
-            <label>{{ $t('cloudSync.privateTokenLabel') }} <span class="sync-muted">{{ $t('cloudSync.scopeGists') }}</span></label>
-            <input v-model="giteeToken" class="sync-input" type="password" autocomplete="off"
-              :placeholder="view?.gitee.tokenSet ? $t('cloudSync.storedKeep') : 'token'" />
-            <label>{{ $t('cloudSync.gistIdLabel') }} <span class="sync-muted">{{ $t('cloudSync.autoFilled') }}</span></label>
-            <input v-model="giteeGistId" class="sync-input" type="text" :placeholder="$t('cloudSync.optional')" />
-          </div>
-
-          <div v-else-if="provider === 'webdav'" class="sync-fields">
-            <label>{{ $t('cloudSync.fileUrl') }}</label>
-            <input v-model="webdavUrl" class="sync-input" type="text"
-              placeholder="https://dav.example.com/auraterm/auraterm-sync.enc" />
-            <label>{{ $t('cloudSync.username') }}</label>
-            <input v-model="webdavUsername" class="sync-input" type="text" autocomplete="off" />
-            <label>{{ $t('cloudSync.password') }}</label>
-            <input v-model="webdavPassword" class="sync-input" type="password" autocomplete="off"
-              :placeholder="view?.webdav.passwordSet ? $t('cloudSync.storedKeep') : ''" />
-          </div>
-
-          <div v-else-if="provider === 'auraxlab'" class="sync-fields">
-            <template v-if="auraxlabSignedIn">
-              <p class="sync-hint">
-                {{ $t('cloudSync.signedInAs', { username: view?.auraxlab.username ?? '' }) }}
-              </p>
-            </template>
-            <template v-else>
-              <p class="sync-hint">{{ $t('cloudSync.signInInAccount') }}</p>
-              <button class="sync-btn primary" type="button" @click="emit('openAccount')">
-                {{ $t('cloudSync.openAccount') }}
-              </button>
-            </template>
+            <button class="sync-btn primary" type="button" :disabled="busy" @click="migrate(false)">{{ $t('cloudSync.migrate') }}</button>
+            <button class="sync-btn" type="button" :disabled="busy" @click="migrate(true)">{{ $t('cloudSync.migrateOverwrite') }}</button>
           </div>
         </section>
 
         <!-- What to sync -->
         <section class="sync-section">
-          <h3>{{ $t('cloudSync.step3') }}</h3>
+          <h3>{{ $t('cloudSync.contentSection') }}</h3>
           <label class="sync-check"><input type="checkbox" checked disabled /> {{ $t('cloudSync.bookmarksAlways') }}</label>
           <label class="sync-check"><input v-model="includeSettings" type="checkbox" /> {{ $t('cloudSync.settingsItem') }}</label>
           <label class="sync-check"><input v-model="includeKnownHosts" type="checkbox" /> {{ $t('cloudSync.knownHosts') }}</label>
-          <label class="sync-check sync-danger">
-            <input v-model="includeCredentials" type="checkbox" />
+          <label class="sync-check sync-danger" :class="{ disabled: !credentialsAvailable }">
+            <input v-model="includeCredentials" type="checkbox" :disabled="!credentialsAvailable" />
             {{ $t('cloudSync.savedCredentials') }}
           </label>
+          <p v-if="!credentialsAvailable" class="sync-hint sync-indent">{{ $t('cloudSync.credentialsNeedMaster') }}</p>
+          <template v-else-if="includeCredentials">
+            <p v-if="!masterUnlocked" class="sync-hint sync-indent sync-warn">{{ $t('cloudSync.credentialsMasterLocked') }}</p>
+            <p class="sync-hint sync-indent">{{ $t('cloudSync.credentialsSameMaster') }}</p>
+          </template>
+        </section>
+
+        <!-- This device -->
+        <section class="sync-section">
+          <h3>{{ $t('cloudSync.deviceSection') }}</h3>
           <div class="sync-fields">
             <label>{{ $t('cloudSync.deviceLabel') }}</label>
             <input v-model="deviceLabel" class="sync-input" type="text" :placeholder="$t('cloudSync.deviceLabelPlaceholder')" />
           </div>
+          <label class="sync-check"><input v-model="autoSync" type="checkbox" /> {{ $t('cloudSync.autoSync') }}</label>
         </section>
 
         <div v-if="message" class="sync-message" :class="{ error: isError }">{{ message }}</div>
@@ -328,12 +263,12 @@ async function testConnection() {
 
       <div class="sync-footer">
         <button class="sync-btn" type="button" :disabled="busy" @click="saveConfig">{{ $t('common.save') }}</button>
-        <button class="sync-btn" type="button" :disabled="busy" @click="testConnection">{{ $t('cloudSync.test') }}</button>
+        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="testConnection">{{ $t('cloudSync.test') }}</button>
         <span class="sync-spacer" />
-        <button class="sync-btn" type="button" :disabled="busy" @click="doPull(false)">{{ $t('cloudSync.pullMerge') }}</button>
-        <button class="sync-btn" type="button" :disabled="busy" @click="doPull(true)">{{ $t('cloudSync.pullReplace') }}</button>
-        <button class="sync-btn" type="button" :disabled="busy" @click="doPush">{{ $t('cloudSync.push') }}</button>
-        <button class="sync-btn primary" type="button" :disabled="busy" @click="doSyncNow">{{ $t('cloudSync.syncNow') }}</button>
+        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="doPull(false)">{{ $t('cloudSync.pullMerge') }}</button>
+        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="doPull(true)">{{ $t('cloudSync.pullReplace') }}</button>
+        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="doPush">{{ $t('cloudSync.push') }}</button>
+        <button class="sync-btn primary" type="button" :disabled="busy || !signedIn" @click="doSyncNow">{{ $t('cloudSync.syncNow') }}</button>
       </div>
     </div>
   </div>
@@ -404,11 +339,25 @@ async function testConnection() {
   opacity: 0.8;
   margin: 0 0 8px;
 }
+.sync-notice,
+.sync-migration {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(224, 164, 88, 0.45);
+  background: rgba(224, 164, 88, 0.1);
+}
 .sync-hint {
   font-size: 12px;
   opacity: 0.7;
   margin: 0 0 8px;
   line-height: 1.5;
+}
+.sync-hint.sync-indent {
+  margin-left: 24px;
+}
+.sync-hint.sync-warn {
+  color: var(--ui-warn, #e0a458);
+  opacity: 0.9;
 }
 .sync-row {
   display: flex;
@@ -427,10 +376,6 @@ async function testConnection() {
   opacity: 0.8;
   margin-top: 6px;
 }
-.sync-muted {
-  opacity: 0.55;
-  font-weight: 400;
-}
 .sync-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -446,25 +391,6 @@ async function testConnection() {
   outline: none;
   border-color: var(--ui-accent, #4a90d9);
 }
-.sync-provider-tabs {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.sync-provider-tab {
-  padding: 6px 12px;
-  background: var(--ui-input-bg, #2a2a2a);
-  color: inherit;
-  border: 1px solid var(--ui-border, #3a3a3a);
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.sync-provider-tab.active {
-  background: var(--ui-accent, #4a90d9);
-  border-color: var(--ui-accent, #4a90d9);
-  color: #fff;
-}
 .sync-check {
   display: flex;
   align-items: center;
@@ -475,18 +401,8 @@ async function testConnection() {
 .sync-check.sync-danger {
   color: var(--ui-warn, #e0a458);
 }
-.sync-badge {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: rgba(200, 80, 80, 0.18);
-  color: #e06c75;
-  border: 1px solid rgba(200, 80, 80, 0.35);
-}
-.sync-badge[data-on="true"] {
-  background: rgba(120, 200, 120, 0.18);
-  color: #7fb069;
-  border-color: rgba(120, 200, 120, 0.35);
+.sync-check.disabled {
+  opacity: 0.5;
 }
 .sync-message {
   font-size: 12px;

@@ -37,12 +37,10 @@ const assist: AssistStatus = {
   failedAttempts: 0, fence: 1, locked: false, guests: [],
 };
 const syncView: SyncConfigView = {
-  provider: "webdav", includeSettings: true, includeKnownHosts: true, includeCredentials: false,
+  provider: "auraxlab", includeSettings: true, includeKnownHosts: true, includeCredentials: false,
   autoSync: false, deviceId: "dev", deviceLabel: "Mac", lastSyncAt: null, lastRemoteVersion: null,
-  passphraseUnlocked: true,
-  github: { tokenSet: false, gistId: "" }, gitee: { tokenSet: false, gistId: "" },
-  webdav: { url: "https://dav", username: "u", passwordSet: true },
-  auraxlab: { username: "", email: "", tokenSet: false },
+  credentialsMode: "masterPassword", masterUnlocked: true, legacyProviderNotice: false,
+  auraxlab: { username: "alice", email: "alice@example.com", tokenSet: true },
 };
 const idle: SyncRuntime = { phase: "idle", message: "", at: null };
 
@@ -162,12 +160,13 @@ describe("The single status-bar label (P3)", () => {
   });
 
   it("never goes silent when the only news has nothing to count", () => {
-    const locked = { ...syncView, passphraseUnlocked: false };
-    const statuses = [syncStatus(locked, idle), consoleStatus(bridge, true), shareStatus(null), relayStatus({ enabled: true, peers: [] })];
-    // A locked sync has no controllers, no pending requests and is not an
-    // error, so the count-based narrow form would render an empty summary.
-    expect(liveSyncLabel(statuses, false).text).toBe("Live Sync · Sync locked");
-    expect(liveSyncLabel(statuses).text).toBe("Live Sync · Sync locked");
+    const signIn: SyncRuntime = { phase: "error", message: "401", at: 1, code: "signIn" };
+    const statuses = [syncStatus(syncView, signIn), consoleStatus(bridge, true), shareStatus(null), relayStatus({ enabled: true, peers: [] })];
+    // A sync waiting for a sign-in has no controllers, no pending requests and
+    // is not counted as an error, so the count-based narrow form would render
+    // an empty summary.
+    expect(liveSyncLabel(statuses, false).text).toBe("Live Sync · Sync sign in again");
+    expect(liveSyncLabel(statuses).text).toBe("Live Sync · Sync sign in again");
   });
 
   it("hands the compressed detail to the tooltip", () => {
@@ -189,17 +188,28 @@ describe("The single status-bar label (P3)", () => {
 describe("Configuration sync and stale snapshots (P2)", () => {
   it("covers the whole sync lifecycle", () => {
     expect(syncStatus(null, idle).detail).toBe("Sync · status unknown");
-    expect(syncStatus({ ...syncView, provider: "" }, idle).detail).toBe("Sync · not configured");
+    const signedOut = { ...syncView, auraxlab: { ...syncView.auraxlab, tokenSet: false } };
+    expect(syncStatus(signedOut, idle).detail).toBe("Sync · not signed in");
+    // Signed out is signed out, whatever the last run said.
+    expect(syncStatus(signedOut, { phase: "error", message: "x", at: 1 }).pill).toBeNull();
     expect(syncStatus(syncView, { phase: "syncing", message: "", at: 1 }).pill?.kind).toBe("monitor");
     expect(syncStatus(syncView, { phase: "error", message: "no route", at: 1 }))
       .toMatchObject({ link: "error", detail: "Sync · failed: no route", pill: { kind: "error" } });
-    // A run in progress outranks the lock; the lock outranks the last result.
-    const locked = { ...syncView, passphraseUnlocked: false, lastSyncAt: 1_700_000_000_000 };
-    expect(syncStatus(locked, idle).pill?.kind).toBe("assist");
-    expect(syncStatus(locked, { phase: "syncing", message: "", at: 1 }).detail).toBe("Sync · syncing…");
-    const done = syncStatus({ ...syncView, lastSyncAt: 1_700_000_000_000 }, { phase: "ok", message: "done", at: 1 });
+    // A rejected credential asks for a sign-in: attention, not a failure count.
+    const signIn = syncStatus(syncView, { phase: "error", message: "401", at: 1, code: "signIn" });
+    expect(signIn).toMatchObject({ link: "error", detail: "Sync · sign in again", pill: { kind: "assist" } });
+    const synced = { ...syncView, lastSyncAt: 1_700_000_000_000 };
+    expect(syncStatus(synced, { phase: "syncing", message: "", at: 1 }).detail).toBe("Sync · syncing…");
+    const done = syncStatus(synced, { phase: "ok", message: "done", at: 1 });
     expect(done.detail).toContain("last succeeded");
     expect(done.pill).toBeNull();
+    // Everything but the credentials synced: partial success keeps the result
+    // and appends the reason, and it earns an attention pill.
+    const partial = syncStatus(synced, { phase: "ok", message: "done", at: 1, credentialsSkipped: "masterLocked" });
+    expect(partial.detail).toMatch(/^Sync · last succeeded .* · credentials waiting for the master password$/);
+    expect(partial.pill?.kind).toBe("assist");
+    expect(syncStatus(synced, { phase: "ok", message: "", at: 1, credentialsSkipped: "mismatch" }).detail)
+      .toContain("different master password");
   });
 
   it("marks a failed refresh instead of dropping the previous result", () => {
