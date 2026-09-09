@@ -269,10 +269,10 @@
   background: var(--app-panel-bg);
   border: 1px solid var(--app-border);
   border-radius: 8px;
-  width: 720px;
-  max-width: 92vw;
-  height: 500px;
-  max-height: 80vh;
+  width: 960px;
+  max-width: 94vw;
+  height: 760px;
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   box-shadow: 0 12px 40px var(--app-shadow-strong);
@@ -313,12 +313,48 @@
 }
 
 .quick-btn-editor-sidebar {
-  width: 240px;
+  width: 260px;
   border-right: 1px solid var(--app-border);
-  overflow-y: auto;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: var(--app-panel-bg-strong);
+}
+
+.quick-btn-editor-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.quick-btn-editor-filter {
+  width: 100%;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.quick-btn-editor-sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.quick-btn-editor-sidebar-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-right: 8px;
+}
+
+.quick-btn-editor-sidebar-meta {
+  font-size: 10px;
+  opacity: 0.65;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .quick-btn-editor-sidebar-item {
@@ -341,12 +377,10 @@
 }
 
 .quick-btn-editor-sidebar-label {
-  flex: 1;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-right: 8px;
 }
 
 .quick-btn-editor-sidebar-actions {

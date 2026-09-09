@@ -131,16 +131,36 @@ const availableToolbars = computed(() => {
   return [...new Set(names)];
 });
 
-const visibleButtons = computed(() => props.quickButtons.filter((button) => (
+/** Every button on the selected toolbar that applies to this session. */
+const toolbarButtons = computed(() => props.quickButtons.filter((button) => (
   snippetApplies(button, props.activeHost, props.sessionGroup)
   && (button.toolbar || "Default") === selectedToolbar.value
 )));
+
+/** Sentinel for the bar's group picker: show every group of the toolbar. */
+const ALL_GROUPS = "";
+const selectedGroup = ref(ALL_GROUPS);
+
+/** Groups present on the selected toolbar, in first-seen order. */
+const availableGroups = computed(() => [...new Set(toolbarButtons.value.map((button) => button.group || "General"))]);
+
+const visibleButtons = computed(() => (selectedGroup.value === ALL_GROUPS
+  ? toolbarButtons.value
+  : toolbarButtons.value.filter((button) => (button.group || "General") === selectedGroup.value)));
 
 watch(availableToolbars, (toolbars) => {
   if (!toolbars.includes(selectedToolbar.value)) {
     selectedToolbar.value = toolbars[0] || "Default";
   }
 }, { immediate: true });
+
+// Fall back to "all groups" when the picked group leaves the toolbar
+// (buttons edited, toolbar switched, session changed).
+watch(availableGroups, (groups) => {
+  if (selectedGroup.value !== ALL_GROUPS && !groups.includes(selectedGroup.value)) {
+    selectedGroup.value = ALL_GROUPS;
+  }
+});
 
 function doSend(payload: string, raw = false) {
   if (raw ? payload.length === 0 : !payload.trim()) {
@@ -275,7 +295,51 @@ function openEditor() {
   } else {
     selectedButtonId.value = null;
   }
+  customGroupButtonId.value = null;
+  editorToolbarFilter.value = "";
+  editorGroupFilter.value = "";
   showEditor.value = true;
+}
+
+/* Sidebar filters. Empty string means "everything", like the bar's picker. */
+const editorToolbarFilter = ref("");
+const editorGroupFilter = ref("");
+
+const editorToolbars = computed(() => [...new Set(editButtons.value.map((button) => button.toolbar?.trim() || "Default"))]
+  .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+
+/** Buttons on the toolbar the sidebar is narrowed to (all of them by default). */
+const toolbarFilteredButtons = computed(() => (editorToolbarFilter.value
+  ? editButtons.value.filter((button) => (button.toolbar?.trim() || "Default") === editorToolbarFilter.value)
+  : editButtons.value));
+
+/** Groups offered by the sidebar's group filter: only those on the chosen toolbar. */
+const editorFilterGroups = computed(() => [...new Set(toolbarFilteredButtons.value.map((button) => button.group?.trim() || "General"))]
+  .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+
+/** What the sidebar lists, in library order. */
+const sidebarButtons = computed(() => (editorGroupFilter.value
+  ? toolbarFilteredButtons.value.filter((button) => (button.group?.trim() || "General") === editorGroupFilter.value)
+  : toolbarFilteredButtons.value));
+
+/** Keep the detail pane on something the sidebar still shows after a filter change. */
+function applySidebarFilter() {
+  if (editorGroupFilter.value && !editorFilterGroups.value.includes(editorGroupFilter.value)) {
+    editorGroupFilter.value = "";
+  }
+  if (!sidebarButtons.value.some((button) => button.id === selectedButtonId.value)) {
+    selectedButtonId.value = sidebarButtons.value[0]?.id ?? null;
+  }
+}
+
+function handleToolbarFilterChange(event: Event) {
+  editorToolbarFilter.value = inputValue(event);
+  applySidebarFilter();
+}
+
+function handleGroupFilterChange(event: Event) {
+  editorGroupFilter.value = inputValue(event);
+  applySidebarFilter();
 }
 
 function saveEditor() {
@@ -285,12 +349,13 @@ function saveEditor() {
 
 function addButton() {
   const newId = crypto.randomUUID();
+  // A new button lands where the sidebar is looking, so it shows up at once.
   editButtons.value = [...editButtons.value, {
     id: newId,
     label: "",
     command: "",
-    toolbar: selectedToolbar.value || "Default",
-    group: "General",
+    toolbar: editorToolbarFilter.value || selectedToolbar.value || "Default",
+    group: editorGroupFilter.value || "General",
     hosts: [],
     sessionGroups: [],
     sendMode: "line",
@@ -302,6 +367,37 @@ function updateButton<K extends keyof QuickButton>(id: string, field: K, value: 
   editButtons.value = editButtons.value.map((button) => (
     button.id === id ? { ...button, [field]: value } : button
   ));
+}
+
+/** Sentinel `<select>` value that reveals the free-text field for a brand-new group. */
+const NEW_GROUP_OPTION = "__auraterm_new_group__";
+/** The button whose group is being typed rather than picked, if any. */
+const customGroupButtonId = ref<string | null>(null);
+const customGroupInput = ref<HTMLInputElement | null>(null);
+// The input sits inside a v-for, where a string ref would collect an array.
+function setCustomGroupInput(el: unknown) {
+  customGroupInput.value = el instanceof HTMLInputElement ? el : null;
+}
+
+/** Groups already used by any button in the library, so the picker offers them. */
+const editorGroups = computed(() => [...new Set(editButtons.value.map((button) => button.group?.trim() || "General"))]
+  .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+
+/** True while the button's group comes from the text field instead of the dropdown. */
+function isCustomGroup(button: QuickButton) {
+  return customGroupButtonId.value === button.id;
+}
+
+function handleGroupSelectionChange(button: QuickButton, event: Event) {
+  const choice = inputValue(event);
+  if (choice === NEW_GROUP_OPTION) {
+    customGroupButtonId.value = button.id;
+    updateButton(button.id, "group", "");
+    void nextTick(() => customGroupInput.value?.focus());
+    return;
+  }
+  customGroupButtonId.value = null;
+  updateButton(button.id, "group", choice);
 }
 
 function parseScopes(value: string) {
@@ -321,15 +417,20 @@ function deleteButton(id: string) {
   }
 }
 
+/**
+ * Swap a button with its neighbour *as the sidebar shows them*. With a filter
+ * on, the neighbour may sit several places away in the library; the two trade
+ * places there, so the buttons in between keep their spots.
+ */
 function moveButton(id: string, direction: -1 | 1) {
+  const shown = sidebarButtons.value;
+  const shownIndex = shown.findIndex((button) => button.id === id);
+  const neighbour = shown[shownIndex + direction];
+  if (shownIndex < 0 || !neighbour) {
+    return;
+  }
   const index = editButtons.value.findIndex((button) => button.id === id);
-  if (index < 0) {
-    return;
-  }
-  const nextIndex = index + direction;
-  if (nextIndex < 0 || nextIndex >= editButtons.value.length) {
-    return;
-  }
+  const nextIndex = editButtons.value.findIndex((button) => button.id === neighbour.id);
   const nextButtons = [...editButtons.value];
   [nextButtons[index], nextButtons[nextIndex]] = [nextButtons[nextIndex], nextButtons[index]];
   editButtons.value = nextButtons;
@@ -361,12 +462,21 @@ function closeEditor() {
       >
         <option v-for="toolbar in availableToolbars" :key="toolbar" :value="toolbar">{{ toolbar }}</option>
       </select>
+      <select
+        v-if="availableGroups.length > 1"
+        v-model="selectedGroup"
+        class="quick-toolbar-select quick-group-select"
+        :title="$t('inputBar.snippetGroup')"
+      >
+        <option :value="ALL_GROUPS">{{ $t('inputBar.allGroups') }}</option>
+        <option v-for="group in availableGroups" :key="group" :value="group">{{ group }}</option>
+      </select>
       <span v-if="visibleButtons.length === 0" class="quick-buttons-hint">
         {{ $t('inputBar.noSnippets') }}
       </span>
       <template v-for="(button, index) in visibleButtons" :key="button.id">
         <span
-          v-if="index === 0 || (visibleButtons[index - 1]?.group || 'General') !== (button.group || 'General')"
+          v-if="selectedGroup === ALL_GROUPS && (index === 0 || (visibleButtons[index - 1]?.group || 'General') !== (button.group || 'General'))"
           class="quick-button-group-label"
         >{{ button.group || 'General' }}</span>
         <button
@@ -437,32 +547,63 @@ function closeEditor() {
 
         <div class="quick-btn-editor-body">
           <div class="quick-btn-editor-sidebar">
-            <div
-              v-for="(button, index) in editButtons"
-              :key="button.id"
-              class="quick-btn-editor-sidebar-item"
-              :class="{ active: selectedButtonId === button.id }"
-              @click="selectedButtonId = button.id"
-            >
-              <span class="quick-btn-editor-sidebar-label">
-                {{ button.label.trim() || $t('inputBar.noLabel') }}
-              </span>
-              <div class="quick-btn-editor-sidebar-actions">
-                <button type="button" :disabled="index === 0" :title="$t('inputBar.moveUp')" @click.stop="moveButton(button.id, -1)">▲</button>
-                <button
-                  type="button"
-                  :disabled="index === editButtons.length - 1"
-                  :title="$t('inputBar.moveDown')"
-                  @click.stop="moveButton(button.id, 1)"
-                >
-                  ▼
-                </button>
-                <button type="button" class="quick-btn-editor-sidebar-delete" :title="$t('common.delete')" @click.stop="deleteButton(button.id)">×</button>
-              </div>
+            <div class="quick-btn-editor-filters">
+              <select
+                v-if="editorToolbars.length > 1"
+                class="quick-btn-editor-input quick-btn-editor-filter quick-btn-editor-filter--toolbar"
+                :value="editorToolbarFilter"
+                :title="$t('inputBar.toolbar')"
+                @change="handleToolbarFilterChange"
+              >
+                <option value="">{{ $t('inputBar.allToolbars') }}</option>
+                <option v-for="toolbar in editorToolbars" :key="toolbar" :value="toolbar">{{ toolbar }}</option>
+              </select>
+              <select
+                class="quick-btn-editor-input quick-btn-editor-filter quick-btn-editor-filter--group"
+                :value="editorGroupFilter"
+                :title="$t('inputBar.group')"
+                @change="handleGroupFilterChange"
+              >
+                <option value="">{{ $t('inputBar.allGroups') }}</option>
+                <option v-for="group in editorFilterGroups" :key="group" :value="group">{{ group }}</option>
+              </select>
             </div>
-            <p v-if="editButtons.length === 0" class="quick-btn-editor-empty">
-              {{ $t('inputBar.noButtons') }}
-            </p>
+            <div class="quick-btn-editor-sidebar-list">
+              <div
+                v-for="(button, index) in sidebarButtons"
+                :key="button.id"
+                class="quick-btn-editor-sidebar-item"
+                :class="{ active: selectedButtonId === button.id }"
+                @click="selectedButtonId = button.id"
+              >
+                <span class="quick-btn-editor-sidebar-text">
+                  <span class="quick-btn-editor-sidebar-label">
+                    {{ button.label.trim() || $t('inputBar.noLabel') }}
+                  </span>
+                  <span class="quick-btn-editor-sidebar-meta">
+                    {{ button.toolbar?.trim() || 'Default' }} · {{ button.group?.trim() || 'General' }}
+                  </span>
+                </span>
+                <div class="quick-btn-editor-sidebar-actions">
+                  <button type="button" :disabled="index === 0" :title="$t('inputBar.moveUp')" @click.stop="moveButton(button.id, -1)">▲</button>
+                  <button
+                    type="button"
+                    :disabled="index === sidebarButtons.length - 1"
+                    :title="$t('inputBar.moveDown')"
+                    @click.stop="moveButton(button.id, 1)"
+                  >
+                    ▼
+                  </button>
+                  <button type="button" class="quick-btn-editor-sidebar-delete" :title="$t('common.delete')" @click.stop="deleteButton(button.id)">×</button>
+                </div>
+              </div>
+              <p v-if="editButtons.length === 0" class="quick-btn-editor-empty">
+                {{ $t('inputBar.noButtons') }}
+              </p>
+              <p v-else-if="sidebarButtons.length === 0" class="quick-btn-editor-empty">
+                {{ $t('inputBar.noButtonsInFilter') }}
+              </p>
+            </div>
           </div>
 
           <div class="quick-btn-editor-content">
@@ -501,7 +642,23 @@ function closeEditor() {
                   </div>
                   <div class="quick-btn-editor-field">
                     <label>{{ $t('inputBar.group') }}</label>
-                    <input class="quick-btn-editor-input" type="text" :value="button.group || 'General'" @input="updateButton(button.id, 'group', inputValue($event))">
+                    <select
+                      class="quick-btn-editor-input"
+                      :value="isCustomGroup(button) ? NEW_GROUP_OPTION : (button.group?.trim() || 'General')"
+                      @change="handleGroupSelectionChange(button, $event)"
+                    >
+                      <option v-for="group in editorGroups" :key="group" :value="group">{{ group }}</option>
+                      <option :value="NEW_GROUP_OPTION">{{ $t('connect.groupNew') }}</option>
+                    </select>
+                    <input
+                      v-if="isCustomGroup(button)"
+                      :ref="setCustomGroupInput"
+                      class="quick-btn-editor-input quick-btn-editor-input--group-name"
+                      type="text"
+                      :value="button.group ?? ''"
+                      :placeholder="$t('inputBar.groupNamePlaceholder')"
+                      @input="updateButton(button.id, 'group', inputValue($event))"
+                    >
                   </div>
                   <div class="quick-btn-editor-field">
                     <label>{{ $t('inputBar.sshHosts') }}</label>
@@ -509,7 +666,7 @@ function closeEditor() {
                   </div>
                   <div class="quick-btn-editor-field">
                     <label>{{ $t('inputBar.connectionGroups') }}</label>
-                    <input class="quick-btn-editor-input" type="text" :value="(button.sessionGroups || []).join(', ')" :placeholder="$t('inputBar.allGroups')" @input="updateButton(button.id, 'sessionGroups', parseScopes(inputValue($event)))">
+                    <input class="quick-btn-editor-input" type="text" :value="(button.sessionGroups || []).join(', ')" :placeholder="$t('inputBar.allBookmarkGroups')" @input="updateButton(button.id, 'sessionGroups', parseScopes(inputValue($event)))">
                   </div>
                   <div class="quick-btn-editor-field">
                     <label>{{ $t('inputBar.sendMode') }}</label>
