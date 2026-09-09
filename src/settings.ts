@@ -156,9 +156,9 @@ export interface QuickButton {
   toolbar?: string;
   /** Optional visual group within a toolbar. */
   group?: string;
-  /** Host globs this snippet is visible for. Empty means all sessions. */
+  /** Host globs this button is visible for. Empty means all sessions. */
   hosts?: string[];
-  /** Saved connection groups this snippet is visible for. */
+  /** Bookmark group globs this button is visible for. Empty means all sessions. */
   sessionGroups?: string[];
   /** `line` appends Enter; `raw` sends decoded control characters as-is. */
   sendMode?: "line" | "raw";
