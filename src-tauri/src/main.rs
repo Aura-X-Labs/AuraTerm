@@ -836,6 +836,8 @@ struct MenuModel {
     cloud_signed_in: bool,
     cloud_console_on: bool,
     cloud_remote_send_on: bool,
+    /// The Live Relay master gate, mirrored so its checkmark stays canonical.
+    relay_enabled: bool,
 }
 
 struct MenuModelState(Mutex<MenuModel>);
@@ -869,8 +871,9 @@ fn build_app_menu(
     let close_tab_item = MenuItem::with_id(app, "menu-close-tab", l("Close Tab", "关闭标签页"), true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "menu-open-settings", l("Settings", "设置"), true, None::<&str>)?;
 
-    // Cloud menu: account → sync → monitoring. One account entry whose label
-    // follows the sign-in state; the two toggles render as checkmarks.
+    // Live Sync menu: account → sync → Console → Share → Relay. One account
+    // entry whose label follows the sign-in state; the toggles render as
+    // checkmarks fed by `sync_cloud_menu_state`.
     let account_item = MenuItem::with_id(
         app,
         "menu-open-account",
@@ -883,7 +886,7 @@ fn build_app_menu(
     let cloud_console_item = CheckMenuItem::with_id(
         app,
         "menu-toggle-cloud-console",
-        "Cloud Console",
+        "Live Console",
         true,
         model.cloud_console_on,
         None::<&str>,
@@ -898,6 +901,19 @@ fn build_app_menu(
     )?;
     let remote_assist_item = MenuItem::with_id(app, "menu-remote-assist", l("Live Share…", "Live Share…"), true, None::<&str>)?;
     let join_assist_item = MenuItem::with_id(app, "menu-join-assist", l("Join Live Share…", "加入 Live Share…"), true, None::<&str>)?;
+    let console_web_item = MenuItem::with_id(app, "menu-open-console-web", l("Open Live Console on the web…", "打开 Live Console 网页…"), true, None::<&str>)?;
+    // Live Relay: the outbound entry, the inbound master gate, and the panic
+    // button. Same three the in-app titlebar menu and the palette expose.
+    let live_relay_item = MenuItem::with_id(app, "menu-live-relay", l("Live Relay: connect to my devices…", "Live Relay：连接我的设备…"), true, None::<&str>)?;
+    let relay_enabled_item = CheckMenuItem::with_id(
+        app,
+        "menu-toggle-relay-enabled",
+        l("Allow my devices to attach here", "允许本账号设备接入本机"),
+        true,
+        model.relay_enabled,
+        None::<&str>,
+    )?;
+    let relay_revoke_item = MenuItem::with_id(app, "menu-live-relay-revoke", l("Take control back from every device", "收回全部设备的控制权"), true, None::<&str>)?;
 
     let toggle_bookmarks_item = MenuItem::with_id(app, "menu-toggle-bookmarks", l("Toggle Bookmarks", "切换书签栏"), true, None::<&str>)?;
     let bookmark_manager_item = MenuItem::with_id(app, "menu-bookmark-manager", l("Bookmark Manager…", "书签管理…"), true, None::<&str>)?;
@@ -959,7 +975,7 @@ fn build_app_menu(
         .item(&toggle_remote_files_item)
         .item(&toggle_tunnels_item)
         .build()?;
-    let cloud_menu = SubmenuBuilder::new(app, l("Cloud", "云服务"))
+    let cloud_menu = SubmenuBuilder::new(app, l("Live Sync", "Live Sync"))
         .item(&account_item)
         .separator()
         .item(&sync_now_item)
@@ -967,9 +983,14 @@ fn build_app_menu(
         .separator()
         .item(&cloud_console_item)
         .item(&remote_send_item)
+        .item(&console_web_item)
         .separator()
         .item(&remote_assist_item)
         .item(&join_assist_item)
+        .separator()
+        .item(&live_relay_item)
+        .item(&relay_enabled_item)
+        .item(&relay_revoke_item)
         .build()?;
     let window_menu = SubmenuBuilder::new(app, l("Window", "窗口"))
         .item(&new_window_item)
@@ -1022,9 +1043,9 @@ fn set_menu_language(
     rebuild_app_menu(&app, &state)
 }
 
-/// Keep the native Cloud menu in sync with the frontend: sign-in state picks
-/// the account item's label, the two booleans drive the checkmarks. Invoked
-/// on startup and after every auth change or toggle.
+/// Keep the native Live Sync menu in sync with the frontend: sign-in state
+/// picks the account item's label, the three booleans drive the checkmarks.
+/// Invoked on startup and after every auth change or toggle.
 #[command]
 fn sync_cloud_menu_state(
     app: AppHandle,
@@ -1032,12 +1053,14 @@ fn sync_cloud_menu_state(
     signed_in: bool,
     console_on: bool,
     remote_send_on: bool,
+    relay_on: bool,
 ) -> Result<(), String> {
     {
         let mut model = state.0.lock().map_err(|e| e.to_string())?;
         model.cloud_signed_in = signed_in;
         model.cloud_console_on = console_on;
         model.cloud_remote_send_on = remote_send_on;
+        model.relay_enabled = relay_on;
     }
     rebuild_app_menu(&app, &state)
 }
