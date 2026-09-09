@@ -766,6 +766,8 @@ const zhCN: Messages = {
     knockControlText: "「{name}」正在申请「{share}」的控制权。",
     knockControlNote: "在你收回之前，对方可以向该会话输入。",
     paletteRevoke: "Live Relay：收回全部设备的控制权",
+    paletteAllowIn: "Live Relay：允许本账号设备接入本机",
+    paletteBlockIn: "Live Relay：禁止本账号设备接入本机",
   },
   bookmarks: {
     quickConnect: "🔖 快速连接",

@@ -406,6 +406,10 @@ const { registerAppEventListeners } = useAppEventListeners({
   handleToggleRemoteSend,
   handleOpenRemoteAssist,
   handleOpenJoinAssist,
+  handleOpenConsoleWeb,
+  handleOpenLiveRelay,
+  handleToggleRelayEnabled,
+  handleRelayRevokeAllControl,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -976,9 +980,14 @@ function handleOpenLiveRelay() {
 /** Ask a sibling device to open a fresh session, then attach to it. */
 async function handleRelayOpen(device: RelayDeviceEntry, target: RelayOpenTarget, wantControl: boolean) {
   showLiveRelay.value = false;
-  showCloudToast(t("liveRelay.openWaiting", { device: device.label }));
+  // The peer has up to 90s to approve and get the session up
+  // (relay_client.rs::OPEN_TIMEOUT). Hold the notice for the whole wait —
+  // the default 5s would leave most of it unlit, looking like nothing
+  // happened. The new tab, or the error, replaces it.
+  showCloudToast(t("liveRelay.openWaiting", { device: device.label }), false, 95_000);
   try {
     const sessionId = await relayOpen(device.device_id, target.kind, target.id);
+    hideCloudToast();
     openRelayTab(device, sessionId, target.label, wantControl);
   } catch (error) {
     showCloudToast(String(error), true);
@@ -1362,12 +1371,18 @@ watch(() => settings.value.liveRelay, (policy) => {
   void refreshRelayOpenTargets();
 }, { deep: true });
 
-function showCloudToast(text: string, error = false) {
+function showCloudToast(text: string, error = false, holdMs = 5000) {
   cloudToast.value = { text, error };
   if (cloudToastTimer) clearTimeout(cloudToastTimer);
   cloudToastTimer = setTimeout(() => {
     cloudToast.value = null;
-  }, 5000);
+  }, holdMs);
+}
+
+function hideCloudToast() {
+  if (cloudToastTimer) clearTimeout(cloudToastTimer);
+  cloudToastTimer = null;
+  cloudToast.value = null;
 }
 
 async function refreshSyncView() {
@@ -1436,18 +1451,26 @@ function recordSyncResult(result: SyncResult) {
   syncRuntime.value = { phase: "ok", message: result.message, at: Date.now(), credentialsSkipped: result.credentialsSkipped };
 }
 
-// Keep the native (macOS) Cloud menu's account label and checkmarks canonical.
+// Keep the native (macOS) Live Sync menu's account label and checkmarks
+// canonical. Its three toggles are the same settings the titlebar menu and
+// the palette flip, so the menu never renders a stale check.
 function syncCloudMenuState() {
   if (!isMainWindow || osType.value !== "macos") return;
   void invoke("sync_cloud_menu_state", {
     signedIn: auraxlabSignedIn.value,
     consoleOn: settings.value.autoShareToCloud,
     remoteSendOn: settings.value.allowRemoteSend,
+    relayOn: settings.value.liveRelay.enabled,
   }).catch(() => {});
 }
 
 watch(
-  [auraxlabSignedIn, () => settings.value.autoShareToCloud, () => settings.value.allowRemoteSend],
+  [
+    auraxlabSignedIn,
+    () => settings.value.autoShareToCloud,
+    () => settings.value.allowRemoteSend,
+    () => settings.value.liveRelay.enabled,
+  ],
   () => syncCloudMenuState(),
 );
 
@@ -2615,6 +2638,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     { id: "remote-send-toggle", title: settings.value.allowRemoteSend ? t("cloudShare.remoteSendOff") : t("cloudShare.remoteSendOn"), group: t("palette.groups.app"), keywords: "allow remote send tx input view only observe", run: () => handleToggleRemoteSend() },
     { id: "remote-assist", title: assistState.value ? t("assist.paletteManage") : t("assist.paletteStart"), group: t("palette.groups.app"), keywords: "remote assist help support code invite guest share screen pair", run: () => handleOpenRemoteAssist() },
     { id: "live-relay-revoke", title: t("liveRelay.paletteRevoke"), group: t("palette.groups.app"), keywords: "live relay revoke control read only devices", run: () => handleRelayRevokeAllControl() },
+    { id: "live-relay-allow-in", title: settings.value.liveRelay.enabled ? t("liveRelay.paletteBlockIn") : t("liveRelay.paletteAllowIn"), group: t("palette.groups.app"), keywords: "live relay allow attach inbound gate my devices enable disable", run: () => handleToggleRelayEnabled() },
     { id: "live-relay", title: t("liveRelay.palette"), group: t("palette.groups.app"), keywords: "live relay my devices attach own account remote access sibling", run: () => handleOpenLiveRelay() },
     { id: "join-assist", title: t("assist.paletteJoin"), group: t("palette.groups.app"), keywords: "join remote assist code guest help someone terminal", run: () => handleOpenJoinAssist() },
     { id: "remote-assist-revoke", title: t("assist.paletteRevoke"), group: t("palette.groups.app"), keywords: "remote assist revoke control kick stop input", run: () => handleRevokeAllAssistControl() },

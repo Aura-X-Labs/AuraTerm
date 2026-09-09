@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { t } from "./i18n";
 import {
   canAttachTo,
@@ -41,15 +41,22 @@ const attachBlock = computed(() => {
   const device = selected.value;
   if (!device) return "";
   const reason = blockedReason(device);
-  if (reason === t("liveRelay.deviceNoShares") && device.open_targets.length) return "";
-  return reason;
+  if (reason === "no_shares" && device.open_targets.length) return "";
+  return blockedText(reason);
 });
 
-async function refresh() {
+/**
+ * Re-read the device list. A `silent` pass is the background poll: it never
+ * touches `loading` or `error`, so a blipped network call cannot make the
+ * list flash "Refreshing…" or replace a good snapshot with a red line.
+ */
+async function refresh(silent = false) {
   if (!props.enrolled) return;
+  if (!silent) {
+    loading.value = true;
+    error.value = "";
+  }
   const generation = ++refreshGeneration;
-  loading.value = true;
-  error.value = "";
   try {
     const next = await relayListDevices();
     if (generation !== refreshGeneration || !props.enrolled) return;
@@ -57,19 +64,30 @@ async function refresh() {
     if (!devices.value.some((d) => d.device_id === selectedId.value)) {
       selectedId.value = devices.value.find(canAttachTo)?.device_id ?? devices.value[0]?.device_id ?? null;
     }
+    if (silent) error.value = "";
   } catch (cause) {
-    if (generation === refreshGeneration) error.value = String(cause);
+    if (!silent && generation === refreshGeneration) error.value = String(cause);
   } finally {
     if (generation === refreshGeneration) loading.value = false;
   }
 }
 
 /** Why a selected device cannot be attached to right now, if anything. */
-function blockedReason(device: RelayDeviceEntry): string {
-  if (device.presence !== "online") return t("liveRelay.deviceOffline");
-  if (!device.relay_policy?.enabled) return t("liveRelay.deviceRelayOff");
-  if (!device.relay_policy.allow_attach) return t("liveRelay.deviceAttachOff");
-  if (device.attach_targets.length === 0) return t("liveRelay.deviceNoShares");
+type AttachBlock = "" | "offline" | "relay_off" | "attach_off" | "no_shares";
+
+function blockedReason(device: RelayDeviceEntry): AttachBlock {
+  if (device.presence !== "online") return "offline";
+  if (!device.relay_policy?.enabled) return "relay_off";
+  if (!device.relay_policy.allow_attach) return "attach_off";
+  if (device.attach_targets.length === 0) return "no_shares";
+  return "";
+}
+
+function blockedText(reason: AttachBlock): string {
+  if (reason === "offline") return t("liveRelay.deviceOffline");
+  if (reason === "relay_off") return t("liveRelay.deviceRelayOff");
+  if (reason === "attach_off") return t("liveRelay.deviceAttachOff");
+  if (reason === "no_shares") return t("liveRelay.deviceNoShares");
   return "";
 }
 
@@ -84,6 +102,37 @@ function presenceLabel(device: RelayDeviceEntry): string {
   if (device.presence === "idle") return t("liveRelay.presenceIdle");
   return t("liveRelay.presenceOffline");
 }
+
+// Presence, shared sessions and open targets all change on the *other*
+// device; nothing pushes that here, so the open dialog re-reads on a timer.
+// Without this the list silently rots for as long as it stays open.
+const POLL_INTERVAL_MS = 10_000;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+// Esc closes. Bound on the document rather than the overlay: the dialog
+// opens with focus still outside it, so an overlay-scoped keydown would not
+// fire until the user clicked something first.
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  emit("close");
+}
+
+// The initial load is the `enrolled` watch below (immediate), so mount only
+// starts the poll and the Esc handler.
+onMounted(() => {
+  pollTimer = setInterval(() => {
+    if (!loading.value) void refresh(true);
+  }, POLL_INTERVAL_MS);
+  document.addEventListener("keydown", onKeydown);
+});
+
+onUnmounted(() => {
+  refreshGeneration += 1;
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+  document.removeEventListener("keydown", onKeydown);
+});
 
 watch(() => props.enrolled, (enrolled) => {
   if (enrolled) void refresh();
@@ -120,7 +169,7 @@ watch(() => props.enrolled, (enrolled) => {
       <div v-else class="relay-body">
         <div class="relay-section-head">
           <span class="relay-label">{{ t('liveRelay.myDevices') }}</span>
-          <button type="button" class="relay-link" :disabled="loading" @click="refresh">
+          <button type="button" class="relay-link" :disabled="loading" @click="refresh()">
             {{ loading ? t('liveRelay.refreshing') : t('liveRelay.refresh') }}
           </button>
         </div>

@@ -782,6 +782,8 @@ const en = {
     knockControlText: "\"{name}\" is asking for control of \"{share}\".",
     knockControlNote: "It will be able to type into this session until you take control back.",
     paletteRevoke: "Live Relay: take control back from every device",
+    paletteAllowIn: "Live Relay: allow my devices to attach here",
+    paletteBlockIn: "Live Relay: stop letting my devices attach here",
   },
   bookmarks: {
     quickConnect: "🔖 Quick Connect",

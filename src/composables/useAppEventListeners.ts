@@ -15,6 +15,10 @@ interface UseAppEventListenersOptions {
   handleToggleRemoteSend: () => void;
   handleOpenRemoteAssist: () => void;
   handleOpenJoinAssist: () => void;
+  handleOpenConsoleWeb: () => void;
+  handleOpenLiveRelay: () => void;
+  handleToggleRelayEnabled: () => void;
+  handleRelayRevokeAllControl: () => void;
   handleNewLocalSessionFromMenu: () => void;
   handleOpenConnectionFromMenu: (protocol: ConnectionProtocol) => void;
   handleCloseActiveTab: () => void;
@@ -43,6 +47,10 @@ export function useAppEventListeners({
   handleToggleRemoteSend,
   handleOpenRemoteAssist,
   handleOpenJoinAssist,
+  handleOpenConsoleWeb,
+  handleOpenLiveRelay,
+  handleToggleRelayEnabled,
+  handleRelayRevokeAllControl,
   handleNewLocalSessionFromMenu,
   handleOpenConnectionFromMenu,
   handleCloseActiveTab,
@@ -111,6 +119,18 @@ export function useAppEventListeners({
         }),
         listen("menu-join-assist", () => {
           handleOpenJoinAssist();
+        }),
+        listen("menu-open-console-web", () => {
+          handleOpenConsoleWeb();
+        }),
+        listen("menu-live-relay", () => {
+          handleOpenLiveRelay();
+        }),
+        listen("menu-toggle-relay-enabled", () => {
+          handleToggleRelayEnabled();
+        }),
+        listen("menu-live-relay-revoke", () => {
+          handleRelayRevokeAllControl();
         }),
         listen("menu-new-local", () => {
           handleNewLocalSessionFromMenu();
