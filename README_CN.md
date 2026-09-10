@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/Aura-X-Labs/AuraTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/Aura-X-Labs/AuraTerm/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Aura-X-Labs/AuraTerm)](https://github.com/Aura-X-Labs/AuraTerm/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/built%20with-Tauri%202-blue)](https://tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.x-brightgreen)](https://vuejs.org/)
 
@@ -250,4 +250,8 @@ npm run release:windows         # 完整签名发布流程
 
 ## 许可证
 
-MIT，详见 [LICENSE](LICENSE)。
+AuraTerm 是自由软件，采用 **GNU 通用公共许可证 v3.0 或更高版本**（`GPL-3.0-or-later`）发布，完整文本见 [LICENSE](LICENSE)。
+
+Copyright (c) 2026 Aura-X-Labs。
+
+0.3.5 及之前的版本以 MIT 许可证发布，这些版本仍可按 MIT 使用；自 0.3.6 起为 GPL-3.0-or-later。第三方组件保留各自的许可证（MIT、Apache-2.0、ISC、BSD、MPL-2.0），均与 GPLv3 兼容。

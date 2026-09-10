@@ -50,7 +50,7 @@ function openExternal(url: string) {
 
 <div class="about-info">
             <p><strong>{{ $t('about.builtWith') }}</strong> Tauri + Vue + TypeScript</p>
-            <p><strong>{{ $t('about.license') }}</strong> MIT</p>
+            <p><strong>{{ $t('about.license') }}</strong> GPL-3.0-or-later</p>
           </div>
 
           <div class="about-links">
