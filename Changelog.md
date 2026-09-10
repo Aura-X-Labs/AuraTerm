@@ -1,5 +1,8 @@
 ## 0.3.6
 
+### 许可证
+- **许可证由 MIT 改为 GPL-3.0-or-later**：自本版本起，AuraTerm 以 GNU 通用公共许可证 v3.0 或更高版本发布；0.3.5 及之前的版本仍按 MIT 可用。全部第三方依赖（MIT / Apache-2.0 / ISC / BSD / MPL-2.0）均与 GPLv3 兼容；仅 Apache-2.0 的依赖（如 russh）与 GPLv2 不兼容，因此选择 v3。同步更新 `LICENSE`、`package.json`、`Cargo.toml`、README、CONTRIBUTING、关于对话框，以及 Microsoft Store 的自定义许可条款（`docs/MICROSOFT_STORE_LICENSE.md`，商店安装包通过 `licenseFile` 展示的就是仓库的 `LICENSE`）
+
 ### 改进
 - **配置同步不再需要同步口令**（设计见 `docs/plans/sync-passphrase-removal-design.md`）：登录 AuraXLab 账户即可同步，重启后不再出现「Sync · 已锁定」。书签、设置与 known-hosts 以 `rest-v2` 明文载荷上传，由服务器静态加密保存，通过邮件重置账户密码后数据依然可用。
 - **已保存的凭据改为主密码端到端加密**：上传前用主密码派生密钥（Argon2id + HKDF + AES-256-GCM）封装为 `AURACRED` 信封，服务器无法读取。凭据同步要求各设备使用相同的主密码；主密码锁定或本机未设主密码时只跳过凭据部分，其余内容照常同步，Live Sync 面板与同步结果会说明原因。

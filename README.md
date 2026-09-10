@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/Aura-X-Labs/AuraTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/Aura-X-Labs/AuraTerm/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Aura-X-Labs/AuraTerm)](https://github.com/Aura-X-Labs/AuraTerm/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/built%20with-Tauri%202-blue)](https://tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.x-brightgreen)](https://vuejs.org/)
 
@@ -250,4 +250,8 @@ Bug reports, feature ideas and pull requests are welcome. Please read [CONTRIBUT
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+AuraTerm is free software, released under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for the full text.
+
+Copyright (c) 2026 Aura-X-Labs.
+
+Releases up to and including 0.3.5 were published under the MIT License; those versions remain available under MIT. Everything from 0.3.6 onward is GPL-3.0-or-later. Third-party components keep their own licenses (MIT, Apache-2.0, ISC, BSD, MPL-2.0), all of which are compatible with GPLv3.
