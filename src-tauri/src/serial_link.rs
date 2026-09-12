@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serialport::SerialPort;
 
+use crate::connection_test::{ProbeFailure, ServerSerialParams, TestCode};
 use crate::rfc2217::ComPortState;
 use crate::serial_params::{
     LineErrors, ModemLines, PurgeTarget, SerialParams, SerialParamsConfirmed, SerialSignals,
@@ -294,17 +295,28 @@ fn local_status(id: &str, state: &LocalState) -> SerialStatus {
     status
 }
 
+/// Everything about opening a local port except the open itself.
+///
+/// Split out so the connection test opens the port with exactly the settings a
+/// session would, and can still read the typed error `open()` returns.
+pub(crate) fn local_port_builder(
+    port_name: &str,
+    params: SerialParams,
+) -> Result<serialport::SerialPortBuilder, String> {
+    Ok(serialport::new(port_name, params.baud_rate)
+        .timeout(READ_TIMEOUT)
+        .data_bits(params.data_bits_enum()?)
+        .stop_bits(params.stop_bits_enum()?)
+        .parity(params.parity_enum())
+        .flow_control(params.flow_control_enum()))
+}
+
 /// Open a port on this machine.
 pub fn open_local(
     port_name: &str,
     params: SerialParams,
 ) -> Result<(Box<dyn SerialLink>, Arc<dyn SerialSink>), String> {
-    let port = serialport::new(port_name, params.baud_rate)
-        .timeout(READ_TIMEOUT)
-        .data_bits(params.data_bits_enum()?)
-        .stop_bits(params.stop_bits_enum()?)
-        .parity(params.parity_enum())
-        .flow_control(params.flow_control_enum())
+    let port = local_port_builder(port_name, params)?
         .open()
         .map_err(|error| error.to_string())?;
 
@@ -611,7 +623,26 @@ pub fn connect_network(
     params: SerialParams,
     adopt_server_params: bool,
 ) -> Result<(Box<dyn SerialLink>, Arc<NetSerialSink>), String> {
-    let stream = connect_with_timeout(host, port)?;
+    attach_network(
+        connect_with_timeout(host, port)?,
+        transport,
+        params,
+        ComPortState::new(params, adopt_server_params),
+    )
+}
+
+/// Wrap an already-connected socket as a network serial session: socket
+/// options, the Telnet layer, and (for RFC 2217) the opening offer.
+///
+/// Split from [`connect_network`] so the connection test can bring its own
+/// socket, connected under its own timeout and error classification.
+/// `com_port` is only used in RFC 2217 mode.
+pub(crate) fn attach_network(
+    stream: TcpStream,
+    transport: SerialTransport,
+    params: SerialParams,
+    com_port: ComPortState,
+) -> Result<(Box<dyn SerialLink>, Arc<NetSerialSink>), String> {
     // Console traffic is tiny and latency-sensitive; Nagle would batch
     // keystrokes into visible lag.
     let _ = stream.set_nodelay(true);
@@ -629,9 +660,9 @@ pub fn connect_network(
         .map_err(|error| error.to_string())?;
 
     let codec = match transport {
-        SerialTransport::Rfc2217 => Some(StdMutex::new(TelnetIacFilter::with_com_port(
-            ComPortState::new(params, adopt_server_params),
-        ))),
+        SerialTransport::Rfc2217 => {
+            Some(StdMutex::new(TelnetIacFilter::with_com_port(com_port)))
+        }
         // Raw TCP deliberately has no Telnet layer: a 0xFF is data, not IAC.
         SerialTransport::RawTcp => None,
         SerialTransport::Local => {
@@ -664,6 +695,106 @@ pub fn connect_network(
     };
 
     Ok((Box::new(link), sink))
+}
+
+/// Session id used for status snapshots taken by the connection test. It never
+/// leaves this module; the snapshot only feeds the report.
+const PROBE_STATUS_ID: &str = "connection-test";
+
+/// Once the server has confirmed the baud rate, how much longer to wait for
+/// the rest of its replies. They usually share a packet, but not always.
+const PROBE_REPLY_GRACE: Duration = Duration::from_millis(200);
+
+/// What the RFC 2217 connection test learned.
+pub(crate) struct Rfc2217Probe {
+    /// The server accepted COM-PORT-OPTION.
+    pub negotiated: bool,
+    pub server_params: ServerSerialParams,
+    pub signature: Option<String>,
+}
+
+/// Run the RFC 2217 handshake on `stream` just far enough to learn whether
+/// the server accepts the option and how its port is configured, then close.
+///
+/// Always negotiates query-only, whatever the dialog's checkbox says: the
+/// parameter block carries only value-0 queries — no subscriptions, no
+/// PURGE_DATA — so a test never retunes the port, drives DTR/RTS, or flushes
+/// buffers on a console server someone else may be using.
+/// Terminal data that arrives meanwhile is read and discarded.
+///
+/// Blocking; run it on a blocking thread. Both socket handles are dropped
+/// before this returns, whatever the outcome.
+pub(crate) fn probe_rfc2217(
+    stream: TcpStream,
+    params: SerialParams,
+    budget: Duration,
+) -> Result<Rfc2217Probe, ProbeFailure> {
+    let (mut link, sink) = attach_network(
+        stream,
+        SerialTransport::Rfc2217,
+        params,
+        ComPortState::query_only(params),
+    )
+        .map_err(|detail| ProbeFailure::new(TestCode::ConnectFailed, detail))?;
+
+    let deadline = std::time::Instant::now() + budget;
+    let mut grace: Option<std::time::Instant> = None;
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let status = sink.status(PROBE_STATUS_ID);
+        if status.negotiation_settled {
+            // Refused: nothing more to learn.
+            if !status.rfc2217_negotiated || all_confirmed(status.confirmed) {
+                break;
+            }
+            if status.confirmed.baud_rate {
+                let until = *grace.get_or_insert_with(|| std::time::Instant::now() + PROBE_REPLY_GRACE);
+                if std::time::Instant::now() >= until {
+                    break;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        // Blocks for at most READ_TIMEOUT; answers negotiation as it goes.
+        if let Err(error) = link.read(&mut buffer) {
+            if sink.status(PROBE_STATUS_ID).rfc2217_negotiated {
+                // Hung up after agreeing: report what was learned.
+                break;
+            }
+            return Err(ProbeFailure::new(TestCode::PeerClosed, error.to_string()));
+        }
+    }
+
+    // Silence is a verdict too, exactly as for a real session.
+    sink.give_up_negotiation();
+    let status = sink.status(PROBE_STATUS_ID);
+    let confirmed = status.confirmed;
+    let effective = status.effective;
+    let server_params = ServerSerialParams {
+        baud_rate: confirmed.baud_rate.then_some(effective.baud_rate),
+        data_bits: confirmed.data_bits.then_some(effective.data_bits),
+        stop_bits: confirmed.stop_bits.then_some(effective.stop_bits),
+        parity: confirmed.parity.then_some(effective.parity),
+        flow_control: confirmed.flow_control.then_some(effective.flow_control),
+    };
+
+    drop(link);
+    drop(sink);
+    Ok(Rfc2217Probe {
+        negotiated: status.rfc2217_negotiated,
+        server_params,
+        signature: status.signature,
+    })
+}
+
+fn all_confirmed(confirmed: SerialParamsConfirmed) -> bool {
+    confirmed.baud_rate
+        && confirmed.data_bits
+        && confirmed.stop_bits
+        && confirmed.parity
+        && confirmed.flow_control
 }
 
 fn connect_with_timeout(host: &str, port: u16) -> Result<TcpStream, String> {
@@ -734,7 +865,8 @@ mod tests {
         greeting: Vec<u8>,
         /// Hang up right after the greeting.
         hang_up: bool,
-        /// Answer nothing at all, like a device server exposing a raw TCP port.
+        /// Answer no Telnet command at all, like a device server exposing a raw
+        /// TCP port. Data is echoed back, as a loopback device would.
         silent: bool,
     }
 
@@ -762,6 +894,67 @@ mod tests {
         haystack.windows(needle.len()).any(|window| window == needle)
     }
 
+    /// Where [`TelnetStripper`] is inside a Telnet byte stream.
+    #[derive(Clone, Copy, Default)]
+    enum StripState {
+        #[default]
+        Data,
+        Iac,
+        Option,
+        Sub,
+        SubIac,
+    }
+
+    /// Drops Telnet commands from a byte stream and keeps the data. Stateful,
+    /// so a command split across two reads is still dropped whole.
+    #[derive(Default)]
+    struct TelnetStripper {
+        state: StripState,
+    }
+
+    impl TelnetStripper {
+        fn strip(&mut self, chunk: &[u8]) -> Vec<u8> {
+            use crate::util::SE;
+            let mut data = Vec::with_capacity(chunk.len());
+            for &byte in chunk {
+                self.state = match (self.state, byte) {
+                    (StripState::Data, IAC) => StripState::Iac,
+                    (StripState::Data, _) => {
+                        data.push(byte);
+                        StripState::Data
+                    }
+                    // An escaped 0xFF is data; send it back still escaped.
+                    (StripState::Iac, IAC) => {
+                        data.extend_from_slice(&[IAC, IAC]);
+                        StripState::Data
+                    }
+                    (StripState::Iac, SB) => StripState::Sub,
+                    // WILL / WONT / DO / DONT carry one option byte.
+                    (StripState::Iac, WILL..=DONT) => StripState::Option,
+                    // Two-byte commands (NOP, BRK, ...).
+                    (StripState::Iac, _) | (StripState::Option, _) => StripState::Data,
+                    (StripState::Sub, IAC) => StripState::SubIac,
+                    (StripState::Sub, _) => StripState::Sub,
+                    (StripState::SubIac, SE) => StripState::Data,
+                    (StripState::SubIac, _) => StripState::Sub,
+                };
+            }
+            data
+        }
+    }
+
+    #[test]
+    fn the_stripper_keeps_data_and_drops_commands() {
+        let mut stripper = TelnetStripper::default();
+        let mut wire = vec![IAC, WILL, COM_PORT, b'h', IAC, DO, TELNET_BINARY];
+        wire.extend_from_slice(&subnegotiation(SET_BAUDRATE, &[0, 0, 0x25, 0x80]));
+        wire.extend_from_slice(&[b'i', IAC, IAC]);
+        assert_eq!(stripper.strip(&wire), vec![b'h', b'i', IAC, IAC]);
+        // A command split across reads is still dropped whole.
+        assert_eq!(stripper.strip(&[b'a', IAC]), vec![b'a']);
+        assert_eq!(stripper.strip(&[DONT, COM_PORT, b'b']), vec![b'b']);
+    }
+
     fn spawn_mock(behaviour: MockBehaviour) -> MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
@@ -780,6 +973,7 @@ mod tests {
             }
 
             let mut buffer = [0_u8; 1024];
+            let mut stripper = TelnetStripper::default();
             loop {
                 let read = match stream.read(&mut buffer) {
                     Ok(0) | Err(_) => return,
@@ -789,9 +983,16 @@ mod tests {
                 sink.lock().expect("lock").extend_from_slice(chunk);
 
                 if behaviour.silent {
-                    // Echo it back as data, which is what a raw port does with
-                    // the bytes of an offer it does not understand.
-                    let _ = stream.write_all(chunk);
+                    // Echo the data back like a loopback device would, but
+                    // never the Telnet commands: an echoed `IAC WILL COM-PORT`
+                    // draws a `DONT` from the client, and that `DONT` echoed in
+                    // turn reads as a refusal and settles the handshake. Whether
+                    // it arrived before the data was a timing race, so the mock
+                    // would sometimes answer after all.
+                    let echo = stripper.strip(chunk);
+                    if !echo.is_empty() {
+                        let _ = stream.write_all(&echo);
+                    }
                     continue;
                 }
 
@@ -1183,5 +1384,216 @@ mod tests {
 
         let outcome = drive(&mut link, |_| false);
         assert!(outcome.is_err(), "expected the closed peer to surface as an error");
+    }
+
+    // ── Connection test probe ───────────────────────────────────────────
+
+    fn connect_to(server: &MockServer) -> TcpStream {
+        TcpStream::connect(server.addr).expect("connect to mock")
+    }
+
+    /// Wait for the mock to see the client hang up, then return what it got.
+    fn received_after_close(server: &MockServer) -> Vec<u8> {
+        // The mock thread exits on EOF; give it a moment to drain.
+        std::thread::sleep(Duration::from_millis(100));
+        server.received.lock().expect("lock").clone()
+    }
+
+    #[test]
+    fn the_probe_learns_the_servers_baud_rate_without_setting_one() {
+        let server = spawn_mock(MockBehaviour {
+            report_baud: Some(9600),
+            ..MockBehaviour::default()
+        });
+        // The form asks for 115200; the probe must not push it.
+        let probe = probe_rfc2217(connect_to(&server), params(), Duration::from_secs(2)).expect("probe");
+
+        assert!(probe.negotiated);
+        assert_eq!(probe.server_params.baud_rate, Some(9600));
+        // Only what the server confirmed; the mock confirms nothing else.
+        assert_eq!(probe.server_params.data_bits, None);
+        assert_eq!(probe.server_params.stop_bits, None);
+        assert_eq!(probe.server_params.parity, None);
+        assert_eq!(probe.server_params.flow_control, None);
+        assert_eq!(probe.signature, None);
+
+        let received = received_after_close(&server);
+        assert!(
+            contains(&received, &subnegotiation(SET_BAUDRATE, &0u32.to_be_bytes())),
+            "adopt mode queries with value 0",
+        );
+        assert!(
+            !contains(&received, &subnegotiation(SET_BAUDRATE, &115200u32.to_be_bytes())),
+            "the test must not retune a shared console server",
+        );
+        assert!(!contains(&received, &ComPortState::dtr_frame(true)), "DTR must be left alone");
+        assert!(!contains(&received, &ComPortState::rts_frame(true)), "RTS must be left alone");
+    }
+
+    #[test]
+    fn the_probe_waits_briefly_for_a_late_baud_reply_but_not_for_the_whole_budget() {
+        let server = spawn_mock(MockBehaviour {
+            report_baud: Some(57600),
+            ..MockBehaviour::default()
+        });
+        let started = Instant::now();
+        let probe = probe_rfc2217(connect_to(&server), params(), Duration::from_secs(5)).expect("probe");
+        assert_eq!(probe.server_params.baud_rate, Some(57600));
+        // Baud confirmed, the rest never comes: a short grace, not the 5 s budget.
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_probe_reports_a_refused_option() {
+        let server = spawn_mock(MockBehaviour {
+            accept_com_port: false,
+            ..MockBehaviour::default()
+        });
+        let started = Instant::now();
+        let probe = probe_rfc2217(connect_to(&server), params(), Duration::from_secs(2)).expect("probe");
+        assert!(!probe.negotiated);
+        assert_eq!(probe.server_params, ServerSerialParams::default());
+        // A refusal settles the handshake, so there is nothing to wait out.
+        assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_probe_gives_up_on_a_silent_server_within_its_budget() {
+        let server = spawn_mock(MockBehaviour {
+            silent: true,
+            ..MockBehaviour::default()
+        });
+        let started = Instant::now();
+        let probe = probe_rfc2217(connect_to(&server), params(), Duration::from_millis(300)).expect("probe");
+        assert!(!probe.negotiated);
+        assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_probe_leaves_the_socket_closed_for_the_session_that_follows() {
+        // The mock only serves one client; the probe's socket must not linger
+        // in a way that confuses a later check of what was received.
+        let server = spawn_mock(MockBehaviour {
+            report_baud: Some(9600),
+            ..MockBehaviour::default()
+        });
+        let _ = probe_rfc2217(connect_to(&server), params(), Duration::from_secs(2)).expect("probe");
+        let first = received_after_close(&server);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(*server.received.lock().expect("lock"), first, "nothing is sent after the probe returns");
+    }
+
+    #[test]
+    fn the_probe_discards_terminal_data_that_arrives_meanwhile() {
+        let server = spawn_mock(MockBehaviour {
+            greeting: b"login: ".to_vec(),
+            report_baud: Some(9600),
+            ..MockBehaviour::default()
+        });
+        let probe = probe_rfc2217(connect_to(&server), params(), Duration::from_secs(2)).expect("probe");
+        assert!(probe.negotiated);
+        assert_eq!(probe.server_params.baud_rate, Some(9600));
+    }
+
+    #[test]
+    fn the_probe_reports_a_hang_up_before_agreement_as_peer_closed() {
+        let server = spawn_mock(MockBehaviour {
+            hang_up: true,
+            ..MockBehaviour::default()
+        });
+        let failure = match probe_rfc2217(connect_to(&server), params(), Duration::from_secs(2)) {
+            Ok(_) => panic!("a peer that hangs up cannot have negotiated"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, TestCode::PeerClosed, "{}", failure.detail);
+    }
+
+    #[test]
+    fn the_probe_closes_the_socket_before_returning() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Agrees to the option, then waits for the client to hang up.
+        let server = std::thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .map_err(|error| error.to_string())?;
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => return Ok(()),
+                    Ok(size) => {
+                        let chunk = &buffer[..size];
+                        let mut reply = Vec::new();
+                        if contains(chunk, &[IAC, WILL, COM_PORT]) {
+                            reply.extend_from_slice(&[IAC, DO, COM_PORT]);
+                        }
+                        if contains(chunk, &[IAC, SB, COM_PORT, SET_BAUDRATE]) {
+                            reply.extend(subnegotiation(SET_BAUDRATE + 100, &9600u32.to_be_bytes()));
+                        }
+                        let _ = stream.write_all(&reply);
+                    }
+                    // A timeout here means the client kept the socket open.
+                    Err(error) => return Err(format!("no hang-up seen: {error}")),
+                }
+            }
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect");
+        let probe = probe_rfc2217(stream, params(), Duration::from_secs(2)).expect("probe");
+        assert!(probe.negotiated);
+        server.join().expect("server thread").expect("the probe must close its socket");
+    }
+
+    #[test]
+    fn the_probe_reports_what_it_learned_when_the_server_hangs_up_after_agreeing() {
+        use crate::rfc2217::SIGNATURE;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Agrees to the option and names itself, never confirms a setting, and
+        // hangs up once the client has gone quiet: a single-client server
+        // handing the port to someone else, say.
+        let server = std::thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .map_err(|error| error.to_string())?;
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => return Err("the client hung up first".to_string()),
+                    Ok(size) => {
+                        let chunk = &buffer[..size];
+                        let mut reply = Vec::new();
+                        if contains(chunk, &[IAC, WILL, COM_PORT]) {
+                            reply.extend_from_slice(&[IAC, DO, COM_PORT]);
+                        }
+                        if contains(chunk, &[IAC, SB, COM_PORT, SET_BAUDRATE]) {
+                            reply.extend(subnegotiation(SIGNATURE + 100, b"mock-leaving"));
+                        }
+                        stream.write_all(&reply).map_err(|error| error.to_string())?;
+                    }
+                    // Everything the client sent has been read, so closing now
+                    // is a clean FIN rather than a reset.
+                    Err(_) => {
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return Ok(());
+                    }
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let stream = TcpStream::connect(addr).expect("connect");
+        let probe = probe_rfc2217(stream, params(), Duration::from_secs(5))
+            .expect("a hang-up after agreement still reports what was agreed");
+        server.join().expect("server thread").expect("server");
+
+        assert!(probe.negotiated);
+        assert_eq!(probe.signature.as_deref(), Some("mock-leaving"));
+        // Nothing was confirmed, so nothing is reported as the server's setting.
+        assert_eq!(probe.server_params, ServerSerialParams::default());
+        // Stopped by the hang-up, not by sitting out the 5 s budget.
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
     }
 }

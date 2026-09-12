@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS, type AppSettings, type SerialHistoryItem } from "./settings";
 import { buildDefaultLogPath } from "./logging";
 import { collectGroupPaths } from "./bookmarks";
+import { t } from "./i18n";
+import { runConnectionTest, summarizeTestReport, type ConnectionTestReport, type TestSummary } from "./connectionTest";
 import { isReconnectEnabled, type AutoLoginRule, type ConnectResult, type ConnectionProtocol, type JumpHostConfig, type ReconnectType, type SavedConnection, type SerialConfig, type SerialProtocol, type SerialTransport, type SshAuthType } from "./types";
 import { isLoopbackHost, isSerialProtocol, parseSerialEndpoint, protocolForTransport, serialTargetLabel, transportForProtocol, RFC2217_DEFAULT_PORT } from "./serialTransport";
 import "./ConnectDialog.css";
@@ -432,22 +434,25 @@ async function copyGeneratedPublicKey() {
   await navigator.clipboard.writeText(generatedPublicKey.value);
 }
 
-function handleSubmit(event: Event) {
-  event.preventDefault();
+/** The form as a `ConnectResult`, or `null` when it is not complete.
+ *
+ *  Shared by "Connect" and "Test" so the test always exercises exactly the
+ *  values a real connection would use. */
+function buildConnectResult(): ConnectResult | null {
   if ((isSsh.value || isTelnet.value) && !host.value.trim()) {
-    return;
+    return null;
   }
   if (isSsh.value && !user.value.trim()) {
-    return;
+    return null;
   }
   if (isSsh.value && authType.value === "key" && !privateKey.value.trim()) {
-    return;
+    return null;
   }
   if (isSerial.value && !serialPortName.value.trim()) {
-    return;
+    return null;
   }
   if (isNetworkSerial.value && !serialHost.value.trim()) {
-    return;
+    return null;
   }
 
   const sshSecret = password.value !== "" ? password.value : undefined;
@@ -467,7 +472,7 @@ function handleSubmit(event: Event) {
     flowControl: serialFlowControl.value,
   } : undefined;
 
-  emit("connect", {
+  return {
     protocol: protocol.value,
     sshConfig: isSsh.value ? {
       host: host.value,
@@ -489,8 +494,84 @@ function handleSubmit(event: Event) {
     saveAs: saveConnection.value ? (customConnectionName || defaultName.value) : undefined,
     saveGroup: saveConnection.value && connectionGroup.value.trim() ? connectionGroup.value.trim() : undefined,
     logPath: enableLog.value ? (logFilePath.value.trim() || defaultLogPath.value) : undefined,
-  });
+  };
 }
+
+function handleSubmit(event: Event) {
+  event.preventDefault();
+  const result = buildConnectResult();
+  if (!result) {
+    return;
+  }
+  // A test still in flight must not paint a result over a dialog that is
+  // already handing off to the real session.
+  clearTestResult();
+  emit("connect", result);
+}
+
+// ── Connection test ──────────────────────────────────────────────────────────
+
+const testing = ref(false);
+/** The raw report, kept rather than its text so the summary is rebuilt — and
+ *  re-translated — if the UI language changes while it is on screen. */
+const testOutcome = ref<{ protocol: ConnectionProtocol; report: ConnectionTestReport } | null>(null);
+const testSummary = computed<TestSummary | null>(() =>
+  testOutcome.value ? summarizeTestReport(testOutcome.value.protocol, testOutcome.value.report, t) : null,
+);
+/** Bumped whenever a pending result goes stale; a result is only shown if the
+ *  generation it started under is still current. */
+let testGeneration = 0;
+let unmounted = false;
+
+async function handleTest() {
+  if (testing.value) {
+    return;
+  }
+  const result = buildConnectResult();
+  if (!result) {
+    return;
+  }
+  const generation = ++testGeneration;
+  testing.value = true;
+  testOutcome.value = null;
+  try {
+    // Never rejects: failures come back as a report.
+    const report = await runConnectionTest(result);
+    if (unmounted || generation !== testGeneration) {
+      return;
+    }
+    testOutcome.value = { protocol: result.protocol, report };
+  } finally {
+    if (!unmounted) {
+      testing.value = false;
+    }
+  }
+}
+
+/** Drop the shown result, and mark any test in flight as stale so its answer is
+ *  discarded when it arrives. `testing` is left alone: the backend probe is
+ *  still running, and only one may run at a time. */
+function clearTestResult() {
+  testGeneration++;
+  testOutcome.value = null;
+}
+
+// Anything that changes what would be connected to invalidates the result.
+// Deep, because jump host fields are edited in place through v-model.
+watch(
+  [
+    protocol, host, port, user, password, passphrase, privateKey, authType, jumpHosts,
+    telnetPort, serialHost, serialNetPort, serialPortName, serialBaudRate, serialDataBits,
+    serialStopBits, serialParity, serialFlowControl,
+  ],
+  clearTestResult,
+  { deep: true },
+);
+
+onBeforeUnmount(() => {
+  unmounted = true;
+  testGeneration++;
+});
 
 </script>
 
@@ -877,7 +958,36 @@ function handleSubmit(event: Event) {
           </div>
         </template>
 
+        <!-- Always mounted (hidden while empty) so screen readers reliably
+             announce what gets written into it. -->
+        <div
+          id="connect-test-result"
+          class="connect-test-result"
+          role="status"
+          aria-live="polite"
+        >
+          <div v-if="testing" class="form-hint">{{ $t('connect.testRunning') }}</div>
+          <template v-else-if="testSummary">
+            <div class="form-hint connect-test-title" :class="testSummary.tone">{{ testSummary.title }}</div>
+            <div
+              v-for="(line, index) in testSummary.lines"
+              :key="index"
+              class="form-hint connect-test-line"
+              :class="line.tone"
+            >{{ line.text }}</div>
+          </template>
+        </div>
+
         <div class="dialog-actions">
+          <button
+            type="button"
+            class="btn-test"
+            :disabled="!canConnect || testing"
+            :aria-busy="testing"
+            aria-describedby="connect-test-result"
+            :title="$t('connect.testHint')"
+            @click="handleTest"
+          >{{ testing ? $t('connect.testing') : $t('connect.test') }}</button>
           <button type="button" class="btn-cancel" @click="emit('cancel')">{{ $t('common.cancel') }}</button>
           <button type="submit" class="btn-connect" :disabled="!canConnect">{{ $t('connect.connect') }}</button>
         </div>

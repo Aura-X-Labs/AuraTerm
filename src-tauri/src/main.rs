@@ -31,6 +31,7 @@ mod assist;
 mod assist_host;
 mod assist_client;
 mod bookmark_share;
+mod connection_test;
 mod connections;
 mod encryption;
 mod keychain;
@@ -1263,11 +1264,13 @@ fn main() {
             ssh::ssh_start_tunnel,
             ssh::ssh_stop_tunnel,
             ssh::ssh_list_tunnels,
+            ssh::ssh_test_connection,
             telnet::start_telnet_session,
             telnet::write_telnet_input,
             telnet::write_telnet_bytes,
             telnet::resize_telnet,
             telnet::close_telnet_session,
+            telnet::telnet_test_connection,
             serial::list_serial_ports,
             serial::start_serial_session,
             serial::write_serial_input,
@@ -1278,6 +1281,7 @@ fn main() {
             serial::send_serial_break,
             serial::set_serial_signals,
             serial::purge_serial_buffers,
+            serial::serial_test_connection,
             cloud_bridge::cloud_bridge_rotate_credential,
             cloud_bridge::cloud_bridge_share_session,
             cloud_bridge::cloud_bridge_stop_share,

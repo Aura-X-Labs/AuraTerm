@@ -7,15 +7,25 @@ use std::sync::{
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use crate::serial_link::{connect_network, open_local, SerialLink, SerialSink, SinkSlot};
+use crate::connection_test::{
+    tcp_connect, ConnectionTestReport, ProbeFailure, TestCode, TCP_CONNECT_TIMEOUT,
+};
+use crate::serial_link::{
+    connect_network, local_port_builder, open_local, SerialLink, SerialSink, SinkSlot,
+};
 use crate::serial_params::{PurgeTarget, SerialParams, SerialStatus, SerialTransport};
 
 /// How long to wait for the peer to answer `WILL COM-PORT-OPTION` before
 /// declaring the session degraded and carrying on as a plain byte pipe.
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(2);
 const NEGOTIATION_POLL: Duration = Duration::from_millis(25);
+
+/// How long the connection test waits for a local port to open. Bluetooth
+/// serial ports in particular can sit in `open()` for a long time.
+const LOCAL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Smallest gap between two `serial-status` events.
 ///
@@ -595,6 +605,185 @@ pub async fn get_serial_status(
     Ok(state.sink(&id).await?.status(&id))
 }
 
+/// Try the serial settings from the New Session form without opening a session.
+///
+/// - **Local:** open the port with these settings and close it again. That
+///   proves the port exists, is free, and the driver takes the settings — not
+///   that a device is attached or that the baud rate matches it.
+/// - **Raw TCP:** connect and hang up without sending a byte.
+/// - **RFC 2217:** connect, run the handshake in adopt mode (queries only, see
+///   [`crate::serial_link::probe_rfc2217`]) and report what the server said.
+///
+/// Nothing is registered in `SerialState` and no event is emitted. Expected
+/// failures come back as `Ok(report)`; `Err` means malformed parameters.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn serial_test_connection(
+    port_name: String,
+    baud_rate: u32,
+    data_bits: u8,
+    stop_bits: u8,
+    parity: String,
+    flow_control: String,
+    transport: Option<String>,
+    host: Option<String>,
+    net_port: Option<u16>,
+) -> Result<ConnectionTestReport, String> {
+    let started = std::time::Instant::now();
+    let transport = SerialTransport::parse(transport.as_deref())?;
+    let params = SerialParams::from_wire(baud_rate, data_bits, stop_bits, &parity, &flow_control)?;
+
+    if !transport.is_network() {
+        return Ok(test_local_port(port_name, params, started).await);
+    }
+
+    // Same validation and trimming as `start_serial_session`.
+    let host = host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "A network serial session needs a host".to_string())?;
+    let net_port = net_port.filter(|port| *port > 0).ok_or_else(|| {
+        "A network serial session needs a port (2217 is the RFC 2217 default)".to_string()
+    })?;
+    let endpoint = format!("{host}:{net_port}");
+    let stream = match tcp_connect((host, net_port), &endpoint, TCP_CONNECT_TIMEOUT).await {
+        Ok(stream) => stream,
+        Err(failure) => return Ok(ConnectionTestReport::from_failure(failure, started)),
+    };
+
+    if transport == SerialTransport::Rfc2217 {
+        return Ok(test_rfc2217(stream, params, started).await);
+    }
+
+    // Raw TCP: nothing to negotiate, and any byte sent would reach the device.
+    let mut stream = stream;
+    let _ = stream.shutdown().await;
+    Ok(ConnectionTestReport::new(TestCode::Ok, started))
+}
+
+async fn test_local_port(
+    port_name: String,
+    params: SerialParams,
+    started: std::time::Instant,
+) -> ConnectionTestReport {
+    let open = tokio::task::spawn_blocking(move || probe_local_port(&port_name, params));
+    match tokio::time::timeout(LOCAL_OPEN_TIMEOUT, open).await {
+        Err(_) => ConnectionTestReport::new(TestCode::SerialOpenTimeout, started).with_detail(format!(
+            "Opening the port did not finish within {}s",
+            LOCAL_OPEN_TIMEOUT.as_secs(),
+        )),
+        Ok(Err(error)) => ConnectionTestReport::new(TestCode::SerialOpenFailed, started)
+            .with_detail(format!("Port test task failed: {error}")),
+        Ok(Ok(Err(failure))) => ConnectionTestReport::from_failure(failure, started),
+        Ok(Ok(Ok(()))) => ConnectionTestReport::new(TestCode::Ok, started),
+    }
+}
+
+/// Open `port_name` and close it again, on the calling (blocking) thread.
+///
+/// Only `open()`: no clone, no read or write, no DTR/RTS change beyond what
+/// opening a port does on its own. The port is dropped here rather than handed
+/// back, so an open that completes after the caller gave up still releases it.
+fn probe_local_port(port_name: &str, params: SerialParams) -> Result<(), ProbeFailure> {
+    let builder = local_port_builder(port_name, params)
+        .map_err(|detail| ProbeFailure::new(TestCode::SerialParamsRejected, detail))?;
+    match builder.open() {
+        Ok(port) => {
+            drop(port);
+            Ok(())
+        }
+        Err(error) => {
+            let listed = error.kind() == serialport::ErrorKind::NoDevice && port_is_listed(port_name);
+            Err(ProbeFailure::new(
+                classify_serial_open_error(error.kind(), listed),
+                error.to_string(),
+            ))
+        }
+    }
+}
+
+/// Whether the OS still enumerates `port_name`.
+fn port_is_listed(port_name: &str) -> bool {
+    available_ports()
+        .map(|ports| ports.iter().any(|port| same_port_name(&port.port_name, port_name)))
+        .unwrap_or(false)
+}
+
+/// Whether two port names refer to the same port. Windows opens `com3` as
+/// `COM3`, so a hand-typed name must not turn a busy port into a missing one;
+/// device paths elsewhere are case-sensitive.
+fn same_port_name(listed: &str, requested: &str) -> bool {
+    if cfg!(windows) {
+        listed.eq_ignore_ascii_case(requested)
+    } else {
+        listed == requested
+    }
+}
+
+/// Map an open failure onto what the user should do about it.
+///
+/// On Windows serialport folds "access denied" (someone else has the port) and
+/// "file not found" (no such port) into the same `NoDevice`, and the OS text
+/// that would tell them apart is localised. Whether the port is still listed
+/// is what separates the two: a busy port is enumerated, a missing one is not.
+pub(crate) fn classify_serial_open_error(kind: serialport::ErrorKind, listed: bool) -> TestCode {
+    use serialport::ErrorKind;
+    match kind {
+        ErrorKind::NoDevice if listed => TestCode::SerialPortBusy,
+        ErrorKind::NoDevice => TestCode::SerialPortNotFound,
+        ErrorKind::Io(std::io::ErrorKind::NotFound) => TestCode::SerialPortNotFound,
+        // Unix: not in the dialout/uucp group.
+        ErrorKind::Io(std::io::ErrorKind::PermissionDenied) => TestCode::SerialPermissionDenied,
+        ErrorKind::InvalidInput => TestCode::SerialParamsRejected,
+        _ => TestCode::SerialOpenFailed,
+    }
+}
+
+async fn test_rfc2217(
+    stream: tokio::net::TcpStream,
+    params: SerialParams,
+    started: std::time::Instant,
+) -> ConnectionTestReport {
+    // The probe is blocking code shared with the session transport, so it gets
+    // a std socket. `into_std` hands it over non-blocking; undo that.
+    let stream = match stream
+        .into_std()
+        .and_then(|stream| stream.set_nonblocking(false).map(|()| stream))
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            return ConnectionTestReport::new(TestCode::ConnectFailed, started)
+                .with_detail(error.to_string())
+        }
+    };
+
+    let probe = tokio::task::spawn_blocking(move || {
+        crate::serial_link::probe_rfc2217(stream, params, NEGOTIATION_TIMEOUT)
+    });
+    // The probe bounds itself; this is only a safety net over it.
+    let outcome = tokio::time::timeout(NEGOTIATION_TIMEOUT + Duration::from_secs(1), probe).await;
+    match outcome {
+        Err(_) => ConnectionTestReport::new(TestCode::Timeout, started).with_detail(format!(
+            "The RFC 2217 handshake did not finish within {}s",
+            NEGOTIATION_TIMEOUT.as_secs(),
+        )),
+        // Same convention as the local-port path: a failed task is a failed
+        // test, not a malformed request.
+        Ok(Err(error)) => ConnectionTestReport::new(TestCode::ConnectFailed, started)
+            .with_detail(format!("RFC 2217 test task failed: {error}")),
+        Ok(Ok(Err(failure))) => ConnectionTestReport::from_failure(failure, started),
+        Ok(Ok(Ok(probe))) if probe.negotiated => {
+            let mut report = ConnectionTestReport::new(TestCode::Ok, started);
+            report.server_params = Some(probe.server_params);
+            report.signature = probe.signature;
+            report
+        }
+        Ok(Ok(Ok(_))) => ConnectionTestReport::new(TestCode::Rfc2217Refused, started)
+            .with_detail("Server did not accept COM-PORT-OPTION"),
+    }
+}
+
 #[tauri::command]
 pub async fn close_serial_session(
     state: State<'_, SerialState>,
@@ -666,18 +855,35 @@ mod tests {
         let port = probe.local_addr().expect("addr").port();
         drop(probe);
 
-        // Bring the "device server" back while the client is backing off.
+        // Bring the "device server" back while the client is backing off after
+        // its first refusal. Waiting for that refusal rather than a fixed delay
+        // matters on Windows: a refused loopback connect is retried for ~2s
+        // before it fails, so a timer-driven rebind can land inside the first
+        // attempt and let it succeed.
+        let stop = Arc::new(AtomicBool::new(false));
+        let (refused_tx, refused_rx) = std::sync::mpsc::channel::<()>();
+        let give_up = stop.clone();
         let relisten = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1_500));
-            let listener = TcpListener::bind(("127.0.0.1", port)).expect("rebind");
+            // Bounded so a broken `reconnect` fails the test instead of hanging it.
+            if refused_rx.recv_timeout(Duration::from_secs(30)).is_err() {
+                give_up.store(true, Ordering::Relaxed);
+                return Err(std::io::Error::other("the first attempt was never refused"));
+            }
+            let listener = match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    give_up.store(true, Ordering::Relaxed);
+                    return Err(error);
+                }
+            };
             listener.accept().map(|_| ())
         });
 
-        let stop = AtomicBool::new(false);
         let mut failures = 0;
         let outcome = reconnect(&raw_target(port), &stop, |progress| {
             if matches!(progress, ReconnectProgress::Failed { .. }) {
                 failures += 1;
+                let _ = refused_tx.send(());
             }
         });
 
@@ -718,5 +924,297 @@ mod tests {
         let started = Instant::now();
         assert!(!sleep_unless_stopped(Duration::from_secs(30), &stop));
         assert!(started.elapsed() < Duration::from_secs(2), "slept {:?}", started.elapsed());
+    }
+
+    // ── Connection test ─────────────────────────────────────────────────
+
+    use crate::connection_test::TestStatus;
+    use crate::rfc2217::{subnegotiation, COM_PORT_OPTION, SET_BAUDRATE, SET_CONTROL, SET_DATASIZE, SET_PARITY, SET_STOPSIZE, SIGNATURE};
+    use crate::serial_params::{SerialFlowControl, SerialParity};
+    use crate::util::{IAC, SB};
+    use std::io::{Read, Write};
+
+    #[cfg(windows)]
+    const MISSING_PORT: &str = "COM250";
+    #[cfg(unix)]
+    const MISSING_PORT: &str = "/dev/auraterm-missing-port";
+
+    const WILL: u8 = 251;
+    const DO: u8 = 253;
+    const TELNET_BINARY: u8 = 0;
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|window| window == needle)
+    }
+
+    /// Call the command the way the frontend does for a network transport.
+    async fn test_network(transport: &str, host: &str, port: u16) -> Result<ConnectionTestReport, String> {
+        serial_test_connection(
+            "ignored".to_string(),
+            115200,
+            8,
+            1,
+            "none".to_string(),
+            "none".to_string(),
+            Some(transport.to_string()),
+            Some(host.to_string()),
+            Some(port),
+        )
+        .await
+    }
+
+    fn closed_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.local_addr().expect("addr").port()
+    }
+
+    /// Accept one client and record every byte it sends until it hangs up.
+    fn spawn_recorder(reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> (u16, std::thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return Vec::new();
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+            let mut received = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => return received,
+                    Ok(size) => {
+                        received.extend_from_slice(&buffer[..size]);
+                        let answer = reply(&buffer[..size]);
+                        if !answer.is_empty() && stream.write_all(&answer).is_err() {
+                            return received;
+                        }
+                    }
+                }
+            }
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn open_errors_map_to_what_the_user_can_do_about_them() {
+        use serialport::ErrorKind as Kind;
+        use std::io::ErrorKind as Io;
+        let cases = [
+            // Windows folds "in use" and "missing" into NoDevice; the port list decides.
+            (Kind::NoDevice, true, TestCode::SerialPortBusy),
+            (Kind::NoDevice, false, TestCode::SerialPortNotFound),
+            (Kind::Io(Io::NotFound), false, TestCode::SerialPortNotFound),
+            (Kind::Io(Io::NotFound), true, TestCode::SerialPortNotFound),
+            (Kind::Io(Io::PermissionDenied), false, TestCode::SerialPermissionDenied),
+            (Kind::Io(Io::PermissionDenied), true, TestCode::SerialPermissionDenied),
+            (Kind::InvalidInput, false, TestCode::SerialParamsRejected),
+            (Kind::Io(Io::TimedOut), false, TestCode::SerialOpenFailed),
+            (Kind::Io(Io::Other), true, TestCode::SerialOpenFailed),
+            (Kind::Unknown, false, TestCode::SerialOpenFailed),
+        ];
+        for (kind, listed, expected) in cases {
+            assert_eq!(classify_serial_open_error(kind, listed), expected, "{kind:?} listed={listed}");
+        }
+    }
+
+    #[test]
+    fn port_names_compare_the_way_the_os_opens_them() {
+        assert!(same_port_name("COM3", "COM3"));
+        assert!(!same_port_name("COM3", "COM4"));
+        // A hand-typed `com3` opens COM3 on Windows, so a busy COM3 must stay
+        // "busy" rather than become "not found". Device paths are case-sensitive.
+        assert_eq!(same_port_name("COM3", "com3"), cfg!(windows));
+        assert_eq!(same_port_name("/dev/ttyUSB0", "/dev/TTYUSB0"), cfg!(windows));
+    }
+
+    #[test]
+    fn an_enumerated_port_is_listed_however_its_name_is_cased_on_windows() {
+        // Exercises `port_is_listed` against the real enumeration. Machines
+        // without a serial port (most CI runners) have nothing to check.
+        let Ok(ports) = available_ports() else { return };
+        for port in ports {
+            assert!(port_is_listed(&port.port_name), "{} is enumerated", port.port_name);
+            let recased = if port.port_name.to_ascii_lowercase() != port.port_name {
+                port.port_name.to_ascii_lowercase()
+            } else {
+                port.port_name.to_ascii_uppercase()
+            };
+            if recased != port.port_name {
+                assert_eq!(port_is_listed(&recased), cfg!(windows), "{recased} vs {}", port.port_name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_hand_typed_missing_port_is_not_found_whatever_its_case() {
+        let typed = MISSING_PORT.to_ascii_lowercase();
+        assert!(!port_is_listed(&typed));
+        let failure = probe_local_port(&typed, SerialParams::default()).expect_err("no such port");
+        assert_eq!(failure.code, TestCode::SerialPortNotFound, "{}", failure.detail);
+    }
+
+    #[test]
+    fn a_missing_local_port_is_reported_as_not_found() {
+        assert!(!port_is_listed(MISSING_PORT), "{MISSING_PORT} unexpectedly exists on this machine");
+        let failure = probe_local_port(MISSING_PORT, SerialParams::default()).expect_err("no such port");
+        assert_eq!(failure.code, TestCode::SerialPortNotFound, "{}", failure.detail);
+        assert!(!failure.detail.is_empty());
+    }
+
+    #[test]
+    fn settings_the_driver_cannot_express_are_rejected_before_opening() {
+        let params = SerialParams { data_bits: 9, ..SerialParams::default() };
+        let failure = probe_local_port(MISSING_PORT, params).expect_err("9 data bits");
+        // Not "not found": the port was never touched.
+        assert_eq!(failure.code, TestCode::SerialParamsRejected, "{}", failure.detail);
+    }
+
+    #[tokio::test]
+    async fn the_local_command_reports_a_missing_port_instead_of_failing() {
+        let started = Instant::now();
+        let report = serial_test_connection(
+            MISSING_PORT.to_string(),
+            9600,
+            8,
+            1,
+            "none".to_string(),
+            "none".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("an expected outcome is never Err");
+        assert_eq!(report.code, TestCode::SerialPortNotFound);
+        assert_eq!(report.status, TestStatus::Failure);
+        assert!(report.detail.is_some());
+        assert!(started.elapsed() <= LOCAL_OPEN_TIMEOUT, "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn malformed_requests_are_errors() {
+        let bad_parity = serial_test_connection(
+            MISSING_PORT.to_string(), 9600, 8, 1, "bogus".to_string(), "none".to_string(), None, None, None,
+        )
+        .await;
+        assert!(bad_parity.is_err(), "{bad_parity:?}");
+
+        let bad_bits = serial_test_connection(
+            MISSING_PORT.to_string(), 9600, 9, 1, "none".to_string(), "none".to_string(), None, None, None,
+        )
+        .await;
+        assert!(bad_bits.is_err(), "{bad_bits:?}");
+
+        let bad_transport = test_network("carrier-pigeon", "127.0.0.1", 2217).await;
+        assert!(bad_transport.is_err(), "{bad_transport:?}");
+
+        let no_host = test_network("rfc2217", "   ", 2217).await;
+        assert!(no_host.expect_err("blank host").contains("host"));
+
+        let no_port = test_network("raw-tcp", "127.0.0.1", 0).await;
+        assert!(no_port.expect_err("port 0").contains("port"));
+
+        let missing_host = serial_test_connection(
+            "x".to_string(), 9600, 8, 1, "none".to_string(), "none".to_string(),
+            Some("raw-tcp".to_string()), None, Some(4001),
+        )
+        .await;
+        assert!(missing_host.is_err(), "{missing_host:?}");
+    }
+
+    #[tokio::test]
+    async fn raw_tcp_connects_and_hangs_up_without_sending_a_byte() {
+        let (port, server) = spawn_recorder(|_| Vec::new());
+        // Padded like a hand-typed host: trimmed exactly as a session would.
+        let report = test_network("raw-tcp", " 127.0.0.1 ", port).await.expect("report");
+        assert_eq!(report.code, TestCode::Ok);
+        assert_eq!(report.status, TestStatus::Success);
+        assert!(report.server_params.is_none());
+
+        let received = server.join().expect("server thread");
+        assert!(received.is_empty(), "a raw TCP test must not reach the device: {received:?}");
+    }
+
+    #[tokio::test]
+    async fn raw_tcp_to_a_closed_port_is_refused() {
+        let report = test_network("raw-tcp", "127.0.0.1", closed_port()).await.expect("report");
+        assert_eq!(report.code, TestCode::Refused);
+    }
+
+    #[tokio::test]
+    async fn rfc2217_to_a_closed_port_is_refused() {
+        let report = test_network("rfc2217", "127.0.0.1", closed_port()).await.expect("report");
+        assert_eq!(report.code, TestCode::Refused);
+    }
+
+    #[tokio::test]
+    async fn rfc2217_reports_the_servers_settings_without_changing_them() {
+        let (port, server) = spawn_recorder(|chunk| {
+            let mut reply = Vec::new();
+            if contains(chunk, &[IAC, WILL, TELNET_BINARY]) {
+                reply.extend_from_slice(&[IAC, DO, TELNET_BINARY]);
+            }
+            if contains(chunk, &[IAC, WILL, COM_PORT_OPTION]) {
+                reply.extend_from_slice(&[IAC, DO, COM_PORT_OPTION]);
+            }
+            if contains(chunk, &[IAC, SB, COM_PORT_OPTION, SET_BAUDRATE]) {
+                reply.extend(subnegotiation(SIGNATURE + 100, b"mock-2217"));
+                reply.extend(subnegotiation(SET_BAUDRATE + 100, &9600u32.to_be_bytes()));
+                reply.extend(subnegotiation(SET_DATASIZE + 100, &[7]));
+                reply.extend(subnegotiation(SET_PARITY + 100, &[3]));
+                reply.extend(subnegotiation(SET_STOPSIZE + 100, &[2]));
+                reply.extend(subnegotiation(SET_CONTROL + 100, &[3]));
+            }
+            reply
+        });
+
+        let started = Instant::now();
+        let report = test_network("rfc2217", "127.0.0.1", port).await.expect("report");
+        assert_eq!(report.code, TestCode::Ok, "{:?}", report.detail);
+        assert_eq!(report.status, TestStatus::Success);
+        assert_eq!(report.signature.as_deref(), Some("mock-2217"));
+        let params = report.server_params.expect("server params");
+        assert_eq!(params.baud_rate, Some(9600));
+        assert_eq!(params.data_bits, Some(7));
+        assert_eq!(params.parity, Some(SerialParity::Even));
+        assert_eq!(params.stop_bits, Some(2));
+        assert_eq!(params.flow_control, Some(SerialFlowControl::Hardware));
+        // Everything confirmed, so it does not sit out the whole budget.
+        assert!(started.elapsed() < NEGOTIATION_TIMEOUT, "took {:?}", started.elapsed());
+
+        let received = server.join().expect("server thread");
+        // Queries only: nothing the form asked for (115200 8N1) is pushed, and
+        // the control lines are left alone.
+        assert!(contains(&received, &subnegotiation(SET_BAUDRATE, &0u32.to_be_bytes())));
+        assert!(!contains(&received, &subnegotiation(SET_BAUDRATE, &115200u32.to_be_bytes())));
+        assert!(!contains(&received, &crate::rfc2217::ComPortState::dtr_frame(true)));
+        assert!(!contains(&received, &crate::rfc2217::ComPortState::rts_frame(true)));
+    }
+
+    #[tokio::test]
+    async fn rfc2217_against_a_raw_port_is_a_warning_within_the_budget() {
+        // Accepts, never answers: a device server's raw TCP port.
+        let (port, _server) = spawn_recorder(|_| Vec::new());
+        let started = Instant::now();
+        let report = test_network("rfc2217", "127.0.0.1", port).await.expect("report");
+        assert_eq!(report.code, TestCode::Rfc2217Refused);
+        assert_eq!(report.status, TestStatus::Warning);
+        assert_eq!(report.detail.as_deref(), Some("Server did not accept COM-PORT-OPTION"));
+        assert!(started.elapsed() < NEGOTIATION_TIMEOUT + Duration::from_secs(2), "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn rfc2217_to_a_server_that_hangs_up_is_peer_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            // Accept and drop straight away, like a single-client server that
+            // is already taken.
+            let _ = listener.accept();
+        });
+        let report = test_network("rfc2217", "127.0.0.1", port).await.expect("report");
+        server.join().expect("server thread");
+        assert_eq!(report.code, TestCode::PeerClosed, "{:?}", report.detail);
+        assert_eq!(report.status, TestStatus::Failure);
     }
 }

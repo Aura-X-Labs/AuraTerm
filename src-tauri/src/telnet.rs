@@ -213,6 +213,31 @@ pub async fn write_telnet_input(
     state.write_bytes(&id, data.as_bytes()).await
 }
 
+/// Check that `host:port` accepts a TCP connection, for the New Session
+/// dialog's "Test" button.
+///
+/// Telnet has no login step of its own to test, so reachability is all there
+/// is. The socket is shut down straight away without writing a byte: no IAC
+/// negotiation, no banner read, nothing registered in `TelnetState`.
+#[tauri::command]
+pub async fn telnet_test_connection(
+    host: String,
+    port: u16,
+) -> Result<crate::connection_test::ConnectionTestReport, String> {
+    use crate::connection_test::{tcp_connect, ConnectionTestReport, TestCode, TCP_CONNECT_TIMEOUT};
+
+    let started = std::time::Instant::now();
+    let endpoint = format!("{host}:{port}");
+    // Same address form as `start_telnet_session`.
+    Ok(match tcp_connect((host.as_str(), port), &endpoint, TCP_CONNECT_TIMEOUT).await {
+        Ok(mut stream) => {
+            let _ = stream.shutdown().await;
+            ConnectionTestReport::new(TestCode::Ok, started)
+        }
+        Err(failure) => ConnectionTestReport::from_failure(failure, started),
+    })
+}
+
 #[tauri::command]
 pub async fn close_telnet_session(
     state: State<'_, TelnetState>,
@@ -226,4 +251,61 @@ pub async fn close_telnet_session(
     }
     zmodem.reset_session(&id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::telnet_test_connection;
+    use crate::connection_test::{TestCode, TestStatus};
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn a_listening_port_passes_without_a_single_byte_sent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut received = Vec::new();
+            // Ends at the client's FIN; bounded in case it never comes.
+            let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut received)).await;
+            (read.is_ok(), received)
+        });
+
+        let report = telnet_test_connection("127.0.0.1".to_string(), port)
+            .await
+            .expect("an expected outcome is never Err");
+        assert_eq!(report.code, TestCode::Ok);
+        assert_eq!(report.status, TestStatus::Success);
+        assert!(report.detail.is_none());
+
+        let (closed, received) = server.await.expect("server task");
+        assert!(closed, "the test must hang up, not leave the socket open");
+        // No IAC negotiation, no keystrokes: nothing reaches the device.
+        assert!(received.is_empty(), "client sent {received:?}");
+    }
+
+    #[tokio::test]
+    async fn a_closed_port_is_reported_as_refused() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let started = Instant::now();
+        let report = telnet_test_connection("127.0.0.1".to_string(), port)
+            .await
+            .expect("an expected outcome is never Err");
+        assert_eq!(report.code, TestCode::Refused);
+        assert_eq!(report.status, TestStatus::Failure);
+        assert!(report.detail.as_deref().unwrap_or("").contains(&format!("127.0.0.1:{port}")));
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_host_is_a_resolve_failure_not_an_error() {
+        let report = telnet_test_connection("auraterm-test.invalid".to_string(), 23)
+            .await
+            .expect("an expected outcome is never Err");
+        assert_eq!(report.code, TestCode::ResolveFailed);
+    }
 }
