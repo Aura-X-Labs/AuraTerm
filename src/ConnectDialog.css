@@ -287,6 +287,53 @@
   cursor: not-allowed;
 }
 
+/* ── Connection test ─────────────────────────────────────────────── */
+/* Pinned to the left edge, away from Cancel / Connect. */
+.dialog-actions .btn-test {
+  margin-right: auto;
+  background: transparent;
+  color: var(--app-text-secondary);
+  border: 1px solid var(--app-border) !important;
+}
+
+.btn-test:hover:not(:disabled) {
+  background: var(--app-hover);
+}
+
+.btn-test:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-test[aria-busy="true"] {
+  cursor: progress;
+}
+
+.connect-test-result {
+  margin-top: 12px;
+}
+
+/* The live region stays mounted so announcements are reliable; hide it while
+   there is nothing to say. */
+.connect-test-result:empty {
+  display: none;
+}
+
+.connect-test-title {
+  font-weight: 600;
+  margin-top: 0;
+}
+
+/* Fingerprints and raw error strings have no natural break points. */
+.connect-test-line {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.form-hint.success {
+  color: var(--app-success);
+}
+
 /* ── Save connection options ─────────────────────────────────────── */
 .save-connection-group {
   border-top: 1px solid var(--app-border);

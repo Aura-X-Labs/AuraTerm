@@ -51,6 +51,7 @@ mod types;
 mod known_hosts;
 mod transfer;
 mod forwarding;
+mod probe;
 
 // Types consumed externally (`main.rs`, frontend payloads) are re-exported at
 // the module root. A few of them (`SshHostKeyMismatchPromptPayload`,
@@ -77,6 +78,9 @@ pub use transfer::*;
 // Port-forwarding / tunnel manager commands + `ForwardingState` (managed in
 // `main.rs`). Glob re-export so `generate_handler!` resolves `ssh::__cmd__*`.
 pub use forwarding::*;
+// The New Session dialog's connection test. Glob re-export for the same
+// `generate_handler!` reason as above.
+pub use probe::*;
 
 #[tauri::command]
 pub fn ssh_generate_key_pair(
@@ -839,27 +843,15 @@ fn authenticate_connected_session(
     Box::pin(async move {
     let password = password.filter(|value| !value.is_empty());
     let private_key = private_key.filter(|value| !value.trim().is_empty());
-    let method = auth_type.unwrap_or_else(|| {
-        if private_key.is_some() { "key".to_string() }
-        else if password.is_some() { "password".to_string() }
-        else { "none".to_string() }
-    });
+    let method = effective_auth_method(auth_type, &password, &private_key);
 
     let interactive = match method.as_str() {
         "key" => {
             let key = private_key.ok_or_else(|| "Private key is required".to_string())?;
-            let decoded = decode_secret_key(&key, passphrase.as_deref().filter(|value| !value.is_empty()))
-                .map_err(|error| format!("Private key parse error: {error}"))?;
-            let rsa_hash = session.best_supported_rsa_hash().await
-                .map_err(|error| format!("Failed to determine RSA hash algorithm: {error}"))?
-                .flatten();
-            match session.authenticate_publickey(
-                user.clone(),
-                PrivateKeyWithHashAlg::new(Arc::new(decoded), rsa_hash),
-            ).await {
-                Ok(client::AuthResult::Success) => None,
-                Ok(client::AuthResult::Failure { .. }) => return Err("Private key authentication failed".to_string()),
-                Err(error) => return Err(format!("Private key auth error: {error}")),
+            let decoded = decode_private_key(&key, passphrase.as_deref())?;
+            match authenticate_with_decoded_key(&mut session, user.clone(), Arc::new(decoded)).await? {
+                client::AuthResult::Success => None,
+                client::AuthResult::Failure { .. } => return Err("Private key authentication failed".to_string()),
             }
         }
         "agent" => {
@@ -886,22 +878,83 @@ fn authenticate_connected_session(
     })
 }
 
-fn authenticate_with_agent(
-    mut session: client::Handle<known_hosts::ClientHandler>,
+/// The auth method to use when the caller did not name one: a key beats a
+/// password beats keyboard-interactive. Expects blank values already dropped.
+///
+/// Shared with the connection test so both paths pick the same method.
+fn effective_auth_method(
+    auth_type: Option<String>,
+    password: &Option<String>,
+    private_key: &Option<String>,
+) -> String {
+    auth_type.unwrap_or_else(|| {
+        if private_key.is_some() { "key".to_string() }
+        else if password.is_some() { "password".to_string() }
+        else { "none".to_string() }
+    })
+}
+
+/// Decode an OpenSSH/PEM private key. An empty passphrase means none.
+fn decode_private_key(key: &str, passphrase: Option<&str>) -> Result<russh::keys::PrivateKey, String> {
+    decode_secret_key(key, passphrase.filter(|value| !value.is_empty()))
+        .map_err(|error| format!("Private key parse error: {error}"))
+}
+
+/// Offer one already-decoded key. The server's verdict comes back as-is so the
+/// caller decides what a rejection means.
+async fn authenticate_with_decoded_key(
+    session: &mut client::Handle<known_hosts::ClientHandler>,
     user: String,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, String>> + Send>> {
-    Box::pin(async move {
-    let stream = connect_local_agent_stream().await?;
-    let mut agent = AgentClient::connect(stream);
-    let identities = agent.request_identities().await
-        .map_err(|error| format!("Failed to list SSH agent identities: {error}"))?;
-    if identities.is_empty() {
-        return Err("SSH agent has no identities".to_string());
-    }
+    key: Arc<russh::keys::PrivateKey>,
+) -> Result<client::AuthResult, String> {
     let rsa_hash = session.best_supported_rsa_hash().await
         .map_err(|error| format!("Failed to determine RSA hash algorithm: {error}"))?
         .flatten();
+    session
+        .authenticate_publickey(user, PrivateKeyWithHashAlg::new(key, rsa_hash))
+        .await
+        .map_err(|error| format!("Private key auth error: {error}"))
+}
 
+/// Why agent authentication never got a verdict from the server.
+enum AgentAuthError {
+    /// No agent to talk to, or one with no keys in it.
+    Unavailable(String),
+    /// The agent or the server broke off mid-way.
+    Failed(String),
+}
+
+impl AgentAuthError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Unavailable(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
+/// Offer every agent identity in turn until one is accepted.
+///
+/// Returns the server's verdict: `Success` on the first accepted key, or the
+/// last `Failure` once every identity was refused (with `partial_success` set
+/// if any of them got that far).
+fn try_agent_identities<'a>(
+    session: &'a mut client::Handle<known_hosts::ClientHandler>,
+    user: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::AuthResult, AgentAuthError>> + Send + 'a>> {
+    Box::pin(async move {
+    let stream = connect_local_agent_stream().await.map_err(AgentAuthError::Unavailable)?;
+    let mut agent = AgentClient::connect(stream);
+    let identities = agent.request_identities().await
+        .map_err(|error| AgentAuthError::Unavailable(format!("Failed to list SSH agent identities: {error}")))?;
+    if identities.is_empty() {
+        return Err(AgentAuthError::Unavailable("SSH agent has no identities".to_string()));
+    }
+    let rsa_hash = session.best_supported_rsa_hash().await
+        .map_err(|error| AgentAuthError::Failed(format!("Failed to determine RSA hash algorithm: {error}")))?
+        .flatten();
+
+    let mut remaining = russh::MethodSet::empty();
+    let mut partial = false;
     for identity in identities {
         let key = match identity {
             AgentIdentity::PublicKey { key, .. } => key,
@@ -914,14 +967,32 @@ fn authenticate_with_agent(
         // inside this boxed `Send` future trips a rustc higher-ranked-lifetime
         // limitation, so we box the call to erase the opaque type first.
         let auth: std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::AuthResult, russh::AgentAuthError>> + Send>> =
-            Box::pin(session.authenticate_publickey_with(user.clone(), key, rsa_hash, &mut agent));
+            Box::pin(session.authenticate_publickey_with(user.to_string(), key, rsa_hash, &mut agent));
         match auth.await {
-            Ok(client::AuthResult::Success) => return Ok(session),
-            Ok(client::AuthResult::Failure { .. }) => continue,
-            Err(error) => return Err(format!("SSH agent signing failed: {error}")),
+            Ok(client::AuthResult::Success) => return Ok(client::AuthResult::Success),
+            Ok(client::AuthResult::Failure { remaining_methods, partial_success }) => {
+                remaining = remaining_methods;
+                partial |= partial_success;
+            }
+            Err(error) => return Err(AgentAuthError::Failed(format!("SSH agent signing failed: {error}"))),
         }
     }
-    Err("SSH agent authentication failed for every identity".to_string())
+    Ok(client::AuthResult::Failure { remaining_methods: remaining, partial_success: partial })
+    })
+}
+
+fn authenticate_with_agent(
+    mut session: client::Handle<known_hosts::ClientHandler>,
+    user: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, String>> + Send>> {
+    Box::pin(async move {
+    match try_agent_identities(&mut session, &user).await {
+        Ok(client::AuthResult::Success) => Ok(session),
+        Ok(client::AuthResult::Failure { .. }) => {
+            Err("SSH agent authentication failed for every identity".to_string())
+        }
+        Err(error) => Err(error.into_message()),
+    }
     })
 }
 
@@ -2266,6 +2337,49 @@ mod tests {
         assert!(generated.public_key.ends_with(" alice@example"));
         assert!(russh::keys::decode_secret_key(&generated.private_key, Some("key-passphrase")).is_ok());
         assert!(russh::keys::decode_secret_key(&generated.private_key, Some("wrong")).is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // Helpers shared by the real auth path and the connection test
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn an_unnamed_auth_method_prefers_a_key_then_a_password_then_keyboard_interactive() {
+        use super::effective_auth_method;
+        let key = Some("-----BEGIN OPENSSH PRIVATE KEY-----".to_string());
+        let password = Some("hunter2".to_string());
+
+        assert_eq!(effective_auth_method(None, &password, &key), "key");
+        assert_eq!(effective_auth_method(None, &password, &None), "password");
+        assert_eq!(effective_auth_method(None, &None, &key), "key");
+        assert_eq!(effective_auth_method(None, &None, &None), "none");
+        // A named method always wins, even one the secrets do not fit.
+        assert_eq!(effective_auth_method(Some("agent".to_string()), &password, &key), "agent");
+        assert_eq!(effective_auth_method(Some("password".to_string()), &None, &key), "password");
+        // Passed through unvalidated: the caller rejects unknown names.
+        assert_eq!(effective_auth_method(Some("bogus".to_string()), &None, &None), "bogus");
+    }
+
+    #[test]
+    fn decoding_a_private_key_treats_an_empty_passphrase_as_none() {
+        use super::decode_private_key;
+        let plain = ssh_generate_key_pair(None, None).expect("unencrypted key");
+        assert!(decode_private_key(&plain.private_key, None).is_ok());
+        // The dialog sends "" for an untouched passphrase field.
+        assert!(decode_private_key(&plain.private_key, Some("")).is_ok());
+
+        let locked = ssh_generate_key_pair(Some("pw".to_string()), None).expect("encrypted key");
+        assert!(decode_private_key(&locked.private_key, Some("pw")).is_ok());
+        for passphrase in [None, Some(""), Some("s3cr3t-guess")] {
+            let error = decode_private_key(&locked.private_key, passphrase)
+                .expect_err("an encrypted key needs its passphrase");
+            assert!(error.starts_with("Private key parse error: "), "{error}");
+            // The message never echoes the secret back.
+            assert!(!error.contains("s3cr3t-guess"), "{error}");
+        }
+
+        let garbage = decode_private_key("not a key", None).expect_err("garbage");
+        assert!(garbage.starts_with("Private key parse error: "), "{garbage}");
     }
 
 }

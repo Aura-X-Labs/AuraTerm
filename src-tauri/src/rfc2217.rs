@@ -121,6 +121,8 @@ pub struct ComPortState {
     effective: SerialParams,
     confirmed: SerialParamsConfirmed,
     adopt_server_params: bool,
+    /// Connection test: ask for the server's settings and nothing else.
+    query_only: bool,
     negotiated: bool,
     refused: bool,
     modem: ModemLines,
@@ -137,6 +139,7 @@ impl ComPortState {
             effective: requested,
             confirmed: SerialParamsConfirmed::default(),
             adopt_server_params,
+            query_only: false,
             negotiated: false,
             refused: false,
             modem: ModemLines::default(),
@@ -144,6 +147,16 @@ impl ComPortState {
             line_errors: LineErrors::default(),
             signature: None,
             dirty: false,
+        }
+    }
+
+    /// State for the connection test: adopt-mode value-0 queries only. No
+    /// notification subscriptions and no PURGE_DATA, so probing a shared
+    /// console server leaves its buffers and settings exactly as they were.
+    pub fn query_only(requested: SerialParams) -> Self {
+        Self {
+            query_only: true,
+            ..Self::new(requested, true)
         }
     }
 
@@ -259,6 +272,10 @@ impl ComPortState {
             if self.requested.flow_control != SerialFlowControl::Hardware {
                 out.extend_from_slice(&subnegotiation(SET_CONTROL, &[CONTROL_RTS_ON]));
             }
+        }
+
+        if self.query_only {
+            return out;
         }
 
         // Subscribe to the bits a person can act on. Some firmware pushes
@@ -575,6 +592,21 @@ mod tests {
             &block,
             &subnegotiation(SET_BAUDRATE, &115200u32.to_be_bytes()),
         ));
+    }
+
+    #[test]
+    fn query_only_mode_sends_nothing_but_queries() {
+        let block = ComPortState::query_only(params()).on_do();
+        assert!(windows_contains(&block, &subnegotiation(SET_BAUDRATE, &[0, 0, 0, 0])));
+        for forbidden in [
+            subnegotiation(SET_CONTROL, &[CONTROL_DTR_ON]),
+            subnegotiation(SET_CONTROL, &[CONTROL_RTS_ON]),
+            subnegotiation(SET_LINESTATE_MASK, &[LINESTATE_SUBSCRIPTION]),
+            subnegotiation(SET_MODEMSTATE_MASK, &[MODEMSTATE_SUBSCRIPTION]),
+            subnegotiation(PURGE_DATA, &[PURGE_BOTH]),
+        ] {
+            assert!(!windows_contains(&block, &forbidden));
+        }
     }
 
     #[test]
