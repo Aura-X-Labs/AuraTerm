@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_INPUT_BAR_HEIGHT,
   DEFAULT_SETTINGS,
   TERMINAL_THEME_PRESETS,
   deriveUiTheme,
   getTerminalThemeAppearance,
+  normalizeAppSettings,
   resolveUiThemeAppearance,
   type TerminalTheme,
 } from "../settings";
@@ -47,6 +49,26 @@ const REQUIRED_VARIABLES = [
 function isColorValue(value: string) {
   return /^(rgb|rgba|#|linear-gradient|radial-gradient)/.test(value);
 }
+
+describe("inputBarHeight", () => {
+  it("defaults to three rows", () => {
+    expect(DEFAULT_SETTINGS.inputBarHeight).toBe(DEFAULT_INPUT_BAR_HEIGHT);
+    expect(DEFAULT_INPUT_BAR_HEIGHT).toBe(3 * 13 * 1.5);
+  });
+
+  it("keeps a remembered height, including a collapsed bar", () => {
+    expect(normalizeAppSettings({ inputBarHeight: 120 }).inputBarHeight).toBe(120);
+    expect(normalizeAppSettings({ inputBarHeight: 0 }).inputBarHeight).toBe(0);
+  });
+
+  it("falls back to the default for missing or unusable values", () => {
+    expect(normalizeAppSettings({}).inputBarHeight).toBe(DEFAULT_INPUT_BAR_HEIGHT);
+    // The backend stores `None` until the first save, which arrives as null.
+    expect(normalizeAppSettings({ inputBarHeight: null as unknown as number }).inputBarHeight).toBe(DEFAULT_INPUT_BAR_HEIGHT);
+    expect(normalizeAppSettings({ inputBarHeight: -5 }).inputBarHeight).toBe(DEFAULT_INPUT_BAR_HEIGHT);
+    expect(normalizeAppSettings({ inputBarHeight: Number.NaN }).inputBarHeight).toBe(DEFAULT_INPUT_BAR_HEIGHT);
+  });
+});
 
 describe("getTerminalThemeAppearance", () => {
   it("classifies a bright background as light", () => {

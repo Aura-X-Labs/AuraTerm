@@ -309,6 +309,10 @@ pub struct Settings {
     /// Whether to show the input bar below the terminal
     #[serde(default = "default_true")]
     pub show_input_bar: bool,
+    /// Input bar text box height in px (0 = collapsed). `None` lets the
+    /// frontend fall back to its default of three rows.
+    #[serde(default)]
+    pub input_bar_height: Option<f64>,
     /// Quick-action buttons shown below the terminal
     #[serde(default)]
     pub quick_buttons: Vec<QuickButton>,
@@ -397,6 +401,7 @@ impl Default for Settings {
             ctrl_v_paste: true,
             middle_click_paste: true,
             show_input_bar: true,
+            input_bar_height: None,
             quick_buttons: vec![],
             output_rules: vec![],
             auto_open_sftp: false,
@@ -537,6 +542,22 @@ mod tests {
         .expect("settings should deserialize from frontend camelCase shape");
 
         assert_eq!(settings.input_history, vec!["ls", "pwd"]);
+    }
+
+    #[test]
+    fn settings_keep_input_bar_height_including_collapsed() {
+        let mut payload = serde_json::to_value(Settings::default())
+            .expect("default settings should serialize to JSON");
+        assert_eq!(payload["inputBarHeight"], json!(null));
+
+        payload["inputBarHeight"] = json!(0.0);
+        let settings: Settings = serde_json::from_value(payload)
+            .expect("settings should deserialize a collapsed input bar");
+        assert_eq!(settings.input_bar_height, Some(0.0));
+
+        let reserialized = serde_json::to_value(settings)
+            .expect("settings should serialize back to JSON");
+        assert_eq!(reserialized["inputBarHeight"], json!(0.0));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { QuickButton } from "./settings";
+import { DEFAULT_INPUT_BAR_HEIGHT, type QuickButton } from "./settings";
 import { buildSnippetPayload, snippetApplies, snippetVariables } from "./snippets";
 import { t } from "./i18n";
 import { promptText } from "./promptDialog";
@@ -16,22 +16,25 @@ const props = defineProps<{
   aiAvailable?: boolean;
   /** Environment hints for the command-generation prompt. */
   aiEnv?: { os?: string; shell?: string };
+  /** Text box height to open at (px, 0 = collapsed); defaults to three rows. */
+  height?: number;
 }>();
 
 const emit = defineEmits<{
   send: [text: string, raw?: boolean];
   buttonsChange: [buttons: QuickButton[]];
   resize: [];
+  /** The user dragged or double-clicked the handle to a new height. */
+  heightChange: [height: number];
 }>();
 
 const SNAP_COLLAPSE_PX = 28;
-const DEFAULT_TEXTAREA_H = 90;
 
 const text = ref("");
 const showEditor = ref(false);
 const editButtons = ref<QuickButton[]>([]);
 const selectedButtonId = ref<string | null>(null);
-const textareaH = ref(DEFAULT_TEXTAREA_H);
+const textareaH = ref(props.height ?? DEFAULT_INPUT_BAR_HEIGHT);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const selectedToolbar = ref("Default");
 let dragStartY = 0;
@@ -113,6 +116,9 @@ function handleResizeMouseDown(event: MouseEvent) {
     document.removeEventListener("mousemove", handleMove);
     document.removeEventListener("mouseup", handleUp);
     emit("resize");
+    if (textareaH.value !== dragStartH) {
+      emit("heightChange", textareaH.value);
+    }
   };
 
   document.addEventListener("mousemove", handleMove);
@@ -120,8 +126,9 @@ function handleResizeMouseDown(event: MouseEvent) {
 }
 
 function handleResizeDblClick() {
-  textareaH.value = textareaH.value === 0 ? DEFAULT_TEXTAREA_H : 0;
+  textareaH.value = textareaH.value === 0 ? DEFAULT_INPUT_BAR_HEIGHT : 0;
   emit("resize");
+  emit("heightChange", textareaH.value);
 }
 
 const availableToolbars = computed(() => {

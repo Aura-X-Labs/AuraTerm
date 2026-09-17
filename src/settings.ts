@@ -208,6 +208,11 @@ export interface WindowBounds {
   height: number;
 }
 
+/** One text row in the input bar: 13px font × 1.5 line-height (styles/input-bar.css). */
+export const INPUT_BAR_ROW_HEIGHT = 19.5;
+/** The input bar opens three rows tall until the user resizes it. */
+export const DEFAULT_INPUT_BAR_HEIGHT = 3 * INPUT_BAR_ROW_HEIGHT;
+
 export interface AppSettings {
   /** Interface language; "system" follows the OS/browser language. */
   language: AppLanguage;
@@ -235,6 +240,8 @@ export interface AppSettings {
   middleClickPaste: boolean;
   /** Whether to show the input bar */
   showInputBar: boolean;
+  /** Input bar text box height in px, remembered across launches; 0 means collapsed */
+  inputBarHeight: number;
   /** Quick buttons below the terminal */
   quickButtons: QuickButton[];
   /** Bookmark groups the user created explicitly. Folders are otherwise derived
@@ -591,6 +598,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ctrlVPaste: true,
   middleClickPaste: true,
   showInputBar: true,
+  inputBarHeight: DEFAULT_INPUT_BAR_HEIGHT,
   quickButtons: [],
   bookmarkGroups: [],
   outputRules: [],
@@ -634,6 +642,12 @@ function normalizeRendererMode(value?: string | null): RendererMode {
   return value === "auto" || value === "webgl" || value === "dom"
     ? value
     : DEFAULT_SETTINGS.rendererMode;
+}
+
+function normalizeInputBarHeight(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : DEFAULT_INPUT_BAR_HEIGHT;
 }
 
 function normalizeAiProvider(value?: string | null): AiProvider {
@@ -683,6 +697,7 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     theme: nextTheme,
     uiThemeMode: normalizeUiThemeMode(value?.uiThemeMode),
     rendererMode: normalizeRendererMode(value?.rendererMode),
+    inputBarHeight: normalizeInputBarHeight(value?.inputBarHeight),
     bookmarkGroups: Array.isArray(value?.bookmarkGroups)
       ? [...new Set(value.bookmarkGroups
         .filter((group): group is string => typeof group === "string")
