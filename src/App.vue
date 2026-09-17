@@ -1954,6 +1954,10 @@ async function handleButtonsChange(buttons: QuickButton[]) {
   settings.value = newSettings;
 }
 
+function handleInputBarHeightChange(height: number) {
+  persistSettingsSilently({ ...settingsRef.value, inputBarHeight: height });
+}
+
 function updateSerialStatus(tabId: string, status: SerialStatus) {
   serialStatuses.value = { ...serialStatuses.value, [tabId]: status };
 }
@@ -3406,9 +3410,11 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
           :session-group="activeSshConfig?.savedConnectionGroup"
           :ai-available="aiAvailable"
           :ai-env="aiEnv"
+          :height="settings.inputBarHeight"
           @send="handleInputSend"
           @buttons-change="handleButtonsChange"
           @resize="fitActiveTerminal"
+          @height-change="handleInputBarHeightChange"
         />
 
         <div ref="statusbarEl" class="terminal-statusbar">

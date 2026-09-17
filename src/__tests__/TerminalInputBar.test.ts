@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import TerminalInputBar from "../TerminalInputBar.vue";
 import { i18n, t } from "../i18n";
-import type { QuickButton } from "../settings";
+import { DEFAULT_INPUT_BAR_HEIGHT, type QuickButton } from "../settings";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("../promptDialog", () => ({ promptText: vi.fn(async () => "") }));
@@ -13,12 +13,50 @@ function button(id: string, group: string | undefined, toolbar = "Default"): Qui
   return { id, label: id, command: id, toolbar, group, hosts: [], sessionGroups: [], sendMode: "line" };
 }
 
-function mountBar(quickButtons: QuickButton[]) {
+function mountBar(quickButtons: QuickButton[], extra: { height?: number } = {}) {
   return mount(TerminalInputBar, {
-    props: { quickButtons, inputHistory: [] },
+    props: { quickButtons, inputHistory: [], ...extra },
     global: { plugins: [i18n] },
   });
 }
+
+describe("TerminalInputBar height", () => {
+  function textareaHeight(wrapper: ReturnType<typeof mountBar>) {
+    return wrapper.find<HTMLTextAreaElement>(".terminal-input-textarea").element.style.height;
+  }
+
+  it("opens three rows tall by default", () => {
+    expect(textareaHeight(mountBar([]))).toBe(`${DEFAULT_INPUT_BAR_HEIGHT}px`);
+  });
+
+  it("opens at the remembered height, and stays collapsed when it was collapsed", () => {
+    expect(textareaHeight(mountBar([], { height: 120 }))).toBe("120px");
+    expect(mountBar([], { height: 0 }).find(".terminal-input-textarea").exists()).toBe(false);
+  });
+
+  it("reports the height after a drag, but not after a click that did not move", async () => {
+    const wrapper = mountBar([], { height: 100 });
+    const handle = wrapper.find(".terminal-input-resize-handle");
+
+    await handle.trigger("mousedown", { clientY: 300 });
+    document.dispatchEvent(new MouseEvent("mouseup"));
+    expect(wrapper.emitted("heightChange")).toBeUndefined();
+
+    await handle.trigger("mousedown", { clientY: 300 });
+    document.dispatchEvent(new MouseEvent("mousemove", { clientY: 250 }));
+    document.dispatchEvent(new MouseEvent("mouseup"));
+    expect(wrapper.emitted("heightChange")).toEqual([[150]]);
+  });
+
+  it("reports collapsing and re-expanding by double-click", async () => {
+    const wrapper = mountBar([], { height: 100 });
+    const handle = wrapper.find(".terminal-input-resize-handle");
+
+    await handle.trigger("dblclick");
+    await handle.trigger("dblclick");
+    expect(wrapper.emitted("heightChange")).toEqual([[0], [DEFAULT_INPUT_BAR_HEIGHT]]);
+  });
+});
 
 function visibleLabels(wrapper: ReturnType<typeof mountBar>) {
   return wrapper.findAll(".quick-btn:not(.quick-btn--edit)").map((node) => node.text());
