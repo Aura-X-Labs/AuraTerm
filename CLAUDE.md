@@ -203,7 +203,7 @@ sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev 
 
 ### Prerequisites
 1. **Rust** (stable toolchain) — install via [rustup](https://rustup.rs/)
-2. **Node.js** v18+ (v20 recommended for CI parity)
+2. **Node.js** v20.19+ or v22.12+ (required by Vite 8); CI builds on v24
 3. **Python 3** — required for `scripts/sync_version.py` and `scripts/sync_site.py`
 4. **Tauri CLI** — installed as a dev dependency via npm (`@tauri-apps/cli`)
 
