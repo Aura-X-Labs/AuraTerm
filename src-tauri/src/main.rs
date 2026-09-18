@@ -45,6 +45,7 @@ mod serial_link;
 mod serial_params;
 mod settings;
 mod ssh;
+mod sync_merge;
 mod telnet;
 mod terminal_event_hub;
 mod shared_session;
