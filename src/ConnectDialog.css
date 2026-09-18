@@ -147,35 +147,6 @@
   border-color: var(--app-border-accent);
 }
 
-.private-key-file-input {
-  display: none;
-}
-
-.private-key-picker-row {
-  display: flex;
-  gap: 8px;
-}
-
-.private-key-display {
-  flex: 1;
-}
-
-.private-key-picker-btn,
-.private-key-clear-btn {
-  border: 1px solid var(--app-border);
-  border-radius: 4px;
-  background: var(--app-input-bg);
-  color: var(--app-text-secondary);
-  cursor: pointer;
-  padding: 0 12px;
-  flex-shrink: 0;
-}
-
-.private-key-picker-btn:hover,
-.private-key-clear-btn:hover {
-  background: var(--app-hover);
-}
-
 .serial-refresh-btn {
   width: 40px;
   flex-shrink: 0;
@@ -226,6 +197,11 @@
 }
 
 .generated-public-key { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 8px; align-items: stretch; }
+.generated-public-key button { border: 1px solid var(--app-border); border-radius: 4px; background: var(--app-input-bg); color: var(--app-text-secondary); cursor: pointer; padding: 0 12px; }
+.generated-public-key button:hover { background: var(--app-hover); }
+
+/* The jump host card spaces its fields itself. */
+.jump-key-picker { margin-bottom: 6px; }
 
 
 .ssh-advanced {
@@ -242,8 +218,7 @@
 .ssh-advanced-card { padding: 10px; margin-bottom: 8px; border: 1px solid var(--app-border); border-radius: 5px; background: var(--app-surface-0); }
 .ssh-card-grid { display: grid; grid-template-columns: 2fr 80px 1.2fr 1.4fr; gap: 8px; margin-bottom: 8px; }
 .ssh-card-grid--automation { grid-template-columns: 1.4fr 1.4fr 70px; }
-.ssh-advanced-card input, .ssh-advanced-card select, .ssh-advanced-card textarea { width: 100%; box-sizing: border-box; padding: 7px; background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 4px; color: var(--app-text); }
-.ssh-advanced-card textarea { margin-bottom: 6px; resize: vertical; }
+.ssh-advanced-card input, .ssh-advanced-card select { width: 100%; box-sizing: border-box; padding: 7px; background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 4px; color: var(--app-text); }
 .ssh-checkbox { display: flex !important; flex-direction: row !important; align-items: center; gap: 7px; margin: 8px 0; color: var(--app-text-secondary); }
 .ssh-remove-btn { margin-top: 7px; color: var(--app-danger); }
 
