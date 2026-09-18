@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import { classifySyncError, syncNowConfirmingDeletes, type SyncResult } from "../cloudSync";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { classifySyncError, describeSyncResult, syncNowConfirmingDeletes, type SyncResult } from "../cloudSync";
+import { setLanguage } from "../i18n";
 
 describe("classifySyncError (mirrors cloud_sync.rs ERR_* texts)", () => {
   it("recognises the states the UI acts on", () => {
@@ -79,6 +80,7 @@ describe("syncNowConfirmingDeletes (manual run vs. the mass-delete guard)", () =
     bookmarksAdded: 0,
     bookmarksUpdated: 0,
     bookmarksRemoved: 0,
+    outcome: "synced",
     conflicts: [],
     deletesHeld,
     knownHostsAdded: 0,
@@ -113,5 +115,69 @@ describe("syncNowConfirmingDeletes (manual run vs. the mass-delete guard)", () =
     const final = await syncNowConfirmingDeletes(async () => false, run);
     expect(run).toHaveBeenCalledTimes(1);
     expect(final.deletesHeld).toEqual(held);
+  });
+});
+
+describe("describeSyncResult (the result in the user's language)", () => {
+  const base: SyncResult = {
+    pushed: false,
+    pulled: false,
+    bookmarksTotal: 28,
+    bookmarksAdded: 0,
+    bookmarksUpdated: 0,
+    bookmarksRemoved: 0,
+    outcome: "upToDate",
+    conflicts: [],
+    deletesHeld: null,
+    knownHostsAdded: 0,
+    credentialsSynced: 0,
+    credentialsSkipped: null,
+    settingsApplied: false,
+    remoteVersion: "7",
+    message: "Already up to date.",
+  };
+  afterEach(() => setLanguage("en"));
+
+  it("says a quiet run in one sentence", () => {
+    setLanguage("en");
+    expect(describeSyncResult(base)).toBe("Already up to date.");
+    setLanguage("zh-CN");
+    expect(describeSyncResult(base)).toBe("已是最新，无需同步。");
+  });
+
+  it("lists what came in and what went out", () => {
+    const result: SyncResult = {
+      ...base, outcome: "synced", pulled: true, pushed: true,
+      bookmarksAdded: 1, bookmarksUpdated: 2, bookmarksRemoved: 1, credentialsSynced: 1, settingsApplied: true,
+    };
+    setLanguage("en");
+    expect(describeSyncResult(result)).toBe(
+      "Two-way sync complete. Pulled: +1 bookmarks, 2 updated, 1 removed, 1 credentials updated, settings updated. Pushed: 28 bookmarks.",
+    );
+    setLanguage("zh-CN");
+    expect(describeSyncResult(result)).toBe(
+      "双向同步完成。拉取：新增 1 个书签，更新 2 个，删除 1 个，更新 1 条凭据，设置已更新。上传：28 个书签。",
+    );
+  });
+
+  it("names conflicts, held deletes and the credentials skip reason", () => {
+    const result: SyncResult = {
+      ...base, outcome: "synced", pushed: true,
+      conflicts: [
+        { kind: "bookmark", name: "prod-db", item: null },
+        { kind: "credentials", name: "prod-db", item: null },
+        { kind: "setting", name: "theme", item: null },
+        { kind: "setting", name: "quickButtons", item: "deploy" },
+      ],
+      deletesHeld: { local: 2, remote: 9 },
+      credentialsSkipped: "masterLocked",
+    };
+    setLanguage("zh-CN");
+    expect(describeSyncResult(result)).toBe(
+      "双向同步完成。上传：28 个书签。"
+      + "4 处冲突，已保留云端版本：书签「prod-db」，「prod-db」的凭据，设置项 theme，设置项 quickButtons 中的「deploy」。"
+      + "11 个书签的删除已暂缓，请在「配置同步」里手动点「立即同步」确认。"
+      + "凭据已跳过：主密码已锁定",
+    );
   });
 });

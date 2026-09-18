@@ -1,7 +1,7 @@
 import type { CloudBridgeShare, CloudBridgeStatus } from "./cloudBridge";
 import type { RelayProviderStatus } from "./liveRelay";
 import type { AssistStatus } from "./assist";
-import type { CredentialsSkipReason, SyncConfigView, SyncErrorKind } from "./cloudSync";
+import { syncResultNotices, type CredentialsSkipReason, type HeldDeletes, type SyncConfigView, type SyncConflict, type SyncErrorKind } from "./cloudSync";
 import { t } from "./i18n";
 
 /**
@@ -62,6 +62,10 @@ export interface SyncRuntime {
   code?: SyncErrorKind | null;
   /** The last successful run skipped the credentials part for this reason. */
   credentialsSkipped?: CredentialsSkipReason | null;
+  /** What the last successful run left for the user: an unattended run has no
+   *  dialog to say it in, so the panel row carries it until the next run. */
+  conflicts?: SyncConflict[];
+  deletesHeld?: HeldDeletes | null;
 }
 
 export const IDLE_SYNC_RUNTIME: SyncRuntime = { phase: "idle", message: "", at: null };
@@ -218,9 +222,14 @@ export function syncStatus(
           : [[view!.lastSyncAt
             ? t("liveSync.syncLastOk", { time: formatSyncTime(view!.lastSyncAt) })
             : t("liveSync.syncNever")], null, "connected"];
-  if (runtime.phase !== "syncing" && runtime.phase !== "error" && runtime.credentialsSkipped) {
-    parts.push(t(`liveSync.credentialsSkipped.${runtime.credentialsSkipped}`));
-    return finish({ feature: "sync", name: "Sync", parts, mode, link, controllers: 0, viewers: 0, pending: 0, stale, kind: "assist" });
+  if (runtime.phase !== "syncing" && runtime.phase !== "error") {
+    // A partial success: the last-result phrase stays, what needs the user follows.
+    const notices = syncResultNotices({ conflicts: runtime.conflicts ?? [], deletesHeld: runtime.deletesHeld ?? null });
+    if (runtime.credentialsSkipped) notices.push(t(`liveSync.credentialsSkipped.${runtime.credentialsSkipped}`));
+    if (notices.length) {
+      parts.push(...notices);
+      return finish({ feature: "sync", name: "Sync", parts, mode, link, controllers: 0, viewers: 0, pending: 0, stale, kind: "assist" });
+    }
   }
   return finish({ feature: "sync", name: "Sync", parts, mode, link, controllers: 0, viewers: 0, pending: 0, stale, kind });
 }
