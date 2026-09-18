@@ -74,7 +74,7 @@ import {
 } from "./liveSyncStatus";
 import { accountState, restoreAccount } from "./account";
 import { useLiveAccountFlow } from "./composables/useLiveAccountFlow";
-import { cloudSyncNow, getSyncConfig, classifySyncError, type SyncConfigView, type SyncResult } from "./cloudSync";
+import { cloudSyncNow, syncNowConfirmingDeletes, getSyncConfig, classifySyncError, type SyncConfigView, type SyncResult } from "./cloudSync";
 import { BOOKMARKS_CHANGED_EVENT, createAutoSync, notifyBookmarksChanged } from "./composables/useAutoSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
@@ -1423,7 +1423,10 @@ async function runSyncNow(auto: boolean) {
   // The panel shows the whole run, not just the toast at the end.
   syncRuntime.value = { phase: "syncing", message: "", at: Date.now() };
   try {
-    const result = await cloudSyncNow();
+    // Only a manual run may carry out deletes the mass-delete guard held back.
+    const result = auto
+      ? await cloudSyncNow()
+      : await syncNowConfirmingDeletes((held) => confirmDialog(t("cloudSync.confirmDeletes", { ...held })));
     recordSyncResult(result);
     if (!auto) showCloudToast(t("cloudShare.syncNowDone", { message: result.message }));
     refreshSyncViewSilently();

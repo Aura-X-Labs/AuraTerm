@@ -433,6 +433,7 @@ const en = {
     push: "Push",
     syncNow: "Sync now",
     settingsSaved: "Sync settings saved.",
+    confirmDeletes: "This sync would delete many bookmarks, so they were held back:\n· {remote} to remove on this device (deleted on another device)\n· {local} to remove from the cloud copy (deleted here)\n\nEverything else is already synced. Carry out these deletes now? Cancel keeps the bookmarks.",
     confirmReplace: "Replace ALL local bookmarks with the cloud copy? This cannot be undone.",
     legacyProviderNotice:
       "GitHub Gist, Gitee Gist and WebDAV sync are no longer supported. Sign in to your AuraXLab account to keep syncing; nothing on this device was changed.",

@@ -53,6 +53,14 @@ export interface SyncSettingsInput {
   deviceLabel: string;
 }
 
+/** Bookmark deletes a sync held back for confirmation (9 or more at once). */
+export interface HeldDeletes {
+  /** Deleted on this device, not yet dropped from the cloud copy. */
+  local: number;
+  /** Gone from the cloud copy, not yet removed on this device. */
+  remote: number;
+}
+
 export interface SyncResult {
   pushed: boolean;
   pulled: boolean;
@@ -60,6 +68,12 @@ export interface SyncResult {
   bookmarksAdded: number;
   /** Existing bookmarks whose content the merge actually changed. */
   bookmarksUpdated: number;
+  /** Bookmarks removed here because the cloud copy dropped them. */
+  bookmarksRemoved: number;
+  /** What both sides changed differently; the cloud copy won each of them. */
+  conflicts: string[];
+  /** Set when deletes were held back; `cloudSyncNow(true)` carries them out. */
+  deletesHeld: HeldDeletes | null;
   knownHostsAdded: number;
   credentialsSynced: number;
   credentialsSkipped: CredentialsSkipReason | null;
@@ -88,8 +102,23 @@ export function cloudSyncPull(replace: boolean): Promise<SyncResult> {
   return invoke<SyncResult>("cloud_sync_pull", { replace });
 }
 
-export function cloudSyncNow(): Promise<SyncResult> {
-  return invoke<SyncResult>("cloud_sync_now");
+export function cloudSyncNow(confirmDeletes = false): Promise<SyncResult> {
+  return invoke<SyncResult>("cloud_sync_now", { confirmDeletes });
+}
+
+/**
+ * A manual two-way sync. When the mass-delete guard held deletes back, ask
+ * (`confirm`) and on a yes run once more to carry them out. Everything else
+ * is already synced by then, so a no just leaves those bookmarks where they
+ * are. Automatic runs never ask: they call `cloudSyncNow()` and stay held.
+ */
+export async function syncNowConfirmingDeletes(
+  confirm: (held: HeldDeletes) => Promise<boolean>,
+  run: (confirmDeletes?: boolean) => Promise<SyncResult> = cloudSyncNow,
+): Promise<SyncResult> {
+  const result = await run();
+  if (!result.deletesHeld || !(await confirm(result.deletesHeld))) return result;
+  return run(true);
 }
 
 export function cloudSyncTestConnection(): Promise<string> {

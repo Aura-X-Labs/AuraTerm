@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { classifySyncError } from "../cloudSync";
+import { describe, expect, it, vi } from "vitest";
+import { classifySyncError, syncNowConfirmingDeletes, type SyncResult } from "../cloudSync";
 
 describe("classifySyncError (mirrors cloud_sync.rs ERR_* texts)", () => {
   it("recognises the states the UI acts on", () => {
@@ -68,5 +68,50 @@ describe("validateRegistration (mirrors AuraXLab server rules)", () => {
     expect(SYNC_MIN_PASSWORD_LENGTH).toBe(8);
     expect(SYNC_EMAIL_RE.source).toBe("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
     expect(SYNC_USERNAME_RE.source).toBe("^[A-Za-z][A-Za-z0-9_.]*$");
+  });
+});
+
+describe("syncNowConfirmingDeletes (manual run vs. the mass-delete guard)", () => {
+  const result = (deletesHeld: SyncResult["deletesHeld"]): SyncResult => ({
+    pushed: true,
+    pulled: true,
+    bookmarksTotal: 12,
+    bookmarksAdded: 0,
+    bookmarksUpdated: 0,
+    bookmarksRemoved: 0,
+    conflicts: [],
+    deletesHeld,
+    knownHostsAdded: 0,
+    credentialsSynced: 0,
+    credentialsSkipped: null,
+    settingsApplied: false,
+    remoteVersion: "3",
+    message: "Two-way sync complete.",
+  });
+
+  it("does not ask when nothing was held back", async () => {
+    const run = vi.fn().mockResolvedValue(result(null));
+    const confirm = vi.fn();
+    await syncNowConfirmingDeletes(confirm, run);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("runs once more with the confirmation after a yes", async () => {
+    const held = { local: 0, remote: 9 };
+    const run = vi.fn().mockResolvedValueOnce(result(held)).mockResolvedValueOnce(result(null));
+    const confirm = vi.fn().mockResolvedValue(true);
+    const final = await syncNowConfirmingDeletes(confirm, run);
+    expect(confirm).toHaveBeenCalledWith(held);
+    expect(run).toHaveBeenNthCalledWith(2, true);
+    expect(final.deletesHeld).toBeNull();
+  });
+
+  it("keeps the held result after a no", async () => {
+    const held = { local: 10, remote: 0 };
+    const run = vi.fn().mockResolvedValue(result(held));
+    const final = await syncNowConfirmingDeletes(async () => false, run);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(final.deletesHeld).toEqual(held);
   });
 });

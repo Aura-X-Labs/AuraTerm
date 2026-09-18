@@ -6,7 +6,7 @@ import {
   acknowledgeLegacyProviderNotice,
   cloudSyncPush,
   cloudSyncPull,
-  cloudSyncNow,
+  syncNowConfirmingDeletes,
   cloudSyncTestConnection,
   cloudSyncMigrateLegacy,
   classifySyncError,
@@ -119,6 +119,7 @@ function describeResult(result: SyncResult): string {
   if (result.pulled) {
     const pulled = [`+${result.bookmarksAdded} bookmarks`];
     if (result.bookmarksUpdated) pulled.push(`${result.bookmarksUpdated} updated`);
+    if (result.bookmarksRemoved) pulled.push(`${result.bookmarksRemoved} removed`);
     if (result.knownHostsAdded) pulled.push(`+${result.knownHostsAdded} known-hosts`);
     if (result.credentialsSynced) pulled.push(`${result.credentialsSynced} creds updated`);
     if (result.settingsApplied) pulled.push("settings updated");
@@ -142,7 +143,8 @@ async function runAction(action: () => Promise<SyncResult>) {
   });
 }
 
-const doSyncNow = () => runAction(cloudSyncNow);
+const doSyncNow = () =>
+  runAction(() => syncNowConfirmingDeletes((held) => confirmDialog(t("cloudSync.confirmDeletes", { ...held }))));
 const doPush = () => runAction(cloudSyncPush);
 
 async function doPull(replace: boolean) {
