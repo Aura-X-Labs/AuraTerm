@@ -1,0 +1,4 @@
+# Rust sources are LF on every platform. A frontend parity test reads
+# connection_test.rs as raw text (src/__tests__/connectionTest.test.ts), so what
+# it sees must not depend on each machine's core.autocrlf.
+*.rs text eol=lf
