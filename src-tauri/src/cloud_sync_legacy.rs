@@ -89,7 +89,7 @@ pub async fn cloud_sync_migrate_legacy(
 
     // Re-upload as rest-v2, based on the legacy vault's version so a
     // concurrent write from another device still conflicts.
-    cloud_sync::push_current_state(&store, &mut config, remote.version, &mut result).await?;
+    cloud_sync::push_current_state(&store, &mut config, remote.version, None, &mut result).await?;
     result.message = if overwrite {
         "Replaced the old cloud copy with this device's data.".to_string()
     } else {

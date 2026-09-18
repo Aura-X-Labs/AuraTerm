@@ -118,6 +118,7 @@ function describeResult(result: SyncResult): string {
   const parts: string[] = [];
   if (result.pulled) {
     const pulled = [`+${result.bookmarksAdded} bookmarks`];
+    if (result.bookmarksUpdated) pulled.push(`${result.bookmarksUpdated} updated`);
     if (result.knownHostsAdded) pulled.push(`+${result.knownHostsAdded} known-hosts`);
     if (result.credentialsSynced) pulled.push(`${result.credentialsSynced} creds updated`);
     if (result.settingsApplied) pulled.push("settings updated");

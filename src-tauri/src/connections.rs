@@ -349,7 +349,7 @@ pub(crate) fn load_connections(app: &AppHandle) -> Result<Vec<SavedConnection>, 
     Ok(connections)
 }
 
-pub(crate) fn write_connections(app: &AppHandle, connections: &Vec<SavedConnection>) -> Result<(), String> {
+pub(crate) fn write_connections(app: &AppHandle, connections: &[SavedConnection]) -> Result<(), String> {
     let path = connections_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
