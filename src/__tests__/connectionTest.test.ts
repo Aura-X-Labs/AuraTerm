@@ -545,10 +545,13 @@ describe("connection test i18n", () => {
 
 describe("CONNECTION_TEST_CODES", () => {
   it("matches the TestCode enum in connection_test.rs (camelCase), plus the frontend-only error", () => {
-    const body = connectionTestRs.match(/pub enum TestCode\s*\{([\s\S]*?)\n\}/);
+    // `\r?\n` on purpose: a Windows checkout (core.autocrlf) reads the source with
+    // CRLF endings, and `.` stops at a `\r` while `$` only matches at the very end,
+    // so a line split on "\n" alone would keep its `// comment` as a bogus variant.
+    const body = connectionTestRs.match(/pub enum TestCode\s*\{([\s\S]*?)\r?\n\}/);
     expect(body, "TestCode enum not found").not.toBeNull();
     const variants = body![1]
-      .split("\n")
+      .split(/\r?\n/)
       .map((line) => line.replace(/\/\/.*$/, "").trim())
       .filter(Boolean)
       .flatMap((line) => line.split(","))
