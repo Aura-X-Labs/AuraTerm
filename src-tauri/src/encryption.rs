@@ -187,7 +187,7 @@ pub struct CredentialStore {
     pub credentials: Vec<StoredCredential>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct StoredCredential {
     pub connection_id: String,
     #[serde(default)]
@@ -204,7 +204,7 @@ pub struct StoredCredential {
     pub post_connect_commands: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct StoredJumpCredential {
     pub id: String,
     #[serde(default)]
