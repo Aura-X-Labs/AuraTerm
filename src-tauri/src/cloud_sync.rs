@@ -370,21 +370,31 @@ fn extract_settings_subset(app: &AppHandle) -> Result<Value, String> {
     Ok(Value::Object(out))
 }
 
-fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<(), String> {
+/// Returns whether any synced key actually changed; identical settings are
+/// not rewritten.
+fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<bool, String> {
     let Value::Object(incoming) = subset else {
-        return Ok(());
+        return Ok(false);
     };
     let current = settings::get_settings(app.clone())?;
     let mut value = serde_json::to_value(current).map_err(|e| e.to_string())?;
+    let mut changed = false;
     if let Value::Object(map) = &mut value {
         for key in SYNCED_SETTINGS_KEYS {
             if let Some(v) = incoming.get(*key) {
-                map.insert((*key).to_string(), v.clone());
+                if map.get(*key) != Some(v) {
+                    map.insert((*key).to_string(), v.clone());
+                    changed = true;
+                }
             }
         }
     }
+    if !changed {
+        return Ok(false);
+    }
     let merged: settings::Settings = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    settings::save_settings(app.clone(), merged)
+    settings::save_settings(app.clone(), merged)?;
+    Ok(true)
 }
 
 /// Seal the local credential store into a tier-2 envelope, or say why not.
@@ -456,8 +466,7 @@ pub(crate) async fn apply_tier1(
 
     if let Some(subset) = settings_subset {
         if config.include_settings {
-            apply_settings_subset(app, subset)?;
-            result.settings_applied = true;
+            result.settings_applied = apply_settings_subset(app, subset)?;
         }
     }
 
@@ -476,14 +485,31 @@ pub(crate) fn merge_plain_credentials(app: &AppHandle, master_state: &MasterPass
     }
     let secret = encryption::resolve_secret(app, master_state)?;
     let mut store = encryption::load_encrypted_credentials(app, &secret).unwrap_or_else(|_| CredentialStore { credentials: Vec::new() });
-    let mut synced = 0usize;
-    for credential in incoming {
-        store.credentials.retain(|c| c.connection_id != credential.connection_id);
-        store.credentials.push(credential);
-        synced += 1;
+    let changed = merge_credentials(&mut store.credentials, incoming);
+    if changed > 0 {
+        encryption::save_encrypted_credentials(app, &store, &secret)?;
     }
-    encryption::save_encrypted_credentials(app, &store, &secret)?;
-    Ok(synced)
+    Ok(changed)
+}
+
+/// Incoming wins by connection id. Returns how many entries were new or
+/// actually different, so a repeat sync of identical data reports zero.
+fn merge_credentials(local: &mut Vec<StoredCredential>, incoming: Vec<StoredCredential>) -> usize {
+    let mut changed = 0usize;
+    for credential in incoming {
+        match local.iter().position(|c| c.connection_id == credential.connection_id) {
+            Some(pos) if local[pos] == credential => {}
+            Some(pos) => {
+                local[pos] = credential;
+                changed += 1;
+            }
+            None => {
+                local.push(credential);
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 /// Open the tier-2 envelope and merge it, or record why it was skipped. A
@@ -1155,6 +1181,26 @@ pub(crate) mod tests {
         let out = merge_bookmarks(local, remote, true);
         assert_eq!(out.items.len(), 1);
         assert_eq!(out.items[0].id, "c");
+    }
+
+    #[test]
+    fn credential_merge_counts_only_new_or_changed_entries() {
+        let cred = |id: &str, password: &str| {
+            let mut credential = StoredCredential::default();
+            credential.connection_id = id.to_string();
+            credential.password = Some(password.to_string());
+            credential
+        };
+        let mut local = vec![cred("a", "one"), cred("b", "two")];
+
+        // Re-syncing identical data is a no-op.
+        assert_eq!(merge_credentials(&mut local, vec![cred("a", "one"), cred("b", "two")]), 0);
+
+        // One changed, one new; the untouched entry is not counted.
+        let changed = merge_credentials(&mut local, vec![cred("a", "one"), cred("b", "TWO"), cred("c", "three")]);
+        assert_eq!(changed, 2);
+        assert_eq!(local.len(), 3);
+        assert_eq!(local[1].password.as_deref(), Some("TWO"));
     }
 
     #[test]

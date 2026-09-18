@@ -117,11 +117,11 @@ async function saveConfig(): Promise<boolean> {
 function describeResult(result: SyncResult): string {
   const parts: string[] = [];
   if (result.pulled) {
-    parts.push(`pulled (+${result.bookmarksAdded} bookmarks`);
-    if (result.knownHostsAdded) parts.push(`+${result.knownHostsAdded} known-hosts`);
-    if (result.credentialsSynced) parts.push(`${result.credentialsSynced} creds`);
-    if (result.settingsApplied) parts.push("settings");
-    parts.push(")");
+    const pulled = [`+${result.bookmarksAdded} bookmarks`];
+    if (result.knownHostsAdded) pulled.push(`+${result.knownHostsAdded} known-hosts`);
+    if (result.credentialsSynced) pulled.push(`${result.credentialsSynced} creds updated`);
+    if (result.settingsApplied) pulled.push("settings updated");
+    parts.push(`pulled (${pulled.join(", ")})`);
   }
   if (result.pushed) parts.push(`pushed (${result.bookmarksTotal} bookmarks)`);
   const summary = `${result.message} ${parts.join(" ")}`.trim();
