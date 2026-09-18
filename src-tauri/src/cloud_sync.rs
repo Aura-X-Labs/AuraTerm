@@ -397,18 +397,102 @@ fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<bool, String
     Ok(true)
 }
 
+// ============================================================================
+// Device-local state
+// ============================================================================
+
+/// The device-local state a sync reads and writes. The app backs it with its
+/// config directory ([`AppStore`]); tests drive the same flow with an
+/// in-memory device, so two "devices" can sync through one mock vault.
+pub(crate) trait SyncStore {
+    fn bookmarks(&self) -> Result<Vec<SavedConnection>, String>;
+    fn write_bookmarks(&self, items: &Vec<SavedConnection>) -> Result<(), String>;
+    fn settings_subset(&self) -> Result<Value, String>;
+    /// Returns whether any synced key actually changed.
+    fn apply_settings_subset(&self, subset: &Value) -> Result<bool, String>;
+    async fn known_hosts(&self) -> Result<HashMap<String, String>, String>;
+    /// Union, local wins. Returns how many entries were new.
+    async fn import_known_hosts(&self, hosts: HashMap<String, String>) -> Result<usize, String>;
+    /// The master password when the credential store can take part in the
+    /// tier-2 envelope, otherwise the [`skip`] code saying why not.
+    fn envelope_key(&self) -> Result<Result<Zeroizing<String>, &'static str>, String>;
+    fn credentials(&self) -> Result<Vec<StoredCredential>, String>;
+    fn write_credentials(&self, items: Vec<StoredCredential>) -> Result<(), String>;
+    fn save_config(&self, config: &SyncConfig) -> Result<(), String>;
+}
+
+/// [`SyncStore`] over the app's config directory.
+pub(crate) struct AppStore<'a> {
+    app: &'a AppHandle,
+    master_state: &'a MasterPasswordState,
+}
+
+impl<'a> AppStore<'a> {
+    pub(crate) fn new(app: &'a AppHandle, master_state: &'a MasterPasswordState) -> Self {
+        Self { app, master_state }
+    }
+}
+
+impl SyncStore for AppStore<'_> {
+    fn bookmarks(&self) -> Result<Vec<SavedConnection>, String> {
+        connections::load_connections(self.app)
+    }
+
+    fn write_bookmarks(&self, items: &Vec<SavedConnection>) -> Result<(), String> {
+        connections::write_connections(self.app, items)
+    }
+
+    fn settings_subset(&self) -> Result<Value, String> {
+        extract_settings_subset(self.app)
+    }
+
+    fn apply_settings_subset(&self, subset: &Value) -> Result<bool, String> {
+        apply_settings_subset(self.app, subset)
+    }
+
+    async fn known_hosts(&self) -> Result<HashMap<String, String>, String> {
+        crate::ssh::export_known_hosts(self.app).await
+    }
+
+    async fn import_known_hosts(&self, hosts: HashMap<String, String>) -> Result<usize, String> {
+        crate::ssh::import_known_hosts(self.app, hosts).await
+    }
+
+    fn envelope_key(&self) -> Result<Result<Zeroizing<String>, &'static str>, String> {
+        if !master_password_mode(self.app) {
+            return Ok(Err(skip::LOCAL_KEY_MODE));
+        }
+        if !self.master_state.is_unlocked() {
+            return Ok(Err(skip::MASTER_LOCKED));
+        }
+        Ok(Ok(self.master_state.get()?))
+    }
+
+    fn credentials(&self) -> Result<Vec<StoredCredential>, String> {
+        let secret = encryption::resolve_secret(self.app, self.master_state)?;
+        let mut store = encryption::load_encrypted_credentials(self.app, &secret)?;
+        // `CredentialStore` is ZeroizeOnDrop, so the list cannot be moved out.
+        Ok(std::mem::take(&mut store.credentials))
+    }
+
+    fn write_credentials(&self, items: Vec<StoredCredential>) -> Result<(), String> {
+        let secret = encryption::resolve_secret(self.app, self.master_state)?;
+        encryption::save_encrypted_credentials(self.app, &CredentialStore { credentials: items }, &secret)
+    }
+
+    fn save_config(&self, config: &SyncConfig) -> Result<(), String> {
+        save_config(self.app, config)
+    }
+}
+
 /// Seal the local credential store into a tier-2 envelope, or say why not.
-fn seal_credentials(app: &AppHandle, master_state: &MasterPasswordState) -> Result<Result<CredentialsEnvelope, &'static str>, String> {
-    if !master_password_mode(app) {
-        return Ok(Err(skip::LOCAL_KEY_MODE));
-    }
-    if !master_state.is_unlocked() {
-        return Ok(Err(skip::MASTER_LOCKED));
-    }
-    let password = master_state.get()?;
-    let secret = encryption::resolve_secret(app, master_state)?;
-    let store = encryption::load_encrypted_credentials(app, &secret)?;
-    let plaintext = Zeroizing::new(serde_json::to_vec(&store.credentials).map_err(|e| e.to_string())?);
+fn seal_credentials(store: &impl SyncStore) -> Result<Result<CredentialsEnvelope, &'static str>, String> {
+    let password = match store.envelope_key()? {
+        Ok(password) => password,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let credentials = store.credentials()?;
+    let plaintext = Zeroizing::new(serde_json::to_vec(&credentials).map_err(|e| e.to_string())?);
     let blob = encryption::encrypt_credentials_envelope(&plaintext, &password)?;
     Ok(Ok(CredentialsEnvelope {
         format: encryption::CRED_ENVELOPE_FORMAT.to_string(),
@@ -418,27 +502,27 @@ fn seal_credentials(app: &AppHandle, master_state: &MasterPasswordState) -> Resu
 
 /// Assemble the current device state into a payload, honoring the include
 /// flags. The second value is the credentials skip reason, if any.
-async fn build_payload(app: &AppHandle, master_state: &MasterPasswordState, config: &SyncConfig) -> Result<(SyncPayload, Option<String>), String> {
+async fn build_payload(store: &impl SyncStore, config: &SyncConfig) -> Result<(SyncPayload, Option<String>), String> {
     let mut payload = SyncPayload {
         schema: PAYLOAD_SCHEMA,
         exported_at: now_ms(),
         device_id: config.device_id.clone(),
         device_label: config.device_label.clone(),
-        bookmarks: connections::load_connections(app)?,
+        bookmarks: store.bookmarks()?,
         ..Default::default()
     };
 
     if config.include_settings {
-        payload.settings = Some(extract_settings_subset(app)?);
+        payload.settings = Some(store.settings_subset()?);
     }
 
     if config.include_known_hosts {
-        payload.known_hosts = crate::ssh::export_known_hosts(app).await?;
+        payload.known_hosts = store.known_hosts().await?;
     }
 
     let mut skipped = None;
     if config.include_credentials {
-        match seal_credentials(app, master_state)? {
+        match seal_credentials(store)? {
             Ok(envelope) => payload.credentials = Some(envelope),
             Err(reason) => skipped = Some(reason.to_string()),
         }
@@ -450,7 +534,7 @@ async fn build_payload(app: &AppHandle, master_state: &MasterPasswordState, conf
 /// Merge tier-1 data (bookmarks, settings, known-hosts) into local state.
 /// `replace` makes the remote bookmarks authoritative; otherwise entries union.
 pub(crate) async fn apply_tier1(
-    app: &AppHandle,
+    store: &impl SyncStore,
     config: &SyncConfig,
     bookmarks: Vec<SavedConnection>,
     settings_subset: Option<&Value>,
@@ -458,36 +542,35 @@ pub(crate) async fn apply_tier1(
     replace: bool,
     result: &mut SyncResult,
 ) -> Result<(), String> {
-    let local = connections::load_connections(app)?;
+    let local = store.bookmarks()?;
     let merged = merge_bookmarks(local, bookmarks, replace);
     result.bookmarks_added = merged.added;
     result.bookmarks_total = merged.items.len();
-    connections::write_connections(app, &merged.items)?;
+    store.write_bookmarks(&merged.items)?;
 
     if let Some(subset) = settings_subset {
         if config.include_settings {
-            result.settings_applied = apply_settings_subset(app, subset)?;
+            result.settings_applied = store.apply_settings_subset(subset)?;
         }
     }
 
     // Union, local wins: sync never overrides a fingerprint trusted here.
     if !known_hosts.is_empty() && config.include_known_hosts {
-        result.known_hosts_added = crate::ssh::import_known_hosts(app, known_hosts).await?;
+        result.known_hosts_added = store.import_known_hosts(known_hosts).await?;
     }
     result.pulled = true;
     Ok(())
 }
 
 /// Merge decrypted credentials into the local store by connection id.
-pub(crate) fn merge_plain_credentials(app: &AppHandle, master_state: &MasterPasswordState, incoming: Vec<StoredCredential>) -> Result<usize, String> {
+pub(crate) fn merge_plain_credentials(store: &impl SyncStore, incoming: Vec<StoredCredential>) -> Result<usize, String> {
     if incoming.is_empty() {
         return Ok(0);
     }
-    let secret = encryption::resolve_secret(app, master_state)?;
-    let mut store = encryption::load_encrypted_credentials(app, &secret).unwrap_or_else(|_| CredentialStore { credentials: Vec::new() });
-    let changed = merge_credentials(&mut store.credentials, incoming);
+    let mut local = store.credentials().unwrap_or_default();
+    let changed = merge_credentials(&mut local, incoming);
     if changed > 0 {
-        encryption::save_encrypted_credentials(app, &store, &secret)?;
+        store.write_credentials(local)?;
     }
     Ok(changed)
 }
@@ -514,24 +597,22 @@ fn merge_credentials(local: &mut Vec<StoredCredential>, incoming: Vec<StoredCred
 
 /// Open the tier-2 envelope and merge it, or record why it was skipped. A
 /// skipped or unreadable envelope never fails the tier-1 merge (design §9).
-fn apply_credentials_envelope(app: &AppHandle, master_state: &MasterPasswordState, envelope: &CredentialsEnvelope, result: &mut SyncResult) -> Result<(), String> {
+fn apply_credentials_envelope(store: &impl SyncStore, envelope: &CredentialsEnvelope, result: &mut SyncResult) -> Result<(), String> {
     if envelope.format != encryption::CRED_ENVELOPE_FORMAT {
         result.credentials_skipped = Some(skip::CORRUPT.to_string());
         return Ok(());
     }
-    if !master_password_mode(app) {
-        result.credentials_skipped = Some(skip::LOCAL_KEY_MODE.to_string());
-        return Ok(());
-    }
-    if !master_state.is_unlocked() {
-        result.credentials_skipped = Some(skip::MASTER_LOCKED.to_string());
-        return Ok(());
-    }
+    let password = match store.envelope_key()? {
+        Ok(password) => password,
+        Err(reason) => {
+            result.credentials_skipped = Some(reason.to_string());
+            return Ok(());
+        }
+    };
     let Ok(blob) = STANDARD.decode(envelope.blob.trim()) else {
         result.credentials_skipped = Some(skip::CORRUPT.to_string());
         return Ok(());
     };
-    let password = master_state.get()?;
     let plaintext = match encryption::decrypt_credentials_envelope(&blob, &password) {
         Ok(plaintext) => Zeroizing::new(plaintext),
         Err(error) => {
@@ -546,23 +627,17 @@ fn apply_credentials_envelope(app: &AppHandle, master_state: &MasterPasswordStat
             return Ok(());
         }
     };
-    result.credentials_synced = merge_plain_credentials(app, master_state, incoming)?;
+    result.credentials_synced = merge_plain_credentials(store, incoming)?;
     Ok(())
 }
 
 /// Merge a downloaded payload into local state.
-async fn apply_payload(
-    app: &AppHandle,
-    master_state: &MasterPasswordState,
-    config: &SyncConfig,
-    payload: SyncPayload,
-    replace: bool,
-) -> Result<SyncResult, String> {
+async fn apply_payload(store: &impl SyncStore, config: &SyncConfig, payload: SyncPayload, replace: bool) -> Result<SyncResult, String> {
     let mut result = SyncResult::default();
-    apply_tier1(app, config, payload.bookmarks, payload.settings.as_ref(), payload.known_hosts, replace, &mut result).await?;
+    apply_tier1(store, config, payload.bookmarks, payload.settings.as_ref(), payload.known_hosts, replace, &mut result).await?;
     if config.include_credentials {
         if let Some(envelope) = &payload.credentials {
-            apply_credentials_envelope(app, master_state, envelope, &mut result)?;
+            apply_credentials_envelope(store, envelope, &mut result)?;
         }
     }
     Ok(result)
@@ -768,15 +843,9 @@ fn ensure_device_id(config: &mut SyncConfig) {
 
 /// Build the current device state and push it as `rest-v2`, based on
 /// `base_version` (or the config's last known version). Updates the config.
-pub(crate) async fn push_current_state(
-    app: &AppHandle,
-    master_state: &MasterPasswordState,
-    config: &mut SyncConfig,
-    base_version: Option<String>,
-    result: &mut SyncResult,
-) -> Result<(), String> {
+pub(crate) async fn push_current_state(store: &impl SyncStore, config: &mut SyncConfig, base_version: Option<String>, result: &mut SyncResult) -> Result<(), String> {
     ensure_device_id(config);
-    let (payload, skipped) = build_payload(app, master_state, config).await?;
+    let (payload, skipped) = build_payload(store, config).await?;
     let text = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     let base = base_version.or_else(|| config.last_remote_version.clone());
     let version = auraxlab_push(&config.auraxlab, &text, base.as_deref(), &config.device_id, &config.device_label).await?;
@@ -784,7 +853,7 @@ pub(crate) async fn push_current_state(
     if version.is_some() {
         config.last_remote_version = version.clone();
     }
-    save_config(app, config)?;
+    store.save_config(config)?;
     result.pushed = true;
     result.bookmarks_total = payload.bookmarks.len();
     result.remote_version = version;
@@ -831,17 +900,33 @@ pub fn acknowledge_legacy_provider_notice(app: AppHandle) -> Result<(), String> 
 pub async fn cloud_sync_push(app: AppHandle, master_state: State<'_, MasterPasswordState>) -> Result<SyncResult, String> {
     let mut config = load_config(&app)?;
     ensure_signed_in(&config)?;
-    let mut result = SyncResult::default();
-    push_current_state(&app, &master_state, &mut config, None, &mut result).await?;
-    result.message = "Uploaded to your AuraXLab account.".to_string();
-    Ok(result)
+    push_only(&AppStore::new(&app, &master_state), &mut config).await
 }
 
 #[tauri::command]
 pub async fn cloud_sync_pull(app: AppHandle, replace: bool, master_state: State<'_, MasterPasswordState>) -> Result<SyncResult, String> {
     let mut config = load_config(&app)?;
     ensure_signed_in(&config)?;
+    pull_only(&AppStore::new(&app, &master_state), &mut config, replace).await
+}
 
+#[tauri::command]
+pub async fn cloud_sync_now(app: AppHandle, master_state: State<'_, MasterPasswordState>) -> Result<SyncResult, String> {
+    let mut config = load_config(&app)?;
+    ensure_signed_in(&config)?;
+    sync_now(&AppStore::new(&app, &master_state), &mut config).await
+}
+
+/// Upload this device's state without merging the cloud copy first.
+async fn push_only(store: &impl SyncStore, config: &mut SyncConfig) -> Result<SyncResult, String> {
+    let mut result = SyncResult::default();
+    push_current_state(store, config, None, &mut result).await?;
+    result.message = "Uploaded to your AuraXLab account.".to_string();
+    Ok(result)
+}
+
+/// Download the cloud copy and merge it (or, with `replace`, adopt it).
+async fn pull_only(store: &impl SyncStore, config: &mut SyncConfig, replace: bool) -> Result<SyncResult, String> {
     let Some(remote) = auraxlab_pull(&config.auraxlab).await? else {
         return Err("Your AuraXLab account has no synced data yet.".to_string());
     };
@@ -850,12 +935,12 @@ pub async fn cloud_sync_pull(app: AppHandle, replace: bool, master_state: State<
         RemoteContent::LegacyBlob(_) => return Err(ERR_LEGACY_VAULT.to_string()),
     };
 
-    let mut result = apply_payload(&app, &master_state, &config, payload, replace).await?;
+    let mut result = apply_payload(store, config, payload, replace).await?;
     config.last_sync_at = Some(now_ms());
     if remote.version.is_some() {
         config.last_remote_version = remote.version.clone();
     }
-    save_config(&app, &config)?;
+    store.save_config(config)?;
 
     result.remote_version = remote.version;
     result.message = if replace {
@@ -866,11 +951,8 @@ pub async fn cloud_sync_pull(app: AppHandle, replace: bool, master_state: State<
     Ok(result)
 }
 
-#[tauri::command]
-pub async fn cloud_sync_now(app: AppHandle, master_state: State<'_, MasterPasswordState>) -> Result<SyncResult, String> {
-    let mut config = load_config(&app)?;
-    ensure_signed_in(&config)?;
-
+/// Two-way sync: merge-pull, then push the merged result back.
+async fn sync_now(store: &impl SyncStore, config: &mut SyncConfig) -> Result<SyncResult, String> {
     // 1) Pull & merge. Only "nothing uploaded yet" proceeds straight to the
     //    push; every other failure — including a legacy vault — stops here so
     //    the cloud copy is never overwritten by mistake.
@@ -882,14 +964,14 @@ pub async fn cloud_sync_now(app: AppHandle, master_state: State<'_, MasterPasswo
                 RemoteContent::Payload(text) => parse_payload(&text)?,
                 RemoteContent::LegacyBlob(_) => return Err(ERR_LEGACY_VAULT.to_string()),
             };
-            result = apply_payload(&app, &master_state, &config, payload, false).await?;
+            result = apply_payload(store, config, payload, false).await?;
             base_version = remote.version;
         }
         None => result.message = "(first sync) ".to_string(),
     }
 
     // 2) Push the merged result back.
-    push_current_state(&app, &master_state, &mut config, base_version, &mut result).await?;
+    push_current_state(store, config, base_version, &mut result).await?;
     result.message.push_str("Two-way sync complete.");
     Ok(result)
 }

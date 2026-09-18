@@ -57,6 +57,7 @@ pub async fn cloud_sync_migrate_legacy(
 ) -> Result<SyncResult, String> {
     let mut config: SyncConfig = cloud_sync::load_config(&app)?;
     cloud_sync::ensure_signed_in(&config).map_err(|_| ERR_NOT_SIGNED_IN.to_string())?;
+    let store = cloud_sync::AppStore::new(&app, &master_state);
 
     let Some(remote) = cloud_sync::auraxlab_pull(&config.auraxlab).await? else {
         return Err("Your AuraXLab account has no synced data yet; nothing to migrate.".to_string());
@@ -76,10 +77,10 @@ pub async fn cloud_sync_migrate_legacy(
             return Err("Enter the old sync passphrase, or choose to overwrite the cloud copy with this device's data.".to_string());
         }
         let bundle = decode_legacy_bundle(&blob, &passphrase)?;
-        cloud_sync::apply_tier1(&app, &config, bundle.bookmarks, bundle.settings.as_ref(), bundle.known_hosts, false, &mut result).await?;
+        cloud_sync::apply_tier1(&store, &config, bundle.bookmarks, bundle.settings.as_ref(), bundle.known_hosts, false, &mut result).await?;
         if !bundle.credentials.is_empty() {
             if encryption::credentials_accessible(&app, &master_state) {
-                result.credentials_synced = cloud_sync::merge_plain_credentials(&app, &master_state, bundle.credentials)?;
+                result.credentials_synced = cloud_sync::merge_plain_credentials(&store, bundle.credentials)?;
             } else {
                 result.credentials_skipped = Some(cloud_sync::skip::MASTER_LOCKED.to_string());
             }
@@ -88,7 +89,7 @@ pub async fn cloud_sync_migrate_legacy(
 
     // Re-upload as rest-v2, based on the legacy vault's version so a
     // concurrent write from another device still conflicts.
-    cloud_sync::push_current_state(&app, &master_state, &mut config, remote.version, &mut result).await?;
+    cloud_sync::push_current_state(&store, &mut config, remote.version, &mut result).await?;
     result.message = if overwrite {
         "Replaced the old cloud copy with this device's data.".to_string()
     } else {
