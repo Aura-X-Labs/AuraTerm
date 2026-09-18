@@ -8,6 +8,7 @@ import { t } from "./i18n";
 import { runConnectionTest, summarizeTestReport, type ConnectionTestReport, type TestSummary } from "./connectionTest";
 import { isReconnectEnabled, type AutoLoginRule, type ConnectResult, type ConnectionProtocol, type JumpHostConfig, type ReconnectType, type SavedConnection, type SerialConfig, type SerialProtocol, type SerialTransport, type SshAuthType } from "./types";
 import { isLoopbackHost, isSerialProtocol, parseSerialEndpoint, protocolForTransport, serialTargetLabel, transportForProtocol, RFC2217_DEFAULT_PORT } from "./serialTransport";
+import PrivateKeyPicker from "./PrivateKeyPicker.vue";
 import "./ConnectDialog.css";
 
 interface SerialPortInfo {
@@ -98,8 +99,13 @@ const passphrase = ref("");
 const privateKey = ref("");
 const privateKeyFileName = ref("");
 const privateKeyError = ref("");
-const generatedPublicKey = ref("");
-const privateKeyFileInput = ref<HTMLInputElement | null>(null);
+const generatedKey = ref<GeneratedSshKeyPair | null>(null);
+/** Only while the generated key is still the one in use: picking a file or
+ *  clearing must not leave another key's public half on screen. */
+const generatedPublicKey = computed(() => {
+  const generated = generatedKey.value;
+  return generated && generated.privateKey === privateKey.value ? generated.publicKey : "";
+});
 const authType = ref<SshAuthType>("password");
 const agentForwarding = ref(false);
 const jumpHosts = ref<JumpHostConfig[]>([]);
@@ -378,43 +384,6 @@ function removeAutoLoginRule(index: number) {
   autoLoginRules.value.splice(index, 1);
 }
 
-function triggerPrivateKeyPicker() {
-  privateKeyError.value = "";
-  privateKeyFileInput.value?.click();
-}
-
-async function handlePrivateKeyFileChange(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const [file] = input.files ?? [];
-
-  if (!file) {
-    return;
-  }
-
-  try {
-    privateKey.value = await file.text();
-    privateKeyFileName.value = file.name;
-    privateKeyError.value = "";
-  } catch (error) {
-    console.error("Failed to read private key file", error);
-    privateKey.value = "";
-    privateKeyFileName.value = "";
-    privateKeyError.value = "Unable to read the selected private key file.";
-  } finally {
-    input.value = "";
-  }
-}
-
-function clearPrivateKeySelection() {
-  privateKey.value = "";
-  privateKeyFileName.value = "";
-  privateKeyError.value = "";
-  generatedPublicKey.value = "";
-  if (privateKeyFileInput.value) {
-    privateKeyFileInput.value.value = "";
-  }
-}
-
 async function generatePrivateKey() {
   privateKeyError.value = "";
   try {
@@ -423,8 +392,8 @@ async function generatePrivateKey() {
       comment: user.value && host.value ? `${user.value}@${host.value}` : "AuraTerm",
     });
     privateKey.value = generated.privateKey;
-    privateKeyFileName.value = `Generated Ed25519 (${generated.fingerprint})`;
-    generatedPublicKey.value = generated.publicKey;
+    privateKeyFileName.value = t("connect.keyGenerated", { fingerprint: generated.fingerprint });
+    generatedKey.value = generated;
   } catch (error) {
     privateKeyError.value = String(error);
   }
@@ -433,6 +402,11 @@ async function generatePrivateKey() {
 async function copyGeneratedPublicKey() {
   await navigator.clipboard.writeText(generatedPublicKey.value);
 }
+
+// A generation error is about the key that was in place when it happened.
+watch(privateKey, () => {
+  privateKeyError.value = "";
+});
 
 /** The form as a `ConnectResult`, or `null` when it is not complete.
  *
@@ -785,35 +759,17 @@ onBeforeUnmount(() => {
 
           <div v-else-if="authType === 'key'" class="form-group">
             <label>{{ $t('connect.privateKey') }}</label>
-            <input
-              ref="privateKeyFileInput"
-              type="file"
-              class="private-key-file-input"
-              @change="handlePrivateKeyFileChange"
-            >
-            <div class="private-key-picker-row">
-              <input
-                :value="privateKeyFileName || $t('connect.noKeySelected')"
-                type="text"
-                class="private-key-display"
-                readonly
-              >
-              <button type="button" class="private-key-picker-btn" @click="triggerPrivateKeyPicker">{{ $t('connect.browse') }}</button>
-              <button type="button" class="private-key-picker-btn" @click="generatePrivateKey">{{ $t('connect.generate') }}</button>
-              <button
-                v-if="privateKeyFileName"
-                type="button"
-                class="private-key-clear-btn"
-                @click="clearPrivateKeySelection"
-              >
-                {{ $t('connect.clear') }}
-              </button>
-            </div>
-            <div v-if="privateKeyError" class="form-hint error">{{ privateKeyError }}</div>
+            <PrivateKeyPicker
+              v-model="privateKey"
+              v-model:source="privateKeyFileName"
+              generatable
+              :error="privateKeyError"
+              @generate="generatePrivateKey"
+            />
             <input v-model="passphrase" type="password" :placeholder="$t('connect.keyPassphrase')" style="margin-top: 8px">
             <div v-if="generatedPublicKey" class="generated-public-key">
               <textarea :value="generatedPublicKey" rows="2" readonly />
-              <button type="button" class="private-key-picker-btn" @click="copyGeneratedPublicKey">{{ $t('connect.copyPublicKey') }}</button>
+              <button type="button" @click="copyGeneratedPublicKey">{{ $t('connect.copyPublicKey') }}</button>
             </div>
           </div>
 
@@ -843,7 +799,7 @@ onBeforeUnmount(() => {
               </div>
               <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" :placeholder="$t('connect.jumpPassword')">
               <template v-else-if="jump.authType === 'key'">
-                <textarea v-model="jump.privateKey" rows="3" :placeholder="$t('connect.privateKeyPlaceholder')" />
+                <PrivateKeyPicker v-model="jump.privateKey" compact class="jump-key-picker" />
                 <input v-model="jump.passphrase" type="password" :placeholder="$t('connect.keyPassphrase')">
               </template>
               <button type="button" class="ssh-remove-btn" @click="removeJumpHost(index)">{{ $t('connect.remove') }}</button>

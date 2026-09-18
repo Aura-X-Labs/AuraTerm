@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { t } from "./i18n";
 import { isReconnectEnabled, normalizeReconnectType, type ReconnectType, type SavedConnection, type SshAuthType, type TunnelConfig } from "./types";
 import { isSerialProtocol, serialTargetLabel, transportForProtocol, RFC2217_DEFAULT_PORT } from "./serialTransport";
+import PrivateKeyPicker from "./PrivateKeyPicker.vue";
 
 const props = withDefaults(defineProps<{
   connection: SavedConnection;
@@ -33,13 +34,23 @@ const editDraft = ref<SavedConnection>({
   postConnectCommands: [...(props.connection.postConnectCommands ?? [])],
 });
 const editError = ref("");
-const generatedPublicKey = ref("");
 
 interface GeneratedSshKeyPair {
   privateKey: string;
   publicKey: string;
   fingerprint: string;
 }
+
+/** Where the key in the draft came from; empty for the one already saved. */
+const privateKeySource = ref("");
+const privateKeyError = ref("");
+const generatedKey = ref<GeneratedSshKeyPair | null>(null);
+/** Only while the generated key is still the one in the draft: picking a file
+ *  or clearing must not leave another key's public half on screen. */
+const generatedPublicKey = computed(() => {
+  const generated = generatedKey.value;
+  return generated && generated.privateKey === editDraft.value.privateKey ? generated.publicKey : "";
+});
 
 // Initialize reconnect type and autoReconnect from connection
 const initialReconnectType = normalizeReconnectType(props.connection);
@@ -143,17 +154,24 @@ function updatePostConnectCommands(value: string) {
 }
 
 async function generatePrivateKey() {
-  editError.value = "";
+  privateKeyError.value = "";
   try {
     const generated = await invoke<GeneratedSshKeyPair>("ssh_generate_key_pair", {
       passphrase: editDraft.value.passphrase || null,
       comment: `${editDraft.value.user}@${editDraft.value.host}`,
     });
     updateDraft("privateKey", generated.privateKey);
-    generatedPublicKey.value = generated.publicKey;
+    privateKeySource.value = t("connect.keyGenerated", { fingerprint: generated.fingerprint });
+    generatedKey.value = generated;
   } catch (error) {
-    editError.value = String(error);
+    privateKeyError.value = String(error);
   }
+}
+
+function updatePrivateKey(value: string | undefined) {
+  // A generation error is about the key that was in place when it happened.
+  privateKeyError.value = "";
+  updateDraft("privateKey", value);
 }
 
 async function copyGeneratedPublicKey() {
@@ -510,16 +528,15 @@ function handleSave() {
             </div>
 
             <div v-else-if="editDraft.authType === 'key'" class="form-group">
-              <label>{{ $t('bookmarkEditor.privateKeyPem') }}</label>
-              <textarea
-                rows="5"
-                :value="editDraft.privateKey ?? ''"
-                @input="updateDraft('privateKey', inputValue($event))"
-                autocapitalize="none"
-                autocorrect="off"
-                spellcheck="false"
+              <label>{{ $t('bookmarkEditor.privateKey') }}</label>
+              <PrivateKeyPicker
+                :model-value="editDraft.privateKey"
+                v-model:source="privateKeySource"
+                generatable
+                :error="privateKeyError"
+                @update:model-value="updatePrivateKey"
+                @generate="generatePrivateKey"
               />
-              <button type="button" class="bookmark-editor-btn secondary" @click="generatePrivateKey">{{ $t('bookmarkEditor.generateKey') }}</button>
               <label>{{ $t('bookmarkEditor.passphrase') }}</label>
               <input
                 type="password"
@@ -561,7 +578,7 @@ function handleSave() {
                 </div>
                 <input v-if="jump.authType === 'password'" v-model="jump.password" type="password" :placeholder="$t('bookmarkEditor.password')">
                 <template v-else-if="jump.authType === 'key'">
-                  <textarea v-model="jump.privateKey" rows="3" :placeholder="$t('bookmarkEditor.privateKeyJumpPlaceholder')" />
+                  <PrivateKeyPicker v-model="jump.privateKey" compact class="jump-key-picker" />
                   <input v-model="jump.passphrase" type="password" :placeholder="$t('bookmarkEditor.passphrase')">
                 </template>
                 <button type="button" class="bookmark-remove" @click="removeJumpHost(index)">{{ $t('connect.remove') }}</button>
@@ -903,8 +920,8 @@ function handleSave() {
 .bookmark-advanced-card { border: 1px solid var(--app-border); border-radius: 5px; padding: 9px; margin-bottom: 8px; background: var(--app-surface-0); }
 .bookmark-advanced-grid { display: grid; grid-template-columns: 2fr 70px 1.2fr 1.2fr; gap: 7px; margin-bottom: 7px; }
 .bookmark-automation-grid { display: grid; grid-template-columns: 1fr 1fr 65px; gap: 7px; }
-.bookmark-advanced-card input, .bookmark-advanced-card select, .bookmark-advanced-card textarea { width: 100%; box-sizing: border-box; background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 4px; color: var(--app-text); padding: 7px; }
-.bookmark-advanced-card textarea { resize: vertical; margin-bottom: 6px; }
+.bookmark-advanced-card input, .bookmark-advanced-card select { width: 100%; box-sizing: border-box; background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 4px; color: var(--app-text); padding: 7px; }
+.jump-key-picker { margin-bottom: 6px; }
 .bookmark-remove { margin-top: 7px; color: var(--app-danger); }
 .generated-key-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: stretch; }
 

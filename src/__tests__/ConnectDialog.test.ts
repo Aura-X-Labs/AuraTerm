@@ -1,4 +1,4 @@
-import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ConnectDialog from "../ConnectDialog.vue";
@@ -75,6 +75,25 @@ async function fillSsh(wrapper: Dialog, host = "10.0.0.5", user = "ops") {
   await userInput(wrapper).setValue(user);
 }
 
+const PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----\n";
+const GENERATED_KEY = {
+  privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nZ2VuZXJhdGVk\n-----END OPENSSH PRIVATE KEY-----\n",
+  publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenerated ops@10.0.0.5",
+  fingerprint: "SHA256:generated",
+};
+
+/** What the browser does once the user confirms the native file dialog. */
+async function pickKeyFile(
+  scope: { get(selector: string): Omit<DOMWrapper<Element>, "exists"> },
+  content: string,
+  name: string,
+) {
+  const input = scope.get("input[type='file']");
+  Object.defineProperty(input.element, "files", { value: [new File([content], name)], configurable: true });
+  await input.trigger("change");
+  await flushPromises();
+}
+
 let warn: ReturnType<typeof vi.spyOn>;
 let error: ReturnType<typeof vi.spyOn>;
 
@@ -88,6 +107,8 @@ beforeEach(() => {
         return [];
       case "list_serial_ports":
         return serialPorts;
+      case "ssh_generate_key_pair":
+        return GENERATED_KEY;
       case "ssh_test_connection":
       case "telnet_test_connection":
       case "serial_test_connection": {
@@ -614,6 +635,89 @@ describe("ConnectDialog test button", () => {
     // The endpoint does.
     await hostField.setValue("10.0.0.10");
     expect(resultRegion(wrapper).find(".connect-test-title").exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
+
+describe("ConnectDialog private keys", () => {
+  it("takes the key from a local file, with nowhere to paste one", async () => {
+    const wrapper = mountDialog();
+    await fillSsh(wrapper);
+    await wrapper.get(".auth-type-group select").setValue("key");
+    expect(testButton(wrapper).element.hasAttribute("disabled")).toBe(true);
+    // Only the post-connect commands box is left as a textarea.
+    expect(wrapper.findAll("textarea")).toHaveLength(1);
+
+    await pickKeyFile(wrapper, PRIVATE_KEY, "id_ed25519");
+    expect(wrapper.get(".private-key-display").text()).toBe("id_ed25519");
+    expect(testButton(wrapper).element.hasAttribute("disabled")).toBe(false);
+
+    await testButton(wrapper).trigger("click");
+    expect(testCalls()[0][1]).toMatchObject({ authType: "key", privateKey: PRIVATE_KEY, password: null });
+    pending[0].resolve(report());
+    await flushPromises();
+
+    await wrapper.get("form").trigger("submit");
+    expect(wrapper.emitted("connect")![0][0]).toMatchObject({ sshConfig: { authType: "key", privateKey: PRIVATE_KEY } });
+    wrapper.unmount();
+  });
+
+  it("does not accept a public key file", async () => {
+    const wrapper = mountDialog();
+    await fillSsh(wrapper);
+    await wrapper.get(".auth-type-group select").setValue("key");
+
+    await pickKeyFile(wrapper, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB ops@host", "id_ed25519.pub");
+    expect(wrapper.get(".private-key-error").text()).toContain("That is a public key.");
+    expect(testButton(wrapper).element.hasAttribute("disabled")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("takes a jump host's key from a local file too", async () => {
+    const wrapper = mountDialog();
+    await fillSsh(wrapper);
+    await wrapper.findAll(".ssh-advanced-heading button")[0].trigger("click");
+    const card = wrapper.get(".ssh-advanced-card");
+    const [jumpHost, , jumpUser] = card.findAll(".ssh-card-grid input");
+    await jumpHost.setValue("bastion");
+    await jumpUser.setValue("jump");
+    await card.get("select").setValue("key");
+
+    expect(card.find("textarea").exists()).toBe(false);
+    expect(testButton(wrapper).element.hasAttribute("disabled")).toBe(true);
+
+    await pickKeyFile(card, PRIVATE_KEY, "bastion_key");
+    expect(card.get(".private-key-display").text()).toBe("bastion_key");
+    expect(testButton(wrapper).element.hasAttribute("disabled")).toBe(false);
+
+    await testButton(wrapper).trigger("click");
+    const args = testCalls()[0][1] as { jumpHosts: Array<Record<string, unknown>> };
+    expect(args.jumpHosts[0]).toMatchObject({ host: "bastion", authType: "key", privateKey: PRIVATE_KEY });
+    pending[0].resolve(report());
+    await flushPromises();
+    expect(resultRegion(wrapper).find(".connect-test-title").exists()).toBe(true);
+
+    // The key is part of what gets connected to, so replacing it clears the result.
+    await pickKeyFile(card, PRIVATE_KEY.replace("b3Blbn", "b3RoZXI"), "bastion_key_2");
+    expect(resultRegion(wrapper).find(".connect-test-title").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("shows a generated key's public half only while that key is in use", async () => {
+    const wrapper = mountDialog();
+    await fillSsh(wrapper);
+    await wrapper.get(".auth-type-group select").setValue("key");
+
+    const generate = wrapper.findAll(".private-key-picker-btn").find((button) => button.text() === "Generate");
+    await generate!.trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".private-key-display").text()).toBe("Generated Ed25519 (SHA256:generated)");
+    expect((wrapper.get(".generated-public-key textarea").element as HTMLTextAreaElement).value)
+      .toBe(GENERATED_KEY.publicKey);
+
+    await pickKeyFile(wrapper, PRIVATE_KEY, "id_ed25519");
+    expect(wrapper.get(".private-key-display").text()).toBe("id_ed25519");
+    expect(wrapper.find(".generated-public-key").exists()).toBe(false);
     wrapper.unmount();
   });
 });
