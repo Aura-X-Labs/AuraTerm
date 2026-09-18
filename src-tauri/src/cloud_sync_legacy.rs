@@ -15,7 +15,7 @@
 //! file** (together with `encryption::{encrypt,decrypt}_sync_blob`) once every
 //! client in the field has migrated.
 
-use crate::cloud_sync::{self, RemoteContent, SyncConfig, SyncResult, ERR_NOT_SIGNED_IN};
+use crate::cloud_sync::{self, RemoteContent, SyncConfig, SyncOutcome, SyncResult, ERR_NOT_SIGNED_IN};
 use crate::connections::SavedConnection;
 use crate::encryption::{self, MasterPasswordState, StoredCredential};
 
@@ -66,6 +66,7 @@ pub async fn cloud_sync_migrate_legacy(
     let blob = match remote.content {
         RemoteContent::LegacyBlob(blob) => blob,
         RemoteContent::Payload(_) => {
+            result.outcome = SyncOutcome::AlreadyMigrated;
             result.message = "The cloud copy is already in the new format; nothing to migrate.".to_string();
             return Ok(result);
         }
@@ -90,10 +91,10 @@ pub async fn cloud_sync_migrate_legacy(
     // Re-upload as rest-v2, based on the legacy vault's version so a
     // concurrent write from another device still conflicts.
     cloud_sync::push_current_state(&store, &mut config, remote.version, None, &mut result).await?;
-    result.message = if overwrite {
-        "Replaced the old cloud copy with this device's data.".to_string()
+    (result.outcome, result.message) = if overwrite {
+        (SyncOutcome::MigrationOverwrote, "Replaced the old cloud copy with this device's data.".to_string())
     } else {
-        "Migrated the cloud copy to the new format.".to_string()
+        (SyncOutcome::Migrated, "Migrated the cloud copy to the new format.".to_string())
     };
     Ok(result)
 }

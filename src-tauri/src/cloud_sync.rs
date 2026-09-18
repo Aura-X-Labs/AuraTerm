@@ -413,6 +413,57 @@ pub(crate) struct SyncBase {
     pub(crate) credentials: Option<CredentialsEnvelope>,
 }
 
+/// What a finished run amounted to. The UI words its result from this and the
+/// counts; `SyncResult::message` says the same in English, for logs.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncOutcome {
+    #[default]
+    Synced,
+    FirstSync,
+    UpToDate,
+    Uploaded,
+    Merged,
+    Replaced,
+    Migrated,
+    MigrationOverwrote,
+    AlreadyMigrated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictKind {
+    Bookmark,
+    Credentials,
+    Setting,
+}
+
+/// One thing both sides changed differently. The cloud copy won it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncConflict {
+    pub(crate) kind: ConflictKind,
+    /// The bookmark's name, or the settings key.
+    pub(crate) name: String,
+    /// The element, for a list-valued setting merged item by item.
+    pub(crate) item: Option<String>,
+}
+
+impl SyncConflict {
+    fn new(kind: ConflictKind, name: impl Into<String>) -> Self {
+        Self { kind, name: name.into(), item: None }
+    }
+
+    fn label(&self) -> String {
+        match (self.kind, &self.item) {
+            (ConflictKind::Bookmark, _) => self.name.clone(),
+            (ConflictKind::Credentials, _) => format!("{} (credentials)", self.name),
+            (ConflictKind::Setting, None) => format!("setting {}", self.name),
+            (ConflictKind::Setting, Some(item)) => format!("setting {}: {item}", self.name),
+        }
+    }
+}
+
 /// Deletes a sync held back for confirmation (the mass-delete guard).
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -447,8 +498,9 @@ pub struct SyncResult {
     pub(crate) bookmarks_updated: usize,
     /// Bookmarks removed here because the cloud copy dropped them.
     pub(crate) bookmarks_removed: usize,
+    pub(crate) outcome: SyncOutcome,
     /// What both sides changed differently; the cloud copy won each of them.
-    pub(crate) conflicts: Vec<String>,
+    pub(crate) conflicts: Vec<SyncConflict>,
     /// Set when deletes were held back; a run with `confirm_deletes` applies them.
     pub(crate) deletes_held: Option<HeldDeletes>,
     pub(crate) known_hosts_added: usize,
@@ -857,7 +909,7 @@ fn reconcile_credentials(
     merged.local.retain(|c| !bookmarks.removed.contains(&c.connection_id));
     merged.upload.retain(|c| !bookmarks.removed.contains(&c.connection_id) && !bookmarks.dropped.contains(&c.connection_id));
     for id in &merged.conflicts {
-        result.conflicts.push(format!("{} (credentials)", bookmarks.names.get(id).unwrap_or(id)));
+        result.conflicts.push(SyncConflict::new(ConflictKind::Credentials, bookmarks.names.get(id).unwrap_or(id)));
     }
 
     let changed_here = merged.local.iter().filter(|c| !ours.contains(c)).count() + ours.iter().filter(|c| !merged.local.iter().any(|m| m.connection_id == c.connection_id)).count();
@@ -921,7 +973,7 @@ fn reconcile_bookmarks(
     result.bookmarks_added += merged.added;
     result.bookmarks_updated += merged.updated;
     result.bookmarks_removed += merged.removed.len();
-    result.conflicts.extend(merged.conflicts.iter().map(|id| names.get(id).unwrap_or(id).clone()));
+    result.conflicts.extend(merged.conflicts.iter().map(|id| SyncConflict::new(ConflictKind::Bookmark, names.get(id).unwrap_or(id))));
 
     let mut next_base = merged.upload.clone();
     next_base.extend(base.unwrap_or_default().iter().filter(|c| held.remote_deletes.contains(&c.id)).cloned());
@@ -949,7 +1001,7 @@ async fn reconcile(
 
     if let (true, Some(remote)) = (config.include_settings, &theirs.settings) {
         let merged = merge_settings(base.and_then(|b| b.settings.as_ref()), &store.settings_subset()?, remote);
-        result.conflicts.extend(merged.conflicts.iter().map(|key| format!("setting {key}")));
+        result.conflicts.extend(merged.conflicts.into_iter().map(|c| SyncConflict { kind: ConflictKind::Setting, name: c.key, item: c.item }));
         if !merged.apply.is_empty() {
             result.settings_applied |= store.apply_settings_subset(&Value::Object(merged.apply))?;
         }
@@ -1331,6 +1383,7 @@ async fn push_only(store: &impl SyncStore, config: &mut SyncConfig) -> Result<Sy
     let carry = pull_remote_copy(config).await.ok().flatten();
     let mut result = SyncResult::default();
     push_current_state(store, config, None, carry.as_ref(), &mut result).await?;
+    result.outcome = SyncOutcome::Uploaded;
     result.message = "Uploaded to your AuraXLab account.".to_string();
     Ok(result)
 }
@@ -1381,10 +1434,10 @@ async fn pull_only(store: &impl SyncStore, config: &mut SyncConfig, replace: boo
     store.save_config(config)?;
 
     result.remote_version = version;
-    result.message = if replace {
-        "Replaced local data with the cloud copy.".to_string()
+    (result.outcome, result.message) = if replace {
+        (SyncOutcome::Replaced, "Replaced local data with the cloud copy.".to_string())
     } else {
-        "Merged the cloud copy into local data.".to_string()
+        (SyncOutcome::Merged, "Merged the cloud copy into local data.".to_string())
     };
     describe_outcome(&mut result);
     Ok(result)
@@ -1408,6 +1461,7 @@ async fn sync_now(store: &impl SyncStore, config: &mut SyncConfig, confirm_delet
         result.message.push_str("Two-way sync complete.");
     } else {
         result.pulled = false;
+        result.outcome = SyncOutcome::UpToDate;
         result.message = "Already up to date.".to_string();
     }
     describe_outcome(&mut result);
@@ -1419,6 +1473,7 @@ async fn sync_round(store: &impl SyncStore, config: &mut SyncConfig, confirm_del
     // failure — including a legacy vault — stops here so the cloud copy is
     // never overwritten by mistake.
     let Some(remote) = pull_remote_copy(config).await? else {
+        result.outcome = SyncOutcome::FirstSync;
         result.message = "(first sync) ".to_string();
         return push_current_state(store, config, None, None, result).await;
     };
@@ -1465,7 +1520,8 @@ fn describe_outcome(result: &mut SyncResult) {
     result.conflicts.dedup();
     if !result.conflicts.is_empty() {
         let n = result.conflicts.len();
-        result.message.push_str(&format!(" {n} conflict{} — cloud copy kept: {}.", if n == 1 { "" } else { "s" }, result.conflicts.join(", ")));
+        let labels: Vec<String> = result.conflicts.iter().map(SyncConflict::label).collect();
+        result.message.push_str(&format!(" {n} conflict{} — cloud copy kept: {}.", if n == 1 { "" } else { "s" }, labels.join(", ")));
     }
     if let Some(held) = &result.deletes_held {
         let n = held.local + held.remote;
@@ -2429,6 +2485,7 @@ pub(crate) mod tests {
         assert_eq!(vault_version(&vault), 1, "identical data must not be uploaded again");
         assert!(!result.pushed);
         assert!(!result.pulled);
+        assert_eq!(result.outcome, SyncOutcome::UpToDate);
         assert_eq!(result.message, "Already up to date.");
     }
 
@@ -2662,7 +2719,7 @@ pub(crate) mod tests {
 
         assert_eq!(desktop.bookmark_names(), ["laptop-name"], "the first upload set the cloud copy");
         assert_eq!(vault_bookmark_names(&vault), ["laptop-name"]);
-        assert_eq!(result.conflicts, ["laptop-name"]);
+        assert_eq!(result.conflicts, [SyncConflict::new(ConflictKind::Bookmark, "laptop-name")]);
         assert!(result.message.contains("1 conflict — cloud copy kept: laptop-name."), "got: {}", result.message);
     }
 
@@ -2746,7 +2803,8 @@ pub(crate) mod tests {
         laptop.sync().await;
         let result = desktop.sync().await;
 
-        assert_eq!(result.conflicts, ["host (credentials)", "setting theme"]);
+        assert_eq!(result.conflicts, [SyncConflict::new(ConflictKind::Credentials, "host"), SyncConflict::new(ConflictKind::Setting, "theme")]);
+        assert!(result.message.contains("2 conflicts — cloud copy kept: host (credentials), setting theme."), "got: {}", result.message);
         assert_eq!(desktop.setting("theme"), Some(json!("solarized")));
         assert_eq!(desktop.password("a").as_deref(), Some("laptop-pw"));
     }
@@ -2953,5 +3011,32 @@ pub(crate) mod tests {
         assert!(result.pushed);
         assert_eq!(desktop.bookmark_names(), ["renamed-on-desktop", "renamed-on-laptop"]);
         assert_eq!(vault_bookmark_names(&vault), ["renamed-on-desktop", "renamed-on-laptop"]);
+    }
+
+    #[tokio::test]
+    async fn sync_merges_quick_buttons_added_on_two_devices() {
+        let button = |id: &str| json!({"id": id, "label": id, "command": "ls"});
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.set_setting("quickButtons", json!([button("shared")]));
+        desktop.sync().await;
+        let mut laptop = FakeDevice::new(&base, "laptop");
+        laptop.sync().await;
+
+        desktop.set_setting("quickButtons", json!([button("shared"), button("from-desktop")]));
+        laptop.set_setting("quickButtons", json!([button("shared"), button("from-laptop")]));
+        laptop.sync().await;
+        let result = desktop.sync().await;
+
+        let merged = json!([button("shared"), button("from-desktop"), button("from-laptop")]);
+        assert!(result.conflicts.is_empty(), "got: {:?}", result.conflicts);
+        assert_eq!(desktop.setting("quickButtons"), Some(merged.clone()));
+        assert_eq!(vault_payload(&vault).settings.unwrap()["quickButtons"], merged);
+
+        // The laptop takes the desktop's list as it is, and that is the end of it.
+        let version = vault_version(&vault);
+        laptop.sync().await;
+        assert_eq!(laptop.setting("quickButtons"), Some(merged));
+        assert_eq!(vault_version(&vault), version, "no echo upload");
     }
 }

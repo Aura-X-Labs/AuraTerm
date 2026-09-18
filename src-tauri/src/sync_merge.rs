@@ -178,16 +178,74 @@ pub(crate) fn three_way<T: Record>(base: Option<&[T]>, local: Vec<T>, remote: Ve
     out
 }
 
+/// A setting both sides changed differently; the cloud copy won.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SettingConflict {
+    pub(crate) key: String,
+    /// The element, when the setting is a list merged item by item.
+    pub(crate) item: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SettingsMerge {
-    /// Keys whose local value must change, with the cloud copy's value.
+    /// Keys whose local value must change, with the value to write.
     pub(crate) apply: Map<String, Value>,
-    /// Keys both sides changed differently; the cloud copy won.
-    pub(crate) conflicts: Vec<String>,
+    pub(crate) conflicts: Vec<SettingConflict>,
+}
+
+/// One element of a list-valued setting, keyed for the item merge.
+#[derive(Clone)]
+struct Item {
+    key: String,
+    value: Value,
+}
+
+impl Record for Item {
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Item {
+    /// What to call the element in a conflict report.
+    fn display_name(&self) -> String {
+        ["label", "name"]
+            .iter()
+            .find_map(|field| self.value.get(field).and_then(Value::as_str).filter(|text| !text.is_empty()))
+            .unwrap_or(&self.key)
+            .to_string()
+    }
+}
+
+/// The elements of a list-valued setting as keyed items: objects by their
+/// string `id` (quick buttons, output rules), strings by themselves (bookmark
+/// folders). `None` when the value is not such a list or a key repeats — the
+/// setting is then merged as a whole.
+fn keyed_items(value: &Value) -> Option<Vec<Item>> {
+    let items: Vec<Item> = value
+        .as_array()?
+        .iter()
+        .map(|element| {
+            let key = element.as_str().or_else(|| element.get("id")?.as_str())?;
+            Some(Item { key: key.to_string(), value: element.clone() })
+        })
+        .collect::<Option<_>>()?;
+    let unique: HashSet<&str> = items.iter().map(|item| item.key.as_str()).collect();
+    (unique.len() == items.len()).then_some(items)
 }
 
 /// Merge the synced settings key by key. A key missing from the cloud copy is
 /// "no opinion" (an older build does not sync it), never a delete.
+///
+/// A list of keyed elements that **both** sides changed is merged element by
+/// element instead of letting the cloud copy win the whole list: a quick
+/// button added here and an output rule added there both survive. The result
+/// keeps the local order and appends what the cloud copy added; when only one
+/// side changed, that side's list stands as it is, order included.
 pub(crate) fn merge_settings(base: Option<&Value>, local: &Value, remote: &Value) -> SettingsMerge {
     let mut out = SettingsMerge::default();
     let (Some(local), Some(remote)) = (local.as_object(), remote.as_object()) else {
@@ -199,6 +257,22 @@ pub(crate) fn merge_settings(base: Option<&Value>, local: &Value, remote: &Value
         if mine == Some(theirs) {
             continue;
         }
+        let before = base.and_then(|map| map.and_then(|map| map.get(key)));
+        let one_sided = before.is_some() && (mine == before || Some(theirs) == before);
+        if let (false, Some(my_items), Some(their_items)) = (one_sided, mine.and_then(keyed_items), keyed_items(theirs)) {
+            // With a base, a list it does not have yet counts as empty.
+            let before_items = base.map(|_| before.and_then(keyed_items).unwrap_or_default());
+            let merged = three_way(before_items.as_deref(), my_items, their_items, &Held::default());
+            for id in &merged.conflicts {
+                let name = merged.local.iter().find(|item| &item.key == id).map(Item::display_name);
+                out.conflicts.push(SettingConflict { key: key.clone(), item: name.or_else(|| Some(id.clone())) });
+            }
+            let list = Value::Array(merged.local.into_iter().map(|item| item.value).collect());
+            if Some(&list) != mine {
+                out.apply.insert(key.clone(), list);
+            }
+            continue;
+        }
         let (mine_changed, theirs_changed) = match base {
             None => (false, true),
             Some(base) => {
@@ -208,7 +282,7 @@ pub(crate) fn merge_settings(base: Option<&Value>, local: &Value, remote: &Value
         };
         if theirs_changed {
             if mine_changed {
-                out.conflicts.push(key.clone());
+                out.conflicts.push(SettingConflict { key: key.clone(), item: None });
             }
             out.apply.insert(key.clone(), theirs.clone());
         }
@@ -394,7 +468,72 @@ mod tests {
         let out = merge_settings(Some(&base), &local, &remote);
 
         assert_eq!(Value::Object(out.apply), json!({"fontSize": 16, "scrollback": 9000}), "theme changed here only; fontFamily is missing there, not deleted");
-        assert_eq!(out.conflicts, ["scrollback"]);
+        assert_eq!(out.conflicts, [SettingConflict { key: "scrollback".into(), item: None }]);
+    }
+
+    fn button(id: &str, label: &str) -> Value {
+        json!({"id": id, "label": label, "command": "ls"})
+    }
+
+    #[test]
+    fn a_list_changed_on_both_sides_merges_element_by_element() {
+        let base = json!({"quickButtons": [button("a", "A"), button("b", "B"), button("c", "C")]});
+        // Here: b deleted, d added. There: a relabelled, e added.
+        let local = json!({"quickButtons": [button("a", "A"), button("c", "C"), button("d", "D")]});
+        let remote = json!({"quickButtons": [button("a", "A2"), button("b", "B"), button("c", "C"), button("e", "E")]});
+
+        let out = merge_settings(Some(&base), &local, &remote);
+
+        assert_eq!(out.apply["quickButtons"], json!([button("a", "A2"), button("c", "C"), button("d", "D"), button("e", "E")]), "local order, then what the cloud copy added");
+        assert!(out.conflicts.is_empty());
+    }
+
+    #[test]
+    fn the_same_element_changed_on_both_sides_is_a_named_conflict() {
+        let base = json!({"outputRules": [{"id": "r1", "name": "errors", "pattern": "ERR"}]});
+        let local = json!({"outputRules": [{"id": "r1", "name": "errors", "pattern": "ERROR"}]});
+        let remote = json!({"outputRules": [{"id": "r1", "name": "errors", "pattern": "FATAL"}]});
+
+        let out = merge_settings(Some(&base), &local, &remote);
+
+        assert_eq!(out.apply["outputRules"][0]["pattern"], json!("FATAL"));
+        assert_eq!(out.conflicts, [SettingConflict { key: "outputRules".into(), item: Some("errors".into()) }]);
+    }
+
+    #[test]
+    fn a_list_only_one_side_changed_stands_as_it_is_order_included() {
+        let base = json!({"quickButtons": [button("a", "A"), button("b", "B")]});
+        let reordered = json!({"quickButtons": [button("b", "B"), button("a", "A")]});
+
+        // Reordered there, untouched here: take it as is.
+        let out = merge_settings(Some(&base), &base, &reordered);
+        assert_eq!(out.apply["quickButtons"], reordered["quickButtons"]);
+        // Reordered here, untouched there: nothing to apply.
+        let out = merge_settings(Some(&base), &reordered, &base);
+        assert!(out.apply.is_empty() && out.conflicts.is_empty());
+    }
+
+    #[test]
+    fn lists_of_strings_merge_by_value_and_without_a_base_they_union() {
+        let base = json!({"bookmarkGroups": ["prod", "lab"]});
+        let out = merge_settings(Some(&base), &json!({"bookmarkGroups": ["prod", "lab", "home"]}), &json!({"bookmarkGroups": ["prod", "office"]}));
+        assert_eq!(out.apply["bookmarkGroups"], json!(["prod", "home", "office"]), "lab was deleted there, home added here, office added there");
+
+        let out = merge_settings(None, &json!({"bookmarkGroups": ["home"]}), &json!({"bookmarkGroups": ["office"]}));
+        assert_eq!(out.apply["bookmarkGroups"], json!(["home", "office"]), "a first merge keeps what this device already had");
+    }
+
+    #[test]
+    fn a_list_without_usable_keys_is_merged_as_a_whole() {
+        let base = json!({"weights": [1, 2]});
+        let out = merge_settings(Some(&base), &json!({"weights": [1, 2, 3]}), &json!({"weights": [9]}));
+        assert_eq!(out.apply["weights"], json!([9]));
+        assert_eq!(out.conflicts, [SettingConflict { key: "weights".into(), item: None }]);
+
+        // A repeated id is not a usable key either.
+        let twice = json!({"quickButtons": [button("a", "A"), button("a", "again")]});
+        let out = merge_settings(Some(&json!({"quickButtons": []})), &twice, &json!({"quickButtons": [button("b", "B")]}));
+        assert_eq!(out.apply["quickButtons"], json!([button("b", "B")]));
     }
 
     #[test]
