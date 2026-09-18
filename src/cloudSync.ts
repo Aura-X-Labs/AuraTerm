@@ -58,6 +58,8 @@ export interface SyncResult {
   pulled: boolean;
   bookmarksTotal: number;
   bookmarksAdded: number;
+  /** Existing bookmarks whose content the merge actually changed. */
+  bookmarksUpdated: number;
   knownHostsAdded: number;
   credentialsSynced: number;
   credentialsSkipped: CredentialsSkipReason | null;

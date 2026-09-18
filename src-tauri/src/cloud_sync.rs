@@ -38,6 +38,20 @@
 //! performs a two-way sync (merge-pull, then push the merged result) with the
 //! server's optimistic-concurrency version.
 //!
+//! Two rules keep that loop from undoing local work (design
+//! `docs/plans/sync-merge-rules-design.md`, phase 0):
+//!
+//! - **Fast-forward.** While the cloud copy is still the upload this device
+//!   last merged (`SyncConfig::merged_stamp`), nothing in it is news: the local
+//!   state is that copy plus whatever was edited or deleted here since, so the
+//!   merge is skipped and the local state is uploaded as is. Merging anyway
+//!   would let the older cloud copy win by id and roll the local edit back.
+//! - **Nothing is dropped, nothing is re-sent.** The vault is replaced
+//!   wholesale on a push, so sections this device does not upload — settings
+//!   or known-hosts switched off, the credentials envelope while the master
+//!   password is locked — are carried over from the cloud copy; and when the
+//!   upload would not change the cloud copy at all, it is not sent.
+//!
 //! Vaults uploaded by older builds (`e2e-v1`, encrypted under the removed sync
 //! passphrase) are detected on pull and handed to the one-time migration in
 //! `cloud_sync_legacy.rs`; they are never overwritten silently.
@@ -129,6 +143,13 @@ pub(crate) struct SyncConfig {
     pub(crate) device_label: String,
     pub(crate) last_sync_at: Option<u64>,
     pub(crate) last_remote_version: Option<String>,
+    /// [`vault_stamp`] of the upload whose tier-1 sections this device has
+    /// fully merged (or written itself). While the cloud copy still carries
+    /// this stamp the local state is authoritative and the merge is skipped.
+    pub(crate) merged_stamp: Option<String>,
+    /// Same for the credentials envelope, which lags behind whenever it was
+    /// skipped (master password locked, different password, …).
+    pub(crate) credentials_merged_stamp: Option<String>,
     /// Set once when a removed provider (Gist / WebDAV) was found in the stored
     /// config; the UI shows a notice until the user acknowledges it.
     pub(crate) legacy_provider_notice: bool,
@@ -179,6 +200,14 @@ fn is_signed_in(config: &SyncConfig) -> bool {
     config.auraxlab.token.starts_with("axsync_")
 }
 
+/// Drop everything remembered about the cloud copy, so the next sync merges
+/// it in full instead of fast-forwarding past it.
+fn forget_remote(config: &mut SyncConfig) {
+    config.last_remote_version = None;
+    config.merged_stamp = None;
+    config.credentials_merged_stamp = None;
+}
+
 /// GitHub Gist, Gitee Gist and WebDAV were removed (design §1.3). Their
 /// fields are simply no longer part of `SyncConfig`, so the next save drops the
 /// stored tokens; here the selection is cleared and the one-time notice raised.
@@ -187,7 +216,7 @@ fn migrate_removed_providers(config: &mut SyncConfig) -> bool {
     match config.provider.as_str() {
         "github" | "gitee" | "webdav" => {
             config.provider = if is_signed_in(config) { "auraxlab".to_string() } else { String::new() };
-            config.last_remote_version = None;
+            forget_remote(config);
             config.legacy_provider_notice = true;
             true
         }
@@ -264,6 +293,14 @@ pub struct SyncSettingsInput {
 }
 
 fn apply_input(config: &mut SyncConfig, input: SyncSettingsInput) {
+    // A section that was off has never been merged from the cloud copy, so the
+    // next sync must not fast-forward past it.
+    if (input.include_settings && !config.include_settings) || (input.include_known_hosts && !config.include_known_hosts) {
+        config.merged_stamp = None;
+    }
+    if input.include_credentials && !config.include_credentials {
+        config.credentials_merged_stamp = None;
+    }
     config.include_settings = input.include_settings;
     config.include_known_hosts = input.include_known_hosts;
     config.include_credentials = input.include_credentials;
@@ -339,6 +376,8 @@ pub struct SyncResult {
     pub(crate) pulled: bool,
     pub(crate) bookmarks_total: usize,
     pub(crate) bookmarks_added: usize,
+    /// Existing bookmarks whose content the merge actually changed.
+    pub(crate) bookmarks_updated: usize,
     pub(crate) known_hosts_added: usize,
     pub(crate) credentials_synced: usize,
     /// One of the [`skip`] codes when credential sync was requested but did
@@ -406,7 +445,7 @@ fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<bool, String
 /// in-memory device, so two "devices" can sync through one mock vault.
 pub(crate) trait SyncStore {
     fn bookmarks(&self) -> Result<Vec<SavedConnection>, String>;
-    fn write_bookmarks(&self, items: &Vec<SavedConnection>) -> Result<(), String>;
+    fn write_bookmarks(&self, items: &[SavedConnection]) -> Result<(), String>;
     fn settings_subset(&self) -> Result<Value, String>;
     /// Returns whether any synced key actually changed.
     fn apply_settings_subset(&self, subset: &Value) -> Result<bool, String>;
@@ -438,7 +477,7 @@ impl SyncStore for AppStore<'_> {
         connections::load_connections(self.app)
     }
 
-    fn write_bookmarks(&self, items: &Vec<SavedConnection>) -> Result<(), String> {
+    fn write_bookmarks(&self, items: &[SavedConnection]) -> Result<(), String> {
         connections::write_connections(self.app, items)
     }
 
@@ -485,24 +524,28 @@ impl SyncStore for AppStore<'_> {
     }
 }
 
+/// Seal `credentials` into a tier-2 envelope under the master password.
+fn seal_envelope(credentials: &[StoredCredential], password: &str) -> Result<CredentialsEnvelope, String> {
+    let plaintext = Zeroizing::new(serde_json::to_vec(credentials).map_err(|e| e.to_string())?);
+    let blob = encryption::encrypt_credentials_envelope(&plaintext, password)?;
+    Ok(CredentialsEnvelope {
+        format: encryption::CRED_ENVELOPE_FORMAT.to_string(),
+        blob: STANDARD.encode(blob),
+    })
+}
+
 /// Seal the local credential store into a tier-2 envelope, or say why not.
 fn seal_credentials(store: &impl SyncStore) -> Result<Result<CredentialsEnvelope, &'static str>, String> {
     let password = match store.envelope_key()? {
         Ok(password) => password,
         Err(reason) => return Ok(Err(reason)),
     };
-    let credentials = store.credentials()?;
-    let plaintext = Zeroizing::new(serde_json::to_vec(&credentials).map_err(|e| e.to_string())?);
-    let blob = encryption::encrypt_credentials_envelope(&plaintext, &password)?;
-    Ok(Ok(CredentialsEnvelope {
-        format: encryption::CRED_ENVELOPE_FORMAT.to_string(),
-        blob: STANDARD.encode(blob),
-    }))
+    Ok(Ok(seal_envelope(&store.credentials()?, &password)?))
 }
 
-/// Assemble the current device state into a payload, honoring the include
-/// flags. The second value is the credentials skip reason, if any.
-async fn build_payload(store: &impl SyncStore, config: &SyncConfig) -> Result<(SyncPayload, Option<String>), String> {
+/// Assemble this device's tier-1 state into a payload, honoring the include
+/// flags. The credentials envelope is the caller's to add.
+async fn build_tier1_payload(store: &impl SyncStore, config: &SyncConfig) -> Result<SyncPayload, String> {
     let mut payload = SyncPayload {
         schema: PAYLOAD_SCHEMA,
         exported_at: now_ms(),
@@ -519,16 +562,58 @@ async fn build_payload(store: &impl SyncStore, config: &SyncConfig) -> Result<(S
     if config.include_known_hosts {
         payload.known_hosts = store.known_hosts().await?;
     }
+    Ok(payload)
+}
 
-    let mut skipped = None;
-    if config.include_credentials {
-        match seal_credentials(store)? {
-            Ok(envelope) => payload.credentials = Some(envelope),
-            Err(reason) => skipped = Some(reason.to_string()),
+/// Identifies one upload of the vault: the server version plus the payload's
+/// own export stamp, so a vault that was deleted and recreated (its versions
+/// start over) is never mistaken for the copy this device merged.
+fn vault_stamp(version: &Option<String>, payload: &SyncPayload) -> Option<String> {
+    version.as_ref().map(|v| format!("{v}@{}@{}", payload.exported_at, payload.device_id))
+}
+
+/// Fill in what this upload would otherwise drop from the cloud copy: whole
+/// sections this device does not upload, and settings keys it does not know
+/// (a newer build syncs more of them). The vault is replaced wholesale on
+/// every push, so anything left out is gone for the other devices.
+fn carry_over(outgoing: &mut SyncPayload, remote: &SyncPayload, config: &SyncConfig) {
+    match (&mut outgoing.settings, &remote.settings) {
+        (None, Some(theirs)) => outgoing.settings = Some(theirs.clone()),
+        (Some(Value::Object(ours)), Some(Value::Object(theirs))) => {
+            for (key, value) in theirs {
+                if !ours.contains_key(key) {
+                    ours.insert(key.clone(), value.clone());
+                }
+            }
         }
+        _ => {}
     }
+    if !config.include_known_hosts {
+        outgoing.known_hosts = remote.known_hosts.clone();
+    }
+    if outgoing.credentials.is_none() {
+        outgoing.credentials = remote.credentials.clone();
+    }
+}
 
-    Ok((payload, skipped))
+/// Whether uploading `outgoing` would change the tier-1 content of the cloud
+/// copy. Bookmark order is not synced, and the export stamp and device fields
+/// differ on every upload by design, so none of those count.
+fn tier1_differs(outgoing: &SyncPayload, remote: &SyncPayload) -> bool {
+    fn by_id(items: &[SavedConnection]) -> Option<HashMap<&str, Value>> {
+        let map: HashMap<&str, Value> = items.iter().map(|c| Some((c.id.as_str(), serde_json::to_value(c).ok()?))).collect::<Option<_>>()?;
+        (map.len() == items.len()).then_some(map)
+    }
+    match (by_id(&outgoing.bookmarks), by_id(&remote.bookmarks)) {
+        (Some(ours), Some(theirs)) if ours == theirs => {}
+        _ => return true,
+    }
+    outgoing.settings != remote.settings || outgoing.known_hosts != remote.known_hosts
+}
+
+/// Whether two credential lists hold different entries, in any order.
+fn credentials_differ(ours: &[StoredCredential], theirs: &[StoredCredential]) -> bool {
+    ours.len() != theirs.len() || ours.iter().any(|c| !theirs.contains(c))
 }
 
 /// Merge tier-1 data (bookmarks, settings, known-hosts) into local state.
@@ -545,8 +630,11 @@ pub(crate) async fn apply_tier1(
     let local = store.bookmarks()?;
     let merged = merge_bookmarks(local, bookmarks, replace);
     result.bookmarks_added = merged.added;
+    result.bookmarks_updated = merged.updated;
     result.bookmarks_total = merged.items.len();
-    store.write_bookmarks(&merged.items)?;
+    if replace || merged.added > 0 || merged.updated > 0 {
+        store.write_bookmarks(&merged.items)?;
+    }
 
     if let Some(subset) = settings_subset {
         if config.include_settings {
@@ -595,6 +683,20 @@ fn merge_credentials(local: &mut Vec<StoredCredential>, incoming: Vec<StoredCred
     changed
 }
 
+/// Decrypt a tier-2 envelope, or say with a [`skip`] code why it cannot be read.
+fn open_envelope(envelope: &CredentialsEnvelope, password: &str) -> Result<Vec<StoredCredential>, &'static str> {
+    if envelope.format != encryption::CRED_ENVELOPE_FORMAT {
+        return Err(skip::CORRUPT);
+    }
+    let blob = STANDARD.decode(envelope.blob.trim()).map_err(|_| skip::CORRUPT)?;
+    let plaintext = match encryption::decrypt_credentials_envelope(&blob, password) {
+        Ok(plaintext) => Zeroizing::new(plaintext),
+        Err(error) if error.contains("different master password") => return Err(skip::MISMATCH),
+        Err(_) => return Err(skip::CORRUPT),
+    };
+    serde_json::from_slice(&plaintext).map_err(|_| skip::CORRUPT)
+}
+
 /// Open the tier-2 envelope and merge it, or record why it was skipped. A
 /// skipped or unreadable envelope never fails the tier-1 merge (design §9).
 fn apply_credentials_envelope(store: &impl SyncStore, envelope: &CredentialsEnvelope, result: &mut SyncResult) -> Result<(), String> {
@@ -609,26 +711,65 @@ fn apply_credentials_envelope(store: &impl SyncStore, envelope: &CredentialsEnve
             return Ok(());
         }
     };
-    let Ok(blob) = STANDARD.decode(envelope.blob.trim()) else {
-        result.credentials_skipped = Some(skip::CORRUPT.to_string());
-        return Ok(());
-    };
-    let plaintext = match encryption::decrypt_credentials_envelope(&blob, &password) {
-        Ok(plaintext) => Zeroizing::new(plaintext),
-        Err(error) => {
-            result.credentials_skipped = Some(if error.contains("different master password") { skip::MISMATCH } else { skip::CORRUPT }.to_string());
-            return Ok(());
-        }
-    };
-    let incoming: Vec<StoredCredential> = match serde_json::from_slice(&plaintext) {
-        Ok(list) => list,
-        Err(_) => {
-            result.credentials_skipped = Some(skip::CORRUPT.to_string());
-            return Ok(());
-        }
-    };
-    result.credentials_synced = merge_plain_credentials(store, incoming)?;
+    match open_envelope(envelope, &password) {
+        Ok(incoming) => result.credentials_synced = merge_plain_credentials(store, incoming)?,
+        Err(reason) => result.credentials_skipped = Some(reason.to_string()),
+    }
     Ok(())
+}
+
+/// What the credentials half of a two-way sync puts into the upload.
+struct CredentialsPlan {
+    /// Freshly sealed, or the cloud envelope carried over untouched.
+    envelope: Option<CredentialsEnvelope>,
+    /// Whether that differs from what the cloud copy holds.
+    changed: bool,
+    /// Whether the local store now contains everything in the cloud envelope.
+    merged: bool,
+}
+
+/// Merge the cloud envelope (unless `current`: the cloud copy is still the one
+/// this device merged, so the local store is authoritative) and decide what
+/// the upload carries. Whenever this device cannot seal — credential sync off,
+/// device-local key, master password locked — the cloud envelope is carried
+/// over as is, so the push does not wipe it for the other devices.
+fn reconcile_credentials(
+    store: &impl SyncStore,
+    config: &SyncConfig,
+    remote: Option<&CredentialsEnvelope>,
+    current: bool,
+    result: &mut SyncResult,
+) -> Result<CredentialsPlan, String> {
+    let carried = CredentialsPlan { envelope: remote.cloned(), changed: false, merged: false };
+    if !config.include_credentials {
+        return Ok(carried);
+    }
+    let password = match store.envelope_key()? {
+        Ok(password) => password,
+        Err(reason) => {
+            result.credentials_skipped = Some(reason.to_string());
+            return Ok(carried);
+        }
+    };
+    let theirs = match remote.map(|envelope| open_envelope(envelope, &password)) {
+        None => Some(Vec::new()),
+        Some(Ok(list)) => Some(list),
+        Some(Err(reason)) => {
+            result.credentials_skipped = Some(reason.to_string());
+            None
+        }
+    };
+    if let (Some(list), false) = (&theirs, current) {
+        result.credentials_synced = merge_plain_credentials(store, list.clone())?;
+    }
+    let ours = store.credentials()?;
+    // An envelope this device cannot read is replaced by its own, as before.
+    let changed = theirs.as_ref().is_none_or(|list| credentials_differ(&ours, list));
+    Ok(CredentialsPlan {
+        envelope: if changed { Some(seal_envelope(&ours, &password)?) } else { remote.cloned() },
+        changed,
+        merged: true,
+    })
 }
 
 /// Merge a downloaded payload into local state.
@@ -646,6 +787,8 @@ async fn apply_payload(store: &impl SyncStore, config: &SyncConfig, payload: Syn
 struct MergeOutcome {
     items: Vec<SavedConnection>,
     added: usize,
+    /// Existing entries the incoming copy actually changed.
+    updated: usize,
 }
 
 /// Union by id; the incoming (remote) copy wins on a conflict. With `replace`,
@@ -653,19 +796,23 @@ struct MergeOutcome {
 fn merge_bookmarks(local: Vec<SavedConnection>, remote: Vec<SavedConnection>, replace: bool) -> MergeOutcome {
     if replace {
         let added = remote.len();
-        return MergeOutcome { items: remote, added };
+        return MergeOutcome { items: remote, added, updated: 0 };
     }
     let mut items = local;
     let mut added = 0usize;
+    let mut updated = 0usize;
     for incoming in remote {
         if let Some(pos) = items.iter().position(|c| c.id == incoming.id) {
+            if serde_json::to_value(&items[pos]).ok() != serde_json::to_value(&incoming).ok() {
+                updated += 1;
+            }
             items[pos] = incoming;
         } else {
             items.push(incoming);
             added += 1;
         }
     }
-    MergeOutcome { items, added }
+    MergeOutcome { items, added, updated }
 }
 
 fn parse_payload(text: &str) -> Result<SyncPayload, String> {
@@ -739,7 +886,7 @@ fn migrate_legacy_auraxlab_config(config: &mut SyncConfig) -> bool {
         config.auraxlab.account_subject.clear();
         config.auraxlab.email.clear();
         config.auraxlab.username.clear();
-        config.last_remote_version = None;
+        forget_remote(config);
         changed = true;
     } else if config.auraxlab.email.is_empty() && config.auraxlab.username.contains('@') {
         // The old username cache actually held the login email.
@@ -841,26 +988,78 @@ fn ensure_device_id(config: &mut SyncConfig) {
     }
 }
 
-/// Build the current device state and push it as `rest-v2`, based on
-/// `base_version` (or the config's last known version). Updates the config.
-pub(crate) async fn push_current_state(store: &impl SyncStore, config: &mut SyncConfig, base_version: Option<String>, result: &mut SyncResult) -> Result<(), String> {
-    ensure_device_id(config);
-    let (payload, skipped) = build_payload(store, config).await?;
-    let text = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+/// A parsed `rest-v2` cloud copy and the version it was served at.
+pub(crate) struct RemoteCopy {
+    payload: SyncPayload,
+    version: Option<String>,
+}
+
+impl RemoteCopy {
+    fn stamp(&self) -> Option<String> {
+        vault_stamp(&self.version, &self.payload)
+    }
+}
+
+/// `PUT` the payload on top of `base_version` (or the last known version) and
+/// note the new cloud version. The caller saves the config.
+async fn upload(config: &mut SyncConfig, payload: &SyncPayload, base_version: Option<String>, result: &mut SyncResult) -> Result<(), String> {
+    let text = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let base = base_version.or_else(|| config.last_remote_version.clone());
     let version = auraxlab_push(&config.auraxlab, &text, base.as_deref(), &config.device_id, &config.device_label).await?;
     config.last_sync_at = Some(now_ms());
     if version.is_some() {
         config.last_remote_version = version.clone();
     }
-    store.save_config(config)?;
     result.pushed = true;
     result.bookmarks_total = payload.bookmarks.len();
     result.remote_version = version;
-    if result.credentials_skipped.is_none() {
-        result.credentials_skipped = skipped;
-    }
     Ok(())
+}
+
+/// Upload this device's state as it is, without merging: the cloud copy
+/// becomes a mirror of it. `carry` is the cloud copy being replaced, if one
+/// was read, so the sections this device does not upload survive.
+pub(crate) async fn push_current_state(
+    store: &impl SyncStore,
+    config: &mut SyncConfig,
+    base_version: Option<String>,
+    carry: Option<&RemoteCopy>,
+    result: &mut SyncResult,
+) -> Result<(), String> {
+    ensure_device_id(config);
+    let mut payload = build_tier1_payload(store, config).await?;
+    if config.include_credentials {
+        match seal_credentials(store)? {
+            Ok(envelope) => payload.credentials = Some(envelope),
+            Err(reason) if result.credentials_skipped.is_none() => result.credentials_skipped = Some(reason.to_string()),
+            Err(_) => {}
+        }
+    }
+    let sealed = payload.credentials.is_some();
+    if let Some(remote) = carry {
+        carry_over(&mut payload, &remote.payload, config);
+    }
+    upload(config, &payload, base_version, result).await?;
+
+    let stamp = vault_stamp(&result.remote_version, &payload);
+    // A carried envelope is still the one this device merged, if it had.
+    let envelope_known = sealed || carry.is_some_and(|remote| remote.stamp().is_some() && remote.stamp() == config.credentials_merged_stamp);
+    config.credentials_merged_stamp = if envelope_known { stamp.clone() } else { None };
+    config.merged_stamp = stamp;
+    store.save_config(config)
+}
+
+/// `GET` the vault as a `rest-v2` copy. `Ok(None)` means nothing has been
+/// uploaded yet; a legacy vault is an error so it is never merged or replaced
+/// by accident.
+async fn pull_remote_copy(config: &SyncConfig) -> Result<Option<RemoteCopy>, String> {
+    let Some(remote) = auraxlab_pull(&config.auraxlab).await? else {
+        return Ok(None);
+    };
+    match remote.content {
+        RemoteContent::Payload(text) => Ok(Some(RemoteCopy { payload: parse_payload(&text)?, version: remote.version })),
+        RemoteContent::LegacyBlob(_) => Err(ERR_LEGACY_VAULT.to_string()),
+    }
 }
 
 // ============================================================================
@@ -919,27 +1118,36 @@ pub async fn cloud_sync_now(app: AppHandle, master_state: State<'_, MasterPasswo
 
 /// Upload this device's state without merging the cloud copy first.
 async fn push_only(store: &impl SyncStore, config: &mut SyncConfig) -> Result<SyncResult, String> {
+    // Read the copy being replaced only to carry over what this device does
+    // not upload. A copy that cannot be read (legacy, corrupt) is replaced
+    // outright, as before — this is the way out of a broken vault.
+    let carry = pull_remote_copy(config).await.ok().flatten();
     let mut result = SyncResult::default();
-    push_current_state(store, config, None, &mut result).await?;
+    push_current_state(store, config, None, carry.as_ref(), &mut result).await?;
     result.message = "Uploaded to your AuraXLab account.".to_string();
     Ok(result)
 }
 
 /// Download the cloud copy and merge it (or, with `replace`, adopt it).
 async fn pull_only(store: &impl SyncStore, config: &mut SyncConfig, replace: bool) -> Result<SyncResult, String> {
-    let Some(remote) = auraxlab_pull(&config.auraxlab).await? else {
+    let Some(remote) = pull_remote_copy(config).await? else {
         return Err("Your AuraXLab account has no synced data yet.".to_string());
     };
-    let payload = match remote.content {
-        RemoteContent::Payload(text) => parse_payload(&text)?,
-        RemoteContent::LegacyBlob(_) => return Err(ERR_LEGACY_VAULT.to_string()),
-    };
+    let stamp = remote.stamp();
+    let has_envelope = remote.payload.credentials.is_some();
 
-    let mut result = apply_payload(store, config, payload, replace).await?;
+    let mut result = apply_payload(store, config, remote.payload, replace).await?;
     config.last_sync_at = Some(now_ms());
     if remote.version.is_some() {
         config.last_remote_version = remote.version.clone();
     }
+    let envelope_merged = config.include_credentials && (!has_envelope || result.credentials_skipped.is_none());
+    if !envelope_merged && config.credentials_merged_stamp != stamp {
+        config.credentials_merged_stamp = None;
+    } else {
+        config.credentials_merged_stamp = stamp.clone();
+    }
+    config.merged_stamp = stamp;
     store.save_config(config)?;
 
     result.remote_version = remote.version;
@@ -951,28 +1159,60 @@ async fn pull_only(store: &impl SyncStore, config: &mut SyncConfig, replace: boo
     Ok(result)
 }
 
-/// Two-way sync: merge-pull, then push the merged result back.
+/// Two-way sync: merge what is news in the cloud copy, then upload the result
+/// if it says anything the cloud copy does not.
 async fn sync_now(store: &impl SyncStore, config: &mut SyncConfig) -> Result<SyncResult, String> {
-    // 1) Pull & merge. Only "nothing uploaded yet" proceeds straight to the
-    //    push; every other failure — including a legacy vault — stops here so
-    //    the cloud copy is never overwritten by mistake.
     let mut result = SyncResult::default();
-    let mut base_version = None;
-    match auraxlab_pull(&config.auraxlab).await? {
-        Some(remote) => {
-            let payload = match remote.content {
-                RemoteContent::Payload(text) => parse_payload(&text)?,
-                RemoteContent::LegacyBlob(_) => return Err(ERR_LEGACY_VAULT.to_string()),
-            };
-            result = apply_payload(store, config, payload, false).await?;
-            base_version = remote.version;
-        }
-        None => result.message = "(first sync) ".to_string(),
-    }
+    // Only "nothing uploaded yet" proceeds straight to the push; every other
+    // failure — including a legacy vault — stops here so the cloud copy is
+    // never overwritten by mistake.
+    let Some(remote) = pull_remote_copy(config).await? else {
+        result.message = "(first sync) ".to_string();
+        push_current_state(store, config, None, None, &mut result).await?;
+        result.message.push_str("Two-way sync complete.");
+        return Ok(result);
+    };
 
-    // 2) Push the merged result back.
-    push_current_state(store, config, base_version, &mut result).await?;
-    result.message.push_str("Two-way sync complete.");
+    // 1) Merge, unless the cloud copy is still the upload this device last
+    //    merged. Then the local state is that copy plus the edits and deletes
+    //    made here since, and merging would let the older copy win them back.
+    let stamp = remote.stamp();
+    let tier1_current = stamp.is_some() && config.merged_stamp == stamp;
+    let credentials_current = stamp.is_some() && config.credentials_merged_stamp == stamp;
+    let theirs = &remote.payload;
+    if !tier1_current {
+        apply_tier1(store, config, theirs.bookmarks.clone(), theirs.settings.as_ref(), theirs.known_hosts.clone(), false, &mut result).await?;
+    }
+    let plan = reconcile_credentials(store, config, theirs.credentials.as_ref(), credentials_current, &mut result)?;
+
+    // 2) Upload the result — unless the cloud copy already says the same.
+    ensure_device_id(config);
+    let mut outgoing = build_tier1_payload(store, config).await?;
+    outgoing.credentials = plan.envelope;
+    carry_over(&mut outgoing, theirs, config);
+    let stamp_after = if plan.changed || tier1_differs(&outgoing, theirs) {
+        upload(config, &outgoing, remote.version.clone(), &mut result).await?;
+        vault_stamp(&result.remote_version, &outgoing)
+    } else {
+        config.last_sync_at = Some(now_ms());
+        if remote.version.is_some() {
+            config.last_remote_version = remote.version.clone();
+        }
+        result.bookmarks_total = outgoing.bookmarks.len();
+        result.remote_version = remote.version.clone();
+        stamp
+    };
+    config.credentials_merged_stamp = if plan.merged || credentials_current { stamp_after.clone() } else { None };
+    config.merged_stamp = stamp_after;
+    store.save_config(config)?;
+
+    let merged_anything = result.settings_applied || result.bookmarks_added + result.bookmarks_updated + result.known_hosts_added + result.credentials_synced > 0;
+    if result.pushed || merged_anything {
+        result.message = "Two-way sync complete.".to_string();
+    } else {
+        result.pulled = false;
+        result.message = "Already up to date.".to_string();
+    }
     Ok(result)
 }
 
@@ -1092,6 +1332,10 @@ pub(crate) fn store_account_login(app: &AppHandle, subject: &str, email: &str, u
         return Err("AuraXLab returned an invalid account credential.".to_string());
     }
     let mut config = load_config(app)?;
+    if config.auraxlab.account_subject != subject {
+        // Another account's vault: its versions say nothing about this one.
+        forget_remote(&mut config);
+    }
     config.provider = "auraxlab".to_string();
     config.auraxlab.account_subject = subject.to_string();
     config.auraxlab.email = email.to_string();
@@ -1109,7 +1353,7 @@ pub(crate) fn clear_account_login(app: &AppHandle) -> Result<(), String> {
     config.auraxlab.email.clear();
     config.auraxlab.username.clear();
     config.auraxlab.token.clear();
-    config.last_remote_version = None;
+    forget_remote(&mut config);
     save_config(app, &config)
 }
 
@@ -1648,5 +1892,471 @@ pub(crate) mod tests {
         let stale = auraxlab_push(&cfg, &payload_text("it-2"), Some("0"), "it-device", "ci").await;
         assert!(stale.is_err(), "stale push should 409");
         eprintln!("OK real AuraXLab v2 round-trip + conflict against {base_url}");
+    }
+
+    // ========================================================================
+    // Two-way sync flow: in-memory devices sharing one mock vault
+    // ========================================================================
+
+    const MASTER: &str = "master-pw";
+
+    /// An in-memory device: what [`AppStore`] keeps in the config directory.
+    pub(crate) struct FakeDevice {
+        bookmarks: Mutex<Vec<SavedConnection>>,
+        settings: Mutex<serde_json::Map<String, Value>>,
+        known_hosts: Mutex<HashMap<String, String>>,
+        credentials: Mutex<Vec<StoredCredential>>,
+        /// The master password when unlocked, otherwise the skip code.
+        envelope_key: Mutex<Result<String, &'static str>>,
+        pub(crate) config: SyncConfig,
+    }
+
+    impl FakeDevice {
+        /// Signed in to the mock vault, syncing every section, unlocked.
+        pub(crate) fn new(base: &str, label: &str) -> Self {
+            Self {
+                bookmarks: Mutex::new(Vec::new()),
+                settings: Mutex::new(serde_json::Map::new()),
+                known_hosts: Mutex::new(HashMap::new()),
+                credentials: Mutex::new(Vec::new()),
+                envelope_key: Mutex::new(Ok(MASTER.to_string())),
+                config: SyncConfig {
+                    provider: "auraxlab".into(),
+                    include_settings: true,
+                    include_known_hosts: true,
+                    include_credentials: true,
+                    device_id: format!("id-{label}"),
+                    device_label: label.to_string(),
+                    auraxlab: mock_provider(base.to_string()),
+                    ..Default::default()
+                },
+            }
+        }
+
+        fn lock(&self, reason: &'static str) {
+            *self.envelope_key.lock().unwrap() = Err(reason);
+        }
+
+        fn unlock(&self) {
+            *self.envelope_key.lock().unwrap() = Ok(MASTER.to_string());
+        }
+
+        fn save_bookmark(&self, item: SavedConnection) {
+            let mut items = self.bookmarks.lock().unwrap();
+            match items.iter().position(|c| c.id == item.id) {
+                Some(pos) => items[pos] = item,
+                None => items.push(item),
+            }
+        }
+
+        fn delete_bookmark(&self, id: &str) {
+            self.bookmarks.lock().unwrap().retain(|c| c.id != id);
+        }
+
+        fn bookmark_names(&self) -> Vec<String> {
+            let mut names: Vec<String> = self.bookmarks.lock().unwrap().iter().map(|c| c.name.clone()).collect();
+            names.sort();
+            names
+        }
+
+        fn set_setting(&self, key: &str, value: Value) {
+            self.settings.lock().unwrap().insert(key.to_string(), value);
+        }
+
+        fn setting(&self, key: &str) -> Option<Value> {
+            self.settings.lock().unwrap().get(key).cloned()
+        }
+
+        fn save_password(&self, id: &str, password: &str) {
+            let mut items = self.credentials.lock().unwrap();
+            items.retain(|c| c.connection_id != id);
+            items.push(credential(id, password));
+        }
+
+        fn password(&self, id: &str) -> Option<String> {
+            self.credentials.lock().unwrap().iter().find(|c| c.connection_id == id).and_then(|c| c.password.clone())
+        }
+
+        async fn sync(&mut self) -> SyncResult {
+            let mut config = self.config.clone();
+            let result = sync_now(&*self, &mut config).await.expect("sync succeeds");
+            self.config = config;
+            result
+        }
+    }
+
+    impl SyncStore for FakeDevice {
+        fn bookmarks(&self) -> Result<Vec<SavedConnection>, String> {
+            Ok(self.bookmarks.lock().unwrap().clone())
+        }
+
+        fn write_bookmarks(&self, items: &[SavedConnection]) -> Result<(), String> {
+            *self.bookmarks.lock().unwrap() = items.to_vec();
+            Ok(())
+        }
+
+        fn settings_subset(&self) -> Result<Value, String> {
+            Ok(Value::Object(self.settings.lock().unwrap().clone()))
+        }
+
+        fn apply_settings_subset(&self, subset: &Value) -> Result<bool, String> {
+            let Value::Object(incoming) = subset else {
+                return Ok(false);
+            };
+            let mut settings = self.settings.lock().unwrap();
+            let mut changed = false;
+            for (key, value) in incoming {
+                if settings.get(key) != Some(value) {
+                    settings.insert(key.clone(), value.clone());
+                    changed = true;
+                }
+            }
+            Ok(changed)
+        }
+
+        async fn known_hosts(&self) -> Result<HashMap<String, String>, String> {
+            Ok(self.known_hosts.lock().unwrap().clone())
+        }
+
+        async fn import_known_hosts(&self, hosts: HashMap<String, String>) -> Result<usize, String> {
+            let mut local = self.known_hosts.lock().unwrap();
+            let before = local.len();
+            for (host, fingerprint) in hosts {
+                local.entry(host).or_insert(fingerprint);
+            }
+            Ok(local.len() - before)
+        }
+
+        fn envelope_key(&self) -> Result<Result<Zeroizing<String>, &'static str>, String> {
+            Ok(self.envelope_key.lock().unwrap().clone().map(Zeroizing::new))
+        }
+
+        fn credentials(&self) -> Result<Vec<StoredCredential>, String> {
+            Ok(self.credentials.lock().unwrap().clone())
+        }
+
+        fn write_credentials(&self, items: Vec<StoredCredential>) -> Result<(), String> {
+            *self.credentials.lock().unwrap() = items;
+            Ok(())
+        }
+
+        fn save_config(&self, _config: &SyncConfig) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn credential(id: &str, password: &str) -> StoredCredential {
+        let mut credential = StoredCredential::default();
+        credential.connection_id = id.to_string();
+        credential.password = Some(password.to_string());
+        credential
+    }
+
+    fn new_vault() -> (MockVault, String) {
+        let vault: MockVault = Arc::new(Mutex::new((None, 0)));
+        let base = spawn_vault_mock(Arc::clone(&vault));
+        (vault, base)
+    }
+
+    fn vault_version(vault: &MockVault) -> i64 {
+        vault.lock().unwrap().1
+    }
+
+    fn vault_payload(vault: &MockVault) -> SyncPayload {
+        let text = vault.lock().unwrap().0.clone().expect("vault holds data").1;
+        parse_payload(&text).expect("vault holds a rest-v2 payload")
+    }
+
+    fn vault_bookmark_names(vault: &MockVault) -> Vec<String> {
+        let mut names: Vec<String> = vault_payload(vault).bookmarks.iter().map(|c| c.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    fn vault_passwords(vault: &MockVault) -> HashMap<String, String> {
+        let envelope = vault_payload(vault).credentials.expect("vault holds a credentials envelope");
+        let blob = STANDARD.decode(envelope.blob).unwrap();
+        let plaintext = encryption::decrypt_credentials_envelope(&blob, MASTER).unwrap();
+        let list: Vec<StoredCredential> = serde_json::from_slice(&plaintext).unwrap();
+        list.iter().map(|c| (c.connection_id.clone(), c.password.clone().unwrap_or_default())).collect()
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_a_local_bookmark_edit() {
+        let (vault, base) = new_vault();
+        let mut device = FakeDevice::new(&base, "laptop");
+        device.save_bookmark(bookmark("a", "before"));
+        device.sync().await;
+
+        device.save_bookmark(bookmark("a", "after"));
+        device.sync().await;
+
+        assert_eq!(device.bookmark_names(), ["after"], "the pull must not roll the edit back");
+        assert_eq!(vault_bookmark_names(&vault), ["after"]);
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_a_local_bookmark_delete() {
+        let (vault, base) = new_vault();
+        let mut device = FakeDevice::new(&base, "laptop");
+        device.save_bookmark(bookmark("a", "keep"));
+        device.save_bookmark(bookmark("b", "drop"));
+        device.sync().await;
+
+        device.delete_bookmark("b");
+        device.sync().await;
+
+        assert_eq!(device.bookmark_names(), ["keep"], "the pull must not bring the bookmark back");
+        assert_eq!(vault_bookmark_names(&vault), ["keep"]);
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_a_local_setting_and_password_edit() {
+        let (vault, base) = new_vault();
+        let mut device = FakeDevice::new(&base, "laptop");
+        device.save_bookmark(bookmark("a", "host"));
+        device.set_setting("fontSize", json!(13));
+        device.save_password("a", "old");
+        device.sync().await;
+
+        device.set_setting("fontSize", json!(16));
+        device.save_password("a", "new");
+        device.sync().await;
+
+        assert_eq!(device.setting("fontSize"), Some(json!(16)));
+        assert_eq!(device.password("a").as_deref(), Some("new"));
+        assert_eq!(vault_payload(&vault).settings.unwrap()["fontSize"], json!(16));
+        assert_eq!(vault_passwords(&vault)["a"], "new");
+    }
+
+    #[tokio::test]
+    async fn sync_with_nothing_to_send_does_not_upload() {
+        let (vault, base) = new_vault();
+        let mut device = FakeDevice::new(&base, "laptop");
+        device.save_bookmark(bookmark("a", "host"));
+        device.save_password("a", "pw");
+        device.sync().await;
+        assert_eq!(vault_version(&vault), 1);
+
+        let result = device.sync().await;
+
+        assert_eq!(vault_version(&vault), 1, "identical data must not be uploaded again");
+        assert!(!result.pushed);
+        assert!(!result.pulled);
+        assert_eq!(result.message, "Already up to date.");
+    }
+
+    #[tokio::test]
+    async fn sync_from_a_locked_device_keeps_the_cloud_credentials() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "host"));
+        desktop.save_password("a", "pw");
+        desktop.sync().await;
+        let sealed = vault_payload(&vault).credentials.expect("desktop uploaded an envelope").blob;
+
+        let mut laptop = FakeDevice::new(&base, "laptop");
+        laptop.lock(skip::MASTER_LOCKED);
+        laptop.save_bookmark(bookmark("b", "other"));
+        let result = laptop.sync().await;
+
+        assert_eq!(result.credentials_skipped.as_deref(), Some(skip::MASTER_LOCKED));
+        assert_eq!(vault_bookmark_names(&vault), ["host", "other"]);
+        let kept = vault_payload(&vault).credentials.expect("the upload must carry the envelope over");
+        assert_eq!(kept.blob, sealed, "carried over verbatim, not re-sealed");
+    }
+
+    #[tokio::test]
+    async fn sync_merges_another_devices_upload_without_echoing_it_back() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "from-desktop"));
+        desktop.sync().await;
+
+        // The laptop lists its own bookmark first, so the two devices end up
+        // with the same set in a different order.
+        let mut laptop = FakeDevice::new(&base, "laptop");
+        laptop.save_bookmark(bookmark("b", "from-laptop"));
+        laptop.sync().await;
+        assert_eq!(vault_version(&vault), 2);
+
+        let result = desktop.sync().await;
+
+        assert_eq!(desktop.bookmark_names(), ["from-desktop", "from-laptop"]);
+        assert!(result.pulled);
+        assert_eq!(result.bookmarks_added, 1);
+        assert!(!result.pushed, "order alone is not a difference worth uploading");
+        assert_eq!(vault_version(&vault), 2);
+
+        // And the desktop keeps fast-forwarding from the laptop's upload.
+        desktop.save_bookmark(bookmark("a", "renamed"));
+        desktop.sync().await;
+        assert_eq!(vault_bookmark_names(&vault), ["from-laptop", "renamed"]);
+    }
+
+    #[tokio::test]
+    async fn sync_merges_the_cloud_credentials_once_the_device_unlocks() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "host"));
+        desktop.save_password("a", "desktop-pw");
+        desktop.sync().await;
+
+        // Locked: tier 1 merges, the envelope does not.
+        let mut laptop = FakeDevice::new(&base, "laptop");
+        laptop.lock(skip::MASTER_LOCKED);
+        laptop.sync().await;
+        assert_eq!(laptop.password("a"), None);
+
+        // Unlocked with the cloud copy unchanged: tier 1 fast-forwards, but
+        // the envelope was never merged and must not be overwritten.
+        laptop.unlock();
+        laptop.save_bookmark(bookmark("b", "other"));
+        laptop.save_password("b", "laptop-pw");
+        let result = laptop.sync().await;
+
+        assert_eq!(result.credentials_synced, 1);
+        assert_eq!(laptop.password("a").as_deref(), Some("desktop-pw"));
+        let cloud = vault_passwords(&vault);
+        assert_eq!(cloud.get("a").map(String::as_str), Some("desktop-pw"));
+        assert_eq!(cloud.get("b").map(String::as_str), Some("laptop-pw"));
+    }
+
+    #[tokio::test]
+    async fn sync_carries_over_sections_this_device_does_not_upload() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "host"));
+        desktop.set_setting("theme", json!("dark"));
+        desktop.known_hosts.lock().unwrap().insert("example.com:22".into(), "SHA256:abc".into());
+        desktop.save_password("a", "pw");
+        desktop.sync().await;
+
+        let mut laptop = FakeDevice::new(&base, "laptop");
+        laptop.config.include_settings = false;
+        laptop.config.include_known_hosts = false;
+        laptop.config.include_credentials = false;
+        laptop.save_bookmark(bookmark("b", "other"));
+        laptop.sync().await;
+
+        let cloud = vault_payload(&vault);
+        assert_eq!(cloud.bookmarks.len(), 2);
+        assert_eq!(cloud.settings.unwrap()["theme"], json!("dark"));
+        assert_eq!(cloud.known_hosts.get("example.com:22").map(String::as_str), Some("SHA256:abc"));
+        assert_eq!(vault_passwords(&vault)["a"], "pw");
+        assert_eq!(laptop.setting("theme"), None, "a section that is off is not applied here either");
+    }
+
+    #[tokio::test]
+    async fn push_only_from_a_locked_device_keeps_the_cloud_credentials() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "host"));
+        desktop.save_password("a", "pw");
+        desktop.sync().await;
+
+        desktop.lock(skip::MASTER_LOCKED);
+        desktop.save_bookmark(bookmark("a", "renamed"));
+        let mut config = desktop.config.clone();
+        let result = push_only(&desktop, &mut config).await.unwrap();
+
+        assert_eq!(result.credentials_skipped.as_deref(), Some(skip::MASTER_LOCKED));
+        assert_eq!(vault_bookmark_names(&vault), ["renamed"]);
+        assert_eq!(vault_passwords(&vault)["a"], "pw");
+    }
+
+    #[tokio::test]
+    async fn sync_does_not_fast_forward_onto_a_recreated_vault() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "from-desktop"));
+        desktop.sync().await;
+
+        // The vault is deleted and another device starts it over: version 1
+        // again, but not the upload the desktop merged.
+        *vault.lock().unwrap() = (None, 0);
+        let mut laptop = FakeDevice::new(&base, "laptop");
+        laptop.save_bookmark(bookmark("b", "from-laptop"));
+        laptop.sync().await;
+        assert_eq!(vault_version(&vault), 1);
+
+        desktop.sync().await;
+
+        assert_eq!(desktop.bookmark_names(), ["from-desktop", "from-laptop"]);
+        assert_eq!(vault_bookmark_names(&vault), ["from-desktop", "from-laptop"]);
+    }
+
+    #[tokio::test]
+    async fn sync_replaces_an_envelope_sealed_under_another_master_password() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "host"));
+        desktop.save_password("a", "desktop-pw");
+        desktop.sync().await;
+
+        let mut laptop = FakeDevice::new(&base, "laptop");
+        *laptop.envelope_key.lock().unwrap() = Ok("another-master".to_string());
+        laptop.save_password("a", "laptop-pw");
+        let result = laptop.sync().await;
+
+        assert_eq!(result.credentials_skipped.as_deref(), Some(skip::MISMATCH));
+        assert_eq!(laptop.password("a").as_deref(), Some("laptop-pw"));
+        let envelope = vault_payload(&vault).credentials.unwrap();
+        assert!(open_envelope(&envelope, "another-master").is_ok(), "unchanged behavior: the unreadable envelope is replaced");
+    }
+
+    #[test]
+    fn switching_a_section_on_forces_the_next_sync_to_merge_it() {
+        let input = |settings: bool, credentials: bool| SyncSettingsInput {
+            include_settings: settings,
+            include_known_hosts: false,
+            include_credentials: credentials,
+            auto_sync: false,
+            device_label: "laptop".into(),
+        };
+        let stamped = || SyncConfig {
+            merged_stamp: Some("3@1@dev".into()),
+            credentials_merged_stamp: Some("3@1@dev".into()),
+            ..Default::default()
+        };
+
+        let mut config = stamped();
+        apply_input(&mut config, input(true, false));
+        assert_eq!(config.merged_stamp, None);
+        assert!(config.credentials_merged_stamp.is_some());
+
+        let mut config = stamped();
+        apply_input(&mut config, input(false, true));
+        assert!(config.merged_stamp.is_some());
+        assert_eq!(config.credentials_merged_stamp, None);
+
+        // Saving unchanged flags, or switching a section off, keeps both.
+        let mut config = SyncConfig { include_settings: true, include_credentials: true, ..stamped() };
+        apply_input(&mut config, input(true, true));
+        apply_input(&mut config, input(false, false));
+        assert!(config.merged_stamp.is_some() && config.credentials_merged_stamp.is_some());
+    }
+
+    #[test]
+    fn carry_over_keeps_settings_keys_this_build_does_not_sync() {
+        let config = SyncConfig { include_settings: true, include_known_hosts: true, ..Default::default() };
+        let remote = SyncPayload { settings: Some(json!({"theme": "dark", "fromANewerBuild": 1})), ..Default::default() };
+        let mut outgoing = SyncPayload { settings: Some(json!({"theme": "light"})), ..Default::default() };
+
+        carry_over(&mut outgoing, &remote, &config);
+
+        assert_eq!(outgoing.settings, Some(json!({"theme": "light", "fromANewerBuild": 1})));
+    }
+
+    #[test]
+    fn tier1_difference_ignores_order_and_export_metadata() {
+        let ours = SyncPayload { exported_at: 1, device_id: "x".into(), bookmarks: vec![bookmark("a", "A"), bookmark("b", "B")], ..Default::default() };
+        let theirs = SyncPayload { exported_at: 2, device_id: "y".into(), bookmarks: vec![bookmark("b", "B"), bookmark("a", "A")], ..Default::default() };
+        assert!(!tier1_differs(&ours, &theirs));
+
+        let renamed = SyncPayload { bookmarks: vec![bookmark("a", "A"), bookmark("b", "renamed")], ..Default::default() };
+        assert!(tier1_differs(&renamed, &theirs));
+        let fewer = SyncPayload { bookmarks: vec![bookmark("a", "A")], ..Default::default() };
+        assert!(tier1_differs(&fewer, &theirs));
     }
 }
