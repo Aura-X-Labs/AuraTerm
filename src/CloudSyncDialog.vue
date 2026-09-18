@@ -7,6 +7,7 @@ import {
   cloudSyncPush,
   cloudSyncPull,
   syncNowConfirmingDeletes,
+  describeSyncResult,
   cloudSyncTestConnection,
   cloudSyncMigrateLegacy,
   classifySyncError,
@@ -114,30 +115,12 @@ async function saveConfig(): Promise<boolean> {
   return next !== undefined;
 }
 
-function describeResult(result: SyncResult): string {
-  const parts: string[] = [];
-  if (result.pulled) {
-    const pulled = [`+${result.bookmarksAdded} bookmarks`];
-    if (result.bookmarksUpdated) pulled.push(`${result.bookmarksUpdated} updated`);
-    if (result.bookmarksRemoved) pulled.push(`${result.bookmarksRemoved} removed`);
-    if (result.knownHostsAdded) pulled.push(`+${result.knownHostsAdded} known-hosts`);
-    if (result.credentialsSynced) pulled.push(`${result.credentialsSynced} creds updated`);
-    if (result.settingsApplied) pulled.push("settings updated");
-    parts.push(`pulled (${pulled.join(", ")})`);
-  }
-  if (result.pushed) parts.push(`pushed (${result.bookmarksTotal} bookmarks)`);
-  const summary = `${result.message} ${parts.join(" ")}`.trim();
-  return result.credentialsSkipped
-    ? `${summary} — ${t(`cloudSync.skipped.${result.credentialsSkipped}`)}`
-    : summary;
-}
-
 async function runAction(action: () => Promise<SyncResult>) {
   if (!(await saveConfig())) return;
   await withBusy(async () => {
     const result = await action();
     hydrate(await getSyncConfig());
-    flash(describeResult(result), Boolean(result.credentialsSkipped));
+    flash(describeSyncResult(result), Boolean(result.credentialsSkipped || result.conflicts.length || result.deletesHeld));
     migrationNeeded.value = false;
     emit("synced", result);
   });

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { t } from "./i18n";
 
 /**
  * Configuration sync IPC layer (design docs/plans/sync-passphrase-removal-design.md).
@@ -53,6 +54,27 @@ export interface SyncSettingsInput {
   deviceLabel: string;
 }
 
+/** What a finished run amounted to (mirrors `SyncOutcome` in cloud_sync.rs). */
+export type SyncOutcome =
+  | "synced"
+  | "firstSync"
+  | "upToDate"
+  | "uploaded"
+  | "merged"
+  | "replaced"
+  | "migrated"
+  | "migrationOverwrote"
+  | "alreadyMigrated";
+
+/** One thing both sides changed differently; the cloud copy won it. */
+export interface SyncConflict {
+  kind: "bookmark" | "credentials" | "setting";
+  /** The bookmark's name, or the settings key. */
+  name: string;
+  /** The element, for a list-valued setting merged item by item. */
+  item: string | null;
+}
+
 /** Bookmark deletes a sync held back for confirmation (9 or more at once). */
 export interface HeldDeletes {
   /** Deleted on this device, not yet dropped from the cloud copy. */
@@ -70,8 +92,9 @@ export interface SyncResult {
   bookmarksUpdated: number;
   /** Bookmarks removed here because the cloud copy dropped them. */
   bookmarksRemoved: number;
+  outcome: SyncOutcome;
   /** What both sides changed differently; the cloud copy won each of them. */
-  conflicts: string[];
+  conflicts: SyncConflict[];
   /** Set when deletes were held back; `cloudSyncNow(true)` carries them out. */
   deletesHeld: HeldDeletes | null;
   knownHostsAdded: number;
@@ -79,6 +102,7 @@ export interface SyncResult {
   credentialsSkipped: CredentialsSkipReason | null;
   settingsApplied: boolean;
   remoteVersion: string | null;
+  /** English, for logs. The UI words its own text: see `describeSyncResult`. */
   message: string;
 }
 
@@ -104,6 +128,50 @@ export function cloudSyncPull(replace: boolean): Promise<SyncResult> {
 
 export function cloudSyncNow(confirmDeletes = false): Promise<SyncResult> {
   return invoke<SyncResult>("cloud_sync_now", { confirmDeletes });
+}
+
+function conflictLabel(conflict: SyncConflict): string {
+  if (conflict.kind === "setting" && conflict.item) {
+    return t("cloudSync.result.conflictSettingItem", { key: conflict.name, item: conflict.item });
+  }
+  return t(`cloudSync.result.conflict.${conflict.kind}`, { name: conflict.name });
+}
+
+/** The notices a run leaves behind even when it succeeded: conflicts and held deletes. */
+export function syncResultNotices(result: Pick<SyncResult, "conflicts" | "deletesHeld">): string[] {
+  const notices: string[] = [];
+  if (result.conflicts.length) {
+    notices.push(t("cloudSync.result.conflicts", {
+      count: result.conflicts.length,
+      list: result.conflicts.map(conflictLabel).join(t("cloudSync.result.separator")),
+    }));
+  }
+  if (result.deletesHeld) {
+    notices.push(t("cloudSync.result.deletesHeld", { count: result.deletesHeld.local + result.deletesHeld.remote }));
+  }
+  return notices;
+}
+
+/**
+ * A finished run in the user's language: what it amounted to, what came in,
+ * what went out, and what needs attention.
+ */
+export function describeSyncResult(result: SyncResult): string {
+  const separator = t("cloudSync.result.separator");
+  const sentences = [t(`cloudSync.result.outcome.${result.outcome}`)];
+  if (result.pulled) {
+    const pulled = [t("cloudSync.result.added", { count: result.bookmarksAdded })];
+    if (result.bookmarksUpdated) pulled.push(t("cloudSync.result.updated", { count: result.bookmarksUpdated }));
+    if (result.bookmarksRemoved) pulled.push(t("cloudSync.result.removed", { count: result.bookmarksRemoved }));
+    if (result.knownHostsAdded) pulled.push(t("cloudSync.result.knownHosts", { count: result.knownHostsAdded }));
+    if (result.credentialsSynced) pulled.push(t("cloudSync.result.credentials", { count: result.credentialsSynced }));
+    if (result.settingsApplied) pulled.push(t("cloudSync.result.settings"));
+    sentences.push(t("cloudSync.result.pulled", { parts: pulled.join(separator) }));
+  }
+  if (result.pushed) sentences.push(t("cloudSync.result.pushed", { count: result.bookmarksTotal }));
+  sentences.push(...syncResultNotices(result));
+  if (result.credentialsSkipped) sentences.push(t(`cloudSync.skipped.${result.credentialsSkipped}`));
+  return sentences.join(t("cloudSync.result.sentenceGap"));
 }
 
 /**

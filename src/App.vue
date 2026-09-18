@@ -74,7 +74,7 @@ import {
 } from "./liveSyncStatus";
 import { accountState, restoreAccount } from "./account";
 import { useLiveAccountFlow } from "./composables/useLiveAccountFlow";
-import { cloudSyncNow, syncNowConfirmingDeletes, getSyncConfig, classifySyncError, type SyncConfigView, type SyncResult } from "./cloudSync";
+import { cloudSyncNow, syncNowConfirmingDeletes, describeSyncResult, getSyncConfig, classifySyncError, type SyncConfigView, type SyncResult } from "./cloudSync";
 import { BOOKMARKS_CHANGED_EVENT, createAutoSync, notifyBookmarksChanged } from "./composables/useAutoSync";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
@@ -1428,7 +1428,7 @@ async function runSyncNow(auto: boolean) {
       ? await cloudSyncNow()
       : await syncNowConfirmingDeletes((held) => confirmDialog(t("cloudSync.confirmDeletes", { ...held })));
     recordSyncResult(result);
-    if (!auto) showCloudToast(t("cloudShare.syncNowDone", { message: result.message }));
+    if (!auto) showCloudToast(describeSyncResult(result));
     refreshSyncViewSilently();
   } catch (error) {
     const text = String(error);
@@ -1451,7 +1451,14 @@ async function runSyncNow(auto: boolean) {
 
 /** A finished run, from the menu or the dialog: keep the partial-success detail. */
 function recordSyncResult(result: SyncResult) {
-  syncRuntime.value = { phase: "ok", message: result.message, at: Date.now(), credentialsSkipped: result.credentialsSkipped };
+  syncRuntime.value = {
+    phase: "ok",
+    message: result.message,
+    at: Date.now(),
+    credentialsSkipped: result.credentialsSkipped,
+    conflicts: result.conflicts,
+    deletesHeld: result.deletesHeld,
+  };
 }
 
 // Keep the native (macOS) Live Sync menu's account label and checkmarks

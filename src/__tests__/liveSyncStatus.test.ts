@@ -210,6 +210,16 @@ describe("Configuration sync and stale snapshots (P2)", () => {
     expect(partial.pill?.kind).toBe("assist");
     expect(syncStatus(synced, { phase: "ok", message: "", at: 1, credentialsSkipped: "mismatch" }).detail)
       .toContain("different master password");
+    // An unattended run has no dialog: conflicts and held deletes stay on the
+    // panel row, with the attention pill, until the next run.
+    const noticed = syncStatus(synced, {
+      phase: "ok", message: "", at: 1,
+      conflicts: [{ kind: "bookmark", name: "prod-db", item: null }],
+      deletesHeld: { local: 0, remote: 9 },
+    });
+    expect(noticed.detail).toContain('1 conflict(s), cloud copy kept: bookmark "prod-db".');
+    expect(noticed.detail).toContain("9 bookmark deletions held back.");
+    expect(noticed.pill?.kind).toBe("assist");
   });
 
   it("marks a failed refresh instead of dropping the previous result", () => {
