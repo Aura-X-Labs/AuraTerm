@@ -79,7 +79,7 @@
 | 成员 | 对端是谁 |
 | --- | --- |
 | **同步** | 你的其它 AuraTerm 安装 —— 书签、设置与 known_hosts 跟随账号；已保存的凭据上传前先用主密码封装，服务器无法读取。启动后、书签变更后与每 30 分钟自动同步。 |
-| **Live Console** | 你的浏览器 —— 在 [auraxlab.com/console](https://auraxlab.com/console) 观看或输入。 |
+| **Live Console** | 你的浏览器 —— 在 [auraxlab.com/cloud/console](https://auraxlab.com/cloud/console) 观看或输入。 |
 | **Live Share** | 外人 —— 发一个一次性分享码，选择只读或可写，审批控制申请。 |
 | **Live Relay** | 你自己的另一台机器 —— 镜像账号下其它设备的会话、申请控制权，或（需显式开启）用对方自己的书签在对方机器上新建本地 / 串口 / SSH 会话。默认关闭，最终裁决永远在被接入的设备上。 |
 
