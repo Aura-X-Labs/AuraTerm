@@ -264,7 +264,7 @@ onMounted(() => {
             <div class="account-actions">
               <button class="account-btn" type="button" :disabled="busy || refreshingProfile" @click="refreshProfile()">{{ t('account.refresh') }}</button>
               <button class="account-btn" type="button" @click="emit('openCloudSync')">{{ t('account.cloudSyncEntry') }}</button>
-              <button class="account-btn" type="button" @click="openExternalUrl('https://auraxlab.com/console')">{{ t('account.openConsole') }}</button>
+              <button class="account-btn" type="button" @click="openExternalUrl('https://auraxlab.com/cloud/console')">{{ t('account.openConsole') }}</button>
               <button v-if="connectionStatus !== 'offline'" class="account-btn" type="button" :disabled="busy" @click="pause">{{ t('account.pauseConsole') }}</button>
               <button class="account-btn danger" type="button" :disabled="busy" @click="signOut">{{ t('account.signOut') }}</button>
             </div>

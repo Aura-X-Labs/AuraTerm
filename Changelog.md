@@ -20,6 +20,7 @@
 - **内容没有变化时不再上传**：两端一致时结果显示 `Already up to date.`，服务器版本号不再空涨。
 - **配置同步结果不再虚报**：反复同步内容相同的数据时，结果提示不再每次都显示「22 creds」「settings」。凭据只统计新增或内容确有变化的条目，设置只有在同步键真的变化时才标记为已更新；内容相同时也不再重写本机凭据库与 `settings.json`。结果文案改为逗号分隔，并新增 `N updated` / `N removed` 计数，例如 `pulled (+1 bookmarks, 2 updated, 1 removed, 1 creds updated)`。
 - **生成的公钥不再残留**：在新建会话或书签编辑器里「生成」私钥后，再浏览选择另一个私钥文件，界面仍显示上一把生成密钥的公钥；现在只有生成的那把密钥仍在使用时才显示其公钥。
+- **账户对话框的「打开 Live Console」直达新地址**：此前打开的是 `auraxlab.com/console`，要经站点重定向一次才到 `auraxlab.com/cloud/console`；现在与 Live Sync 菜单里的「打开 Live Console 网页…」用同一个地址。README 里的链接一并更新。
 
 ### 内部
 - 配置同步流程抽出 `SyncStore` 接口（应用侧实现为 `AppStore`），测试可以用两台内存设备经同一个 mock 云端走完整的双向同步；合并规则是 `sync_merge.rs` 里的纯函数。新增 45 个 Rust 测试（合并矩阵逐行、两设备场景、批量删除保护、血缘、409 重试）与 3 个前端测试。
