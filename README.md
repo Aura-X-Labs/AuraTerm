@@ -79,7 +79,7 @@ One menu, four peers, all end-to-end encrypted where a remote party is involved:
 | Member | Who is on the other side |
 | --- | --- |
 | **Sync** | Your other AuraTerm installs — bookmarks, settings and known_hosts follow your account; saved credentials are wrapped under your master password before upload so the server cannot read them. Automatic sync runs on launch, after bookmark edits and every 30 minutes. |
-| **Live Console** | Your browser — watch or type into a session from [auraxlab.com/console](https://auraxlab.com/console). |
+| **Live Console** | Your browser — watch or type into a session from [auraxlab.com/cloud/console](https://auraxlab.com/cloud/console). |
 | **Live Share** | Someone else — hand out a one-time share code, choose read-only or read-write, approve control requests. |
 | **Live Relay** | Your own other machine — mirror a session from another device on your account, request control, or (opt-in) open a new local shell / serial / SSH session on it using its own bookmarks. Off by default; the target machine always has the final say. |
 
