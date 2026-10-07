@@ -86,11 +86,11 @@ const mockState = vi.hoisted(() => {
     }
   }
 
-  const startSshSession = vi.fn(async () => undefined);
+  const startSshSession = vi.fn(async (..._args: unknown[]) => undefined);
   const writeSessionInput = vi.fn(async () => undefined);
   const resizeSession = vi.fn(async () => undefined);
   const closeSession = vi.fn(async () => undefined);
-  const persistUpdatedSshPassword = vi.fn(async () => undefined);
+  const persistUpdatedSshPassword = vi.fn(async (..._args: unknown[]) => undefined);
   const saveTerminalLog = vi.fn(async () => "");
   const appendToLog = vi.fn(async () => undefined);
   const answerSshMfa = vi.fn(async () => undefined);
@@ -263,6 +263,133 @@ describe("TerminalComponent", () => {
     await flushPromises();
 
     expect(terminal.writtenLines).toContain("\r\n[Connected]");
+
+    wrapper.unmount();
+  });
+
+  it("asks for the password when password auth has none stored", async () => {
+    const session: SessionConfig = {
+      protocol: "ssh",
+      sshConfig: {
+        host: "example.com",
+        port: 22,
+        user: "root",
+        authType: "password",
+        reconnectType: "manual",
+      },
+    };
+    mockState.startSshSession.mockRejectedValueOnce("Password is required");
+
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "ssh-session-1",
+        isVisible: true,
+        isFocused: true,
+        session,
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+
+    const terminal = mockState.terminals[0];
+    expect(terminal.writtenLines.some((line) => line.includes("[Failed to start session]"))).toBe(false);
+    expect(wrapper.find(".password-retry-title").text()).toBe("Password Required");
+
+    // The owning tab hands the updated session back, which is what reconnects.
+    const submitPassword = async (password: string) => {
+      await wrapper.find(".password-retry-input").setValue(password);
+      await wrapper.find(".password-retry-form").trigger("submit");
+      const updates = wrapper.emitted("sessionUpdate") ?? [];
+      await wrapper.setProps({ session: updates[updates.length - 1][0] as SessionConfig });
+      await flushPromises();
+    };
+
+    mockState.startSshSession.mockRejectedValueOnce("Authentication failed");
+    await submitPassword("wrong");
+
+    expect(mockState.startSshSession).toHaveBeenCalledTimes(2);
+    expect(mockState.startSshSession.mock.calls[1][1]).toMatchObject({ password: "wrong" });
+    expect(wrapper.find(".password-retry-title").text()).toBe("Authentication Failed");
+
+    await submitPassword("hunter2");
+
+    expect(wrapper.find(".password-retry-overlay").exists()).toBe(false);
+    expect(mockState.startSshSession).toHaveBeenCalledTimes(3);
+    expect(mockState.startSshSession.mock.calls[2][1]).toMatchObject({ password: "hunter2" });
+    // The password was never stored, so neither attempt may write it to a bookmark.
+    expect(mockState.persistUpdatedSshPassword).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("stores the corrected password when a saved one is rejected", async () => {
+    const session: SessionConfig = {
+      protocol: "ssh",
+      sshConfig: {
+        host: "example.com",
+        port: 22,
+        user: "root",
+        authType: "password",
+        password: "stale",
+        reconnectType: "manual",
+      },
+    };
+    mockState.startSshSession.mockRejectedValueOnce("Authentication failed");
+
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "ssh-session-1",
+        isVisible: true,
+        isFocused: true,
+        session,
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find(".password-retry-title").text()).toBe("Authentication Failed");
+
+    await wrapper.find(".password-retry-input").setValue("hunter2");
+    await wrapper.find(".password-retry-form").trigger("submit");
+    await flushPromises();
+
+    expect(mockState.persistUpdatedSshPassword).toHaveBeenCalledTimes(1);
+    expect(mockState.persistUpdatedSshPassword.mock.calls[0][0]).toMatchObject({ password: "hunter2" });
+
+    wrapper.unmount();
+  });
+
+  it("keeps a jump host's missing password a plain failure", async () => {
+    const session: SessionConfig = {
+      protocol: "ssh",
+      sshConfig: {
+        host: "example.com",
+        port: 22,
+        user: "root",
+        authType: "password",
+        password: "hunter2",
+        reconnectType: "manual",
+      },
+    };
+    const error = "ProxyJump jump@bastion:22: Password is required";
+    mockState.startSshSession.mockRejectedValueOnce(error);
+
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "ssh-session-1",
+        isVisible: true,
+        isFocused: true,
+        session,
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+
+    expect(mockState.terminals[0].writtenLines).toContain(`\r\n[Failed to start session] ${error}`);
+    expect(wrapper.find(".password-retry-overlay").exists()).toBe(false);
 
     wrapper.unmount();
   });

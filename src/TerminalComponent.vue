@@ -118,8 +118,41 @@ function usesPasswordAuth(config: SshConfig): boolean {
   return (config.authType ?? (config.privateKey ? "key" : "password")) === "password";
 }
 
+// Password auth with no password to send is refused before the server is even
+// asked. A jump host missing its password reports the same text behind a
+// "ProxyJump" prefix; the prompt only fills in the target's password, so that
+// case stays a plain failure.
+function isMissingPasswordError(errorText: string): boolean {
+  const lower = errorText.toLowerCase();
+  return lower.includes("password is required") && !lower.includes("proxyjump");
+}
+
+function sshLoginKey(config: SshConfig): string {
+  return `${config.user}@${config.host}:${config.port}`;
+}
+
 function writePasswordRetryPrompt(target: Terminal | null) {
   target?.writeln("\r\n[Authentication failed] Incorrect password. Please enter a new password to retry.");
+}
+
+// Open the password overlay when `errorText` is something a password would
+// fix. Returns false when the caller should report the error itself.
+function offerPasswordPrompt(target: Terminal | null, errorText: string, config: SshConfig): boolean {
+  if (!usesPasswordAuth(config)) {
+    return false;
+  }
+  if (isMissingPasswordError(errorText)) {
+    passwordPromptReason.value = "missing";
+    sessionOnlyPasswordLogin.value = sshLoginKey(config);
+    target?.writeln("\r\n[Password required] Enter the password to connect.");
+  } else if (isAuthError(errorText)) {
+    passwordPromptReason.value = "rejected";
+    writePasswordRetryPrompt(target);
+  } else {
+    return false;
+  }
+  showRetryOverlay.value = true;
+  return true;
 }
 
 function formatLogTimestampParts(date = new Date()) {
@@ -175,6 +208,13 @@ const actualLogPath = ref<string | undefined>(undefined);
 const activeSession = ref<SessionConfig>(props.session);
 const activeSessionRef = ref<SessionConfig>(props.session);
 const showRetryOverlay = ref(false);
+// Why the password overlay is open: the server rejected the stored password,
+// or there was none to send.
+const passwordPromptReason = ref<"rejected" | "missing">("rejected");
+// The login this tab had to ask a never-stored password for, so a later retry
+// does not write the typed one into a bookmark either. Not a plain flag: the
+// parent hands the session back after every prompt, which resets tab state.
+const sessionOnlyPasswordLogin = ref<string | null>(null);
 // Remote Assist guest tab: what the host told us (size, role, status).
 interface AssistGuestView {
   state: "handshake" | "pending_approval" | "active" | "denied" | "ended" | string;
@@ -663,10 +703,7 @@ async function reconnectSshSession() {
   } catch (error) {
     const errorText = String(error);
     ptyId.value = null;
-    if (isAuthError(errorText) && usesPasswordAuth(activeSessionRef.value.sshConfig)) {
-      writePasswordRetryPrompt(terminal);
-      showRetryOverlay.value = true;
-    } else {
+    if (!offerPasswordPrompt(terminal, errorText, activeSessionRef.value.sshConfig)) {
       terminal.writeln(`\r\n[Reconnect failed] ${errorText}`);
       manualReconnectPending.value = true;
       terminal.writeln("\r\n[Press r or R to reconnect]");
@@ -1070,11 +1107,8 @@ onMounted(() => {
           notifySerialConnectionStateChange("closed");
         }
         if (activeSessionRef.value.protocol === "ssh"
-          && isAuthError(message)
-          && usesPasswordAuth(activeSessionRef.value.sshConfig)) {
+          && offerPasswordPrompt(terminal, message, activeSessionRef.value.sshConfig)) {
           ptyId.value = null;
-          writePasswordRetryPrompt(terminal);
-          showRetryOverlay.value = true;
           return;
         }
         terminal.writeln(`\r\n[Session exited] ${message}`);
@@ -1241,10 +1275,7 @@ onMounted(() => {
         if (isSerialProtocol(session.protocol)) {
           notifySerialConnectionStateChange("error");
         }
-        if (session.protocol === "ssh" && isAuthError(errorText) && usesPasswordAuth(session.sshConfig)) {
-          writePasswordRetryPrompt(terminal);
-          showRetryOverlay.value = true;
-        } else {
+        if (!(session.protocol === "ssh" && offerPasswordPrompt(terminal, errorText, session.sshConfig))) {
           terminal.writeln(`\r\n[Failed to start session] ${errorText}`);
         }
         console.error("connect failed", error);
@@ -1272,7 +1303,12 @@ function handlePasswordRetry(event: Event) {
   retryPassword.value = "";
   activeSession.value = { protocol: "ssh", sshConfig: newConfig };
   emit("sessionUpdate", activeSession.value);
-  void persistUpdatedSshPassword(newConfig);
+  // A rejected password was stored and is now stale, so the bookmark is
+  // corrected. One that was never stored was left out on purpose: keep the
+  // typed password for this session only.
+  if (sessionOnlyPasswordLogin.value !== sshLoginKey(newConfig)) {
+    void persistUpdatedSshPassword(newConfig);
+  }
   // overlay 卸载后把焦点交还给 xterm，避免用户必须再点一下终端才能输入
   void nextTick(() => terminal?.focus());
 }
@@ -1463,8 +1499,11 @@ async function handleCancelZmodem() {
     <div v-if="showRetryOverlay && activeSshConfig" class="password-retry-overlay">
       <div class="password-retry-dialog">
         <div class="password-retry-icon">🔐</div>
-        <h3 class="password-retry-title">{{ $t('terminal.authFailedTitle') }}</h3>
-        <p class="password-retry-desc">
+        <h3 class="password-retry-title">{{ $t(passwordPromptReason === 'missing' ? 'terminal.passwordRequiredTitle' : 'terminal.authFailedTitle') }}</h3>
+        <p v-if="passwordPromptReason === 'missing'" class="password-retry-desc">
+          {{ $t('terminal.passwordRequiredDescPre') }}<strong>{{ activeSshConfig.user }}@{{ activeSshConfig.host }}</strong>{{ $t('terminal.passwordRequiredDescPost') }}
+        </p>
+        <p v-else class="password-retry-desc">
           {{ $t('terminal.authFailedDescPre') }}<strong>{{ activeSshConfig.user }}@{{ activeSshConfig.host }}</strong>{{ $t('terminal.authFailedDescPost') }}
         </p>
         <form class="password-retry-form" @submit="handlePasswordRetry">
@@ -1481,7 +1520,7 @@ async function handleCancelZmodem() {
           >
           <div class="password-retry-actions">
             <button type="button" class="password-retry-btn cancel" @click="showRetryOverlay = false">{{ $t('common.cancel') }}</button>
-            <button type="submit" class="password-retry-btn retry">{{ $t('terminal.retry') }}</button>
+            <button type="submit" class="password-retry-btn retry">{{ $t(passwordPromptReason === 'missing' ? 'connect.connect' : 'terminal.retry') }}</button>
           </div>
         </form>
       </div>
