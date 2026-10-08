@@ -39,15 +39,17 @@ function mountEditor(saved: SavedConnection): Editor {
   });
 }
 
-/** What the browser does once the user confirms the native file dialog. */
+/** What the native file dialog answers with next. */
+let pickedKeyFile: { name: string; content: string } | null = null;
+
+/** Browse, then confirm the native file dialog on a file. */
 async function pickKeyFile(
   scope: { get(selector: string): Omit<DOMWrapper<Element>, "exists"> },
   content: string,
   name: string,
 ) {
-  const input = scope.get("input[type='file']");
-  Object.defineProperty(input.element, "files", { value: [new File([content], name)], configurable: true });
-  await input.trigger("change");
+  pickedKeyFile = { name, content };
+  await scope.get(".private-key-picker-btn").trigger("click");
   await flushPromises();
 }
 
@@ -63,6 +65,9 @@ beforeEach(() => {
   tauri.invoke.mockImplementation(async (command: string) => {
     if (command === "ssh_generate_key_pair") {
       return GENERATED_KEY;
+    }
+    if (command === "ssh_pick_private_key_file") {
+      return pickedKeyFile;
     }
     throw new Error(`unexpected invoke: ${command}`);
   });
@@ -125,7 +130,7 @@ describe("BookmarkEditor private keys", () => {
   });
 
   it("shows a failed generation beside the picker, until the key changes", async () => {
-    tauri.invoke.mockRejectedValue("Failed to generate Ed25519 key: rng");
+    tauri.invoke.mockRejectedValueOnce("Failed to generate Ed25519 key: rng");
     const wrapper = mountEditor(connection());
     const generate = wrapper.findAll(".private-key-picker-btn").find((button) => button.text() === "Generate");
     await generate!.trigger("click");

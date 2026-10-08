@@ -82,15 +82,17 @@ const GENERATED_KEY = {
   fingerprint: "SHA256:generated",
 };
 
-/** What the browser does once the user confirms the native file dialog. */
+/** What the native file dialog answers with next. */
+let pickedKeyFile: { name: string; content: string } | null = null;
+
+/** Browse, then confirm the native file dialog on a file. */
 async function pickKeyFile(
   scope: { get(selector: string): Omit<DOMWrapper<Element>, "exists"> },
   content: string,
   name: string,
 ) {
-  const input = scope.get("input[type='file']");
-  Object.defineProperty(input.element, "files", { value: [new File([content], name)], configurable: true });
-  await input.trigger("change");
+  pickedKeyFile = { name, content };
+  await scope.get(".private-key-picker-btn").trigger("click");
   await flushPromises();
 }
 
@@ -109,6 +111,8 @@ beforeEach(() => {
         return serialPorts;
       case "ssh_generate_key_pair":
         return GENERATED_KEY;
+      case "ssh_pick_private_key_file":
+        return pickedKeyFile;
       case "ssh_test_connection":
       case "telnet_test_connection":
       case "serial_test_connection": {

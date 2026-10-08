@@ -52,6 +52,7 @@ mod known_hosts;
 mod transfer;
 mod forwarding;
 mod probe;
+mod key_file;
 
 // Types consumed externally (`main.rs`, frontend payloads) are re-exported at
 // the module root. A few of them (`SshHostKeyMismatchPromptPayload`,
@@ -81,6 +82,9 @@ pub use forwarding::*;
 // The New Session dialog's connection test. Glob re-export for the same
 // `generate_handler!` reason as above.
 pub use probe::*;
+// The native private key file dialog. Glob re-export for the same
+// `generate_handler!` reason as above.
+pub use key_file::*;
 
 #[tauri::command]
 pub fn ssh_generate_key_pair(

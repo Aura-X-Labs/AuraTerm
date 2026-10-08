@@ -1244,6 +1244,7 @@ fn main() {
             close_pty,
             ssh::start_ssh_pty,
             ssh::ssh_generate_key_pair,
+            ssh::ssh_pick_private_key_file,
             ssh::write_ssh_pty_input,
             ssh::write_ssh_pty_bytes,
             ssh::resize_ssh_pty,
