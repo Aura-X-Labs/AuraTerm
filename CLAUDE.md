@@ -135,6 +135,7 @@ AuraTerm follows the standard Tauri architecture: a **Rust backend** that manage
 | `src-tauri/tauri.conf.json` | Tauri app config (window, bundle, build commands) |
 | `src-tauri/capabilities/default.json` | Tauri permission capabilities |
 | `scripts/sync_version.py` | Version sync utility (package.json → tauri.conf.json, Cargo.toml) |
+| `scripts/make_icons.swift` | Draws the app icon and writes `src-tauri/icons/icon.{icns,png,ico}` and `src/logo.png` (`swift scripts/make_icons.swift`, macOS only) |
 | `scripts/sync_site.py` | Push the changelog + current version into the AuraXLabs site checkout on release |
 | `scripts/test_sync_site.py` | Tests for the above (`make test-scripts`) |
 | `.github/workflows/ci.yml` | CI: type-check + cross-platform builds |
