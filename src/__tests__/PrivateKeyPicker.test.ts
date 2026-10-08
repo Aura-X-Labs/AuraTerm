@@ -5,6 +5,9 @@ import PrivateKeyPicker from "../PrivateKeyPicker.vue";
 import { i18n, setLanguage } from "../i18n";
 import { MAX_PRIVATE_KEY_FILE_BYTES } from "../privateKeyFile";
 
+const tauri = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
+
 const OPENSSH_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----\n";
 const OTHER_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\n";
 
@@ -23,11 +26,16 @@ function mountPicker(props: Record<string, unknown> = {}): Picker {
   return wrapper;
 }
 
-/** What the browser does once the user confirms the native file dialog. */
-async function pickFile(wrapper: Picker, file: File) {
-  const input = wrapper.get("input[type='file']");
-  Object.defineProperty(input.element, "files", { value: [file], configurable: true });
-  await input.trigger("change");
+/** What the backend hands back for a pick; `content` is null past the size limit. */
+interface PickedFile {
+  name: string;
+  content: string | null;
+}
+
+/** Browse, with the native file dialog answering `picked` (null: cancelled). */
+async function pickFile(wrapper: Picker, picked: PickedFile | null) {
+  tauri.invoke.mockResolvedValueOnce(picked);
+  await wrapper.get("button").trigger("click");
   await flushPromises();
 }
 
@@ -39,6 +47,7 @@ let error: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   setLanguage("en");
+  tauri.invoke.mockReset();
   error = vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -50,22 +59,23 @@ describe("PrivateKeyPicker", () => {
   it("offers a file picker and nowhere to type or paste a key", () => {
     const wrapper = mountPicker();
     expect(wrapper.find("textarea").exists()).toBe(false);
-    expect(wrapper.findAll("input").map((input) => input.attributes("type"))).toEqual(["file"]);
+    expect(wrapper.find("input").exists()).toBe(false);
     expect(display(wrapper).text()).toBe("No private key selected");
     expect(display(wrapper).classes()).toContain("empty");
     expect(buttons(wrapper)).toEqual(["Browse..."]);
   });
 
-  it("opens the native file dialog from Browse", async () => {
+  it("opens the native file dialog from Browse, capped at the key size limit", async () => {
     const wrapper = mountPicker();
-    const click = vi.spyOn(wrapper.get("input[type='file']").element as HTMLInputElement, "click");
-    await wrapper.get("button").trigger("click");
-    expect(click).toHaveBeenCalledTimes(1);
+    await pickFile(wrapper, null);
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["ssh_pick_private_key_file", { maxBytes: MAX_PRIVATE_KEY_FILE_BYTES }],
+    ]);
   });
 
   it("loads the picked file's content and shows its name", async () => {
     const wrapper = mountPicker();
-    await pickFile(wrapper, new File([OPENSSH_KEY], "id_ed25519"));
+    await pickFile(wrapper, { name: "id_ed25519", content: OPENSSH_KEY });
 
     expect(modelUpdates(wrapper)).toEqual([OPENSSH_KEY]);
     expect(display(wrapper).text()).toBe("id_ed25519");
@@ -76,7 +86,7 @@ describe("PrivateKeyPicker", () => {
 
   it("clears the key", async () => {
     const wrapper = mountPicker();
-    await pickFile(wrapper, new File([OPENSSH_KEY], "id_ed25519"));
+    await pickFile(wrapper, { name: "id_ed25519", content: OPENSSH_KEY });
     await wrapper.findAll("button")[1].trigger("click");
 
     expect(modelUpdates(wrapper)).toEqual([OPENSSH_KEY, ""]);
@@ -92,15 +102,15 @@ describe("PrivateKeyPicker", () => {
   });
 
   it.each([
-    ["a public key", new File(["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB ops@host\n"], "id_ed25519.pub"),
+    ["a public key", { name: "id_ed25519.pub", content: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB ops@host\n" },
       "That is a public key. Choose the matching private key — usually the same file name without .pub."],
-    ["a file that is not a key", new File(["hello"], "notes.txt"),
+    ["a file that is not a key", { name: "notes.txt", content: "hello" },
       "That file is not a supported private key (OpenSSH, PEM or PuTTY .ppk)."],
-    ["an oversized file", new File(["x".repeat(MAX_PRIVATE_KEY_FILE_BYTES + 1)], "disk.img"),
+    ["an oversized file", { name: "disk.img", content: null },
       "That file is too large to be a private key."],
   ])("refuses %s and keeps the key already in place", async (_what, file, message) => {
     const wrapper = mountPicker();
-    await pickFile(wrapper, new File([OPENSSH_KEY], "id_ed25519"));
+    await pickFile(wrapper, { name: "id_ed25519", content: OPENSSH_KEY });
     await pickFile(wrapper, file);
 
     expect(modelUpdates(wrapper)).toEqual([OPENSSH_KEY]);
@@ -110,25 +120,17 @@ describe("PrivateKeyPicker", () => {
     expect(alert.text()).toBe(message);
 
     // The next good pick replaces the key and drops the complaint.
-    await pickFile(wrapper, new File([OTHER_KEY], "id_rsa"));
+    await pickFile(wrapper, { name: "id_rsa", content: OTHER_KEY });
     expect(modelUpdates(wrapper)).toEqual([OPENSSH_KEY, OTHER_KEY]);
     expect(display(wrapper).text()).toBe("id_rsa");
     expect(wrapper.find(".private-key-error").exists()).toBe(false);
   });
 
-  it("never reads a file that is too large", async () => {
-    const wrapper = mountPicker();
-    const file = new File(["x".repeat(MAX_PRIVATE_KEY_FILE_BYTES + 1)], "disk.img");
-    const text = vi.spyOn(file, "text");
-    await pickFile(wrapper, file);
-    expect(text).not.toHaveBeenCalled();
-  });
-
   it("reports a file it cannot read", async () => {
     const wrapper = mountPicker();
-    const file = new File([OPENSSH_KEY], "id_ed25519");
-    vi.spyOn(file, "text").mockRejectedValue(new Error("permission denied"));
-    await pickFile(wrapper, file);
+    tauri.invoke.mockRejectedValueOnce("Failed to open id_ed25519: Permission denied (os error 13)");
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
 
     expect(modelUpdates(wrapper)).toEqual([]);
     expect(wrapper.get(".private-key-error").text()).toBe("Unable to read the selected private key file.");
@@ -136,10 +138,7 @@ describe("PrivateKeyPicker", () => {
 
   it("does nothing when the file dialog is cancelled", async () => {
     const wrapper = mountPicker();
-    const input = wrapper.get("input[type='file']");
-    Object.defineProperty(input.element, "files", { value: [], configurable: true });
-    await input.trigger("change");
-    await flushPromises();
+    await pickFile(wrapper, null);
 
     expect(modelUpdates(wrapper)).toEqual([]);
     expect(wrapper.find(".private-key-error").exists()).toBe(false);
@@ -159,7 +158,7 @@ describe("PrivateKeyPicker", () => {
     const wrapper = mountPicker({ modelValue: OPENSSH_KEY, source: "Generated Ed25519 (SHA256:abc)" });
     expect(display(wrapper).text()).toBe("Generated Ed25519 (SHA256:abc)");
 
-    await pickFile(wrapper, new File([OTHER_KEY], "id_rsa"));
+    await pickFile(wrapper, { name: "id_rsa", content: OTHER_KEY });
     expect(wrapper.emitted("update:source")).toEqual([["id_rsa"]]);
   });
 
@@ -167,7 +166,7 @@ describe("PrivateKeyPicker", () => {
     const wrapper = mountPicker({ error: "Failed to generate Ed25519 key" });
     expect(wrapper.get(".private-key-error").text()).toBe("Failed to generate Ed25519 key");
 
-    await pickFile(wrapper, new File(["hello"], "notes.txt"));
+    await pickFile(wrapper, { name: "notes.txt", content: "hello" });
     expect(wrapper.get(".private-key-error").text()).toContain("not a supported private key");
   });
 
@@ -175,7 +174,7 @@ describe("PrivateKeyPicker", () => {
     setLanguage("zh-CN");
     const wrapper = mountPicker();
     expect(display(wrapper).text()).toBe("未选择私钥");
-    await pickFile(wrapper, new File(["ssh-rsa AAAAB3NzaC1yc2E ops@host\n"], "id_rsa.pub"));
+    await pickFile(wrapper, { name: "id_rsa.pub", content: "ssh-rsa AAAAB3NzaC1yc2E ops@host\n" });
     expect(wrapper.get(".private-key-error").text()).toContain("这是公钥文件");
 
     setLanguage("en");

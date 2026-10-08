@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n";
 import { MAX_PRIVATE_KEY_FILE_BYTES, privateKeyProblem, type PrivateKeyFileProblem } from "./privateKeyFile";
 
@@ -27,7 +28,13 @@ const privateKey = defineModel<string | undefined>();
  *  the parent sets. Plain local state when the parent does not bind it. */
 const source = defineModel<string>("source", { default: "" });
 
-const fileInput = ref<HTMLInputElement | null>(null);
+/** What `ssh_pick_private_key_file` hands back; `content` is null for a file
+ *  over the size limit, which the backend does not read. */
+interface PickedPrivateKeyFile {
+  name: string;
+  content: string | null;
+}
+
 /** Kept as a code rather than its text so it follows a UI language change. */
 const problem = ref<PrivateKeyFileProblem | "unreadable" | null>(null);
 
@@ -56,40 +63,33 @@ const message = computed(() => {
   }
 });
 
-function browse() {
+/** Opens the native file dialog, which starts in `~/.ssh` — a directory the
+ *  webview's own file input cannot reach where the OS hides dot-directories.
+ *  A pick that fails leaves the key already in place untouched. */
+async function browse() {
   problem.value = null;
-  fileInput.value?.click();
-}
-
-/** A pick that fails leaves the key already in place untouched. */
-async function handleFileChange(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const [file] = input.files ?? [];
-
-  if (!file) {
-    return;
-  }
 
   try {
-    if (file.size > MAX_PRIVATE_KEY_FILE_BYTES) {
+    const file = await invoke<PickedPrivateKeyFile | null>("ssh_pick_private_key_file", {
+      maxBytes: MAX_PRIVATE_KEY_FILE_BYTES,
+    });
+    if (!file) {
+      return;
+    }
+    if (file.content === null) {
       problem.value = "tooLarge";
       return;
     }
-    const content = await file.text();
-    const found = privateKeyProblem(content);
+    const found = privateKeyProblem(file.content);
     if (found) {
       problem.value = found;
       return;
     }
-    privateKey.value = content;
+    privateKey.value = file.content;
     source.value = file.name;
-    problem.value = null;
   } catch (error) {
     console.error("Failed to read private key file", error);
     problem.value = "unreadable";
-  } finally {
-    // So picking the same file again still fires `change`.
-    input.value = "";
   }
 }
 
@@ -102,12 +102,6 @@ function clear() {
 
 <template>
   <div class="private-key-picker" :class="{ compact: props.compact }">
-    <input
-      ref="fileInput"
-      type="file"
-      class="private-key-file-input"
-      @change="handleFileChange"
-    >
     <div class="private-key-picker-row">
       <div class="private-key-display" :class="{ empty: !hasKey }" :title="display">{{ display }}</div>
       <button type="button" class="private-key-picker-btn" @click="browse">{{ $t('connect.browse') }}</button>
@@ -126,10 +120,6 @@ function clear() {
 </template>
 
 <style scoped>
-.private-key-file-input {
-  display: none;
-}
-
 /* Wraps, so the buttons drop below the name in the narrow bookmark detail rail
    instead of squeezing it to nothing. */
 .private-key-picker-row {
