@@ -76,6 +76,7 @@ import { accountState, restoreAccount } from "./account";
 import { useLiveAccountFlow } from "./composables/useLiveAccountFlow";
 import { cloudSyncNow, syncNowConfirmingDeletes, describeSyncResult, getSyncConfig, classifySyncError, type SyncConfigView, type SyncResult } from "./cloudSync";
 import { BOOKMARKS_CHANGED_EVENT, createAutoSync, notifyBookmarksChanged } from "./composables/useAutoSync";
+import { useBookmarkStore } from "./composables/useBookmarkStore";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { useSshTunnels } from "./composables/useSshTunnels";
@@ -2495,6 +2496,8 @@ async function handleConnectResult(result: ConnectResult) {
 
   try {
     await invoke("save_connection", { connection });
+    // 保存只落盘书签本身；“最近使用”由连接这个动作更新，与侧栏双击走同一入口
+    await useBookmarkStore().touch(connection.id);
     notifyBookmarksChanged();
     sidebarExpandGroup.value = connection.group?.trim() || "Ungrouped";
     sidebarRefreshToken.value += 1;
