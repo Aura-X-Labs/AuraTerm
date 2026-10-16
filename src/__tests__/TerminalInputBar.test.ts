@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 
 import TerminalInputBar from "../TerminalInputBar.vue";
@@ -8,6 +8,8 @@ import { DEFAULT_INPUT_BAR_HEIGHT, type QuickButton } from "../settings";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("../promptDialog", () => ({ promptText: vi.fn(async () => "") }));
 vi.mock("../ai", () => ({ aiComplete: vi.fn(async () => "") }));
+const dialogs = vi.hoisted(() => ({ confirmDialog: vi.fn(async () => true) }));
+vi.mock("../nativeDialogs", () => dialogs);
 
 function button(id: string, group: string | undefined, toolbar = "Default"): QuickButton {
   return { id, label: id, command: id, toolbar, group, hosts: [], sessionGroups: [], sendMode: "line" };
@@ -59,7 +61,13 @@ describe("TerminalInputBar height", () => {
 });
 
 function visibleLabels(wrapper: ReturnType<typeof mountBar>) {
-  return wrapper.findAll(".quick-btn:not(.quick-btn--edit)").map((node) => node.text());
+  return wrapper.findAll(".quick-btn").map((node) => node.text());
+}
+
+/** Open the library the way the user does: right-click the bar, then Manage. */
+async function openLibrary(wrapper: ReturnType<typeof mountBar>) {
+  await wrapper.find(".quick-buttons-bar").trigger("contextmenu");
+  await wrapper.find(".quick-bar-menu-item--manage").trigger("click");
 }
 
 describe("TerminalInputBar groups", () => {
@@ -99,7 +107,7 @@ describe("TerminalInputBar groups", () => {
 
   it("offers the existing groups in the editor and lets a new one be typed", async () => {
     const wrapper = mountBar([button("a", "Docker"), button("b", "Git")]);
-    await wrapper.find(".quick-btn--edit").trigger("click");
+    await openLibrary(wrapper);
 
     const groupSelect = wrapper.find<HTMLSelectElement>(".quick-btn-editor-fields-grid select");
     expect(groupSelect.findAll("option").map((option) => option.text())).toEqual([
@@ -126,7 +134,7 @@ describe("TerminalInputBar groups", () => {
 
   it("narrows the editor's list to one group and keeps the detail pane on a listed button", async () => {
     const wrapper = mountBar([button("a", "Docker"), button("b", "Git"), button("c", "Docker", "Ops")]);
-    await wrapper.find(".quick-btn--edit").trigger("click");
+    await openLibrary(wrapper);
     expect(sidebarLabels(wrapper)).toEqual(["a", "b", "c"]);
 
     const groupFilter = wrapper.find<HTMLSelectElement>(".quick-btn-editor-filter--group");
@@ -143,7 +151,7 @@ describe("TerminalInputBar groups", () => {
 
   it("reorders within the filtered list without disturbing the buttons in between", async () => {
     const wrapper = mountBar([button("a", "Docker"), button("b", "Git"), button("c", "Docker")]);
-    await wrapper.find(".quick-btn--edit").trigger("click");
+    await openLibrary(wrapper);
     await wrapper.find(".quick-btn-editor-filter--group").setValue("Docker");
     expect(sidebarLabels(wrapper)).toEqual(["a", "c"]);
 
@@ -158,7 +166,7 @@ describe("TerminalInputBar groups", () => {
 
   it("adds a new button into the group and toolbar the list is narrowed to", async () => {
     const wrapper = mountBar([button("a", "Docker"), button("b", "Git", "Ops")]);
-    await wrapper.find(".quick-btn--edit").trigger("click");
+    await openLibrary(wrapper);
     await wrapper.find(".quick-btn-editor-filter--toolbar").setValue("Ops");
     await wrapper.find(".quick-btn-editor-filter--group").setValue("Git");
 
@@ -169,5 +177,79 @@ describe("TerminalInputBar groups", () => {
     await wrapper.find(".quick-btn-editor-save").trigger("click");
     const saved = wrapper.emitted("buttonsChange")?.[0]?.[0] as QuickButton[];
     expect(saved[saved.length - 1]).toMatchObject({ label: "new", toolbar: "Ops", group: "Git" });
+  });
+});
+
+describe("TerminalInputBar context menu", () => {
+  it("has no edit button on the bar", () => {
+    const wrapper = mountBar([button("a", "Docker")]);
+    expect(visibleLabels(wrapper)).toEqual(["a"]);
+  });
+
+  it("offers only add and manage on the bar, and edit and delete on a button", async () => {
+    const wrapper = mountBar([button("a", "Docker")]);
+    await wrapper.find(".quick-buttons-bar").trigger("contextmenu");
+    expect(wrapper.find(".quick-bar-menu-item--edit").exists()).toBe(false);
+    expect(wrapper.find(".quick-bar-menu-item--add").exists()).toBe(true);
+
+    await wrapper.find(".quick-btn").trigger("contextmenu");
+    expect(wrapper.find(".quick-bar-menu-item--edit").exists()).toBe(true);
+    expect(wrapper.find(".quick-bar-menu-item--delete").exists()).toBe(true);
+  });
+
+  it("does not send the command when a button is right-clicked", async () => {
+    const wrapper = mountBar([button("a", "Docker")]);
+    await wrapper.find(".quick-btn").trigger("contextmenu");
+    expect(wrapper.emitted("send")).toBeUndefined();
+  });
+
+  it("opens the library on the button that was right-clicked", async () => {
+    const wrapper = mountBar([button("a", "Docker"), button("b", "Git")]);
+    await wrapper.findAll(".quick-btn")[1].trigger("contextmenu");
+    await wrapper.find(".quick-bar-menu-item--edit").trigger("click");
+
+    expect(wrapper.find(".quick-bar-menu").exists()).toBe(false);
+    expect(wrapper.find<HTMLInputElement>(".quick-btn-editor-input--label").element.value).toBe("b");
+  });
+
+  it("adds a new button beside the one right-clicked", async () => {
+    const wrapper = mountBar([button("a", "Docker"), button("b", "Git", "Ops")]);
+    await wrapper.find(".quick-toolbar-select").setValue("Ops");
+    await wrapper.find(".quick-btn").trigger("contextmenu");
+    await wrapper.find(".quick-bar-menu-item--add").trigger("click");
+
+    await wrapper.find(".quick-btn-editor-input--label").setValue("new");
+    await wrapper.find(".quick-btn-editor-save").trigger("click");
+    const saved = wrapper.emitted("buttonsChange")?.[0]?.[0] as QuickButton[];
+    expect(saved[saved.length - 1]).toMatchObject({ label: "new", toolbar: "Ops", group: "Git" });
+  });
+
+  it("opens a new button from the empty-bar hint", async () => {
+    const wrapper = mountBar([]);
+    await wrapper.find(".quick-buttons-hint").trigger("click");
+    expect(wrapper.findAll(".quick-btn-editor-sidebar-item")).toHaveLength(1);
+  });
+
+  it("deletes a button after confirmation, and keeps it when declined", async () => {
+    const wrapper = mountBar([button("a", "Docker"), button("b", "Git")]);
+    dialogs.confirmDialog.mockResolvedValueOnce(false);
+    await wrapper.find(".quick-btn").trigger("contextmenu");
+    await wrapper.find(".quick-bar-menu-item--delete").trigger("click");
+    await flushPromises();
+    expect(wrapper.emitted("buttonsChange")).toBeUndefined();
+
+    await wrapper.find(".quick-btn").trigger("contextmenu");
+    await wrapper.find(".quick-bar-menu-item--delete").trigger("click");
+    await flushPromises();
+    const saved = wrapper.emitted("buttonsChange")?.[0]?.[0] as QuickButton[];
+    expect(saved.map((item) => item.id)).toEqual(["b"]);
+  });
+
+  it("closes on Escape", async () => {
+    const wrapper = mountBar([button("a", "Docker")]);
+    await wrapper.find(".quick-buttons-bar").trigger("contextmenu");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(wrapper.find(".quick-bar-menu").exists()).toBe(false);
   });
 });

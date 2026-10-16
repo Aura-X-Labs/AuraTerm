@@ -4,6 +4,7 @@ import { DEFAULT_INPUT_BAR_HEIGHT, type QuickButton } from "./settings";
 import { buildSnippetPayload, snippetApplies, snippetVariables } from "./snippets";
 import { t } from "./i18n";
 import { promptText } from "./promptDialog";
+import { confirmDialog } from "./nativeDialogs";
 import { aiComplete } from "./ai";
 import { commandGenerationSystemPrompt, extractCommand } from "./aiPrompts";
 
@@ -290,22 +291,79 @@ async function handleQuickButton(button: QuickButton) {
   textareaRef.value?.focus();
 }
 
-function openEditor() {
+/** Open the library, on `focusId` when given, otherwise on the first button. */
+function openEditor(focusId?: string) {
   try {
     editButtons.value = structuredClone(props.quickButtons);
   } catch (error) {
     // Fallback to compatible deep copy approach
     editButtons.value = props.quickButtons.map(btn => ({ ...btn }));
   }
-  if (editButtons.value.length > 0) {
-    selectedButtonId.value = editButtons.value[0].id;
-  } else {
-    selectedButtonId.value = null;
-  }
+  const focused = editButtons.value.find((button) => button.id === focusId);
+  selectedButtonId.value = focused?.id ?? editButtons.value[0]?.id ?? null;
   customGroupButtonId.value = null;
   editorToolbarFilter.value = "";
   editorGroupFilter.value = "";
   showEditor.value = true;
+}
+
+/* Right-click menu of the bar. `button` is the one clicked on, absent when the
+ * click landed on the bar itself. */
+const barMenu = ref<{ x: number; y: number; button?: QuickButton } | null>(null);
+const barMenuRef = ref<HTMLDivElement | null>(null);
+
+function openBarMenu(event: MouseEvent, button?: QuickButton) {
+  barMenu.value = { x: event.clientX, y: event.clientY, button };
+  // The bar sits at the bottom of the window: keep the menu on screen.
+  void nextTick(() => {
+    const menu = barMenuRef.value;
+    if (!menu || !barMenu.value) return;
+    const { width, height } = menu.getBoundingClientRect();
+    barMenu.value = {
+      ...barMenu.value,
+      x: Math.max(0, Math.min(barMenu.value.x, window.innerWidth - width)),
+      y: Math.max(0, Math.min(barMenu.value.y, window.innerHeight - height)),
+    };
+  });
+}
+
+watch(barMenu, (value, _previous, onCleanup) => {
+  if (!value) return;
+  const dismiss = (event: Event) => {
+    if (!barMenuRef.value?.contains(event.target as Node)) barMenu.value = null;
+  };
+  const dismissOnEscape = (event: KeyboardEvent) => {
+    if (event.key === "Escape") barMenu.value = null;
+  };
+  document.addEventListener("mousedown", dismiss);
+  document.addEventListener("keydown", dismissOnEscape);
+  onCleanup(() => {
+    document.removeEventListener("mousedown", dismiss);
+    document.removeEventListener("keydown", dismissOnEscape);
+  });
+}, { flush: "post" });
+
+/** New button, placed on the toolbar and group the bar is showing (or next to
+ *  the button right-clicked on). */
+function addFromBar(near?: QuickButton) {
+  barMenu.value = null;
+  openEditor();
+  addButton({
+    toolbar: near?.toolbar || selectedToolbar.value || "Default",
+    group: near?.group || (selectedGroup.value === ALL_GROUPS ? "General" : selectedGroup.value),
+  });
+}
+
+function editFromBar(button?: QuickButton) {
+  barMenu.value = null;
+  openEditor(button?.id);
+}
+
+async function deleteFromBar(button: QuickButton) {
+  barMenu.value = null;
+  const name = button.label.trim() || button.command.slice(0, 20);
+  if (!await confirmDialog(t("inputBar.confirmDelete", { name }))) return;
+  emit("buttonsChange", props.quickButtons.filter((candidate) => candidate.id !== button.id));
 }
 
 /* Sidebar filters. Empty string means "everything", like the bar's picker. */
@@ -354,15 +412,15 @@ function saveEditor() {
   showEditor.value = false;
 }
 
-function addButton() {
+function addButton(place?: { toolbar: string; group: string }) {
   const newId = crypto.randomUUID();
   // A new button lands where the sidebar is looking, so it shows up at once.
   editButtons.value = [...editButtons.value, {
     id: newId,
     label: "",
     command: "",
-    toolbar: editorToolbarFilter.value || selectedToolbar.value || "Default",
-    group: editorGroupFilter.value || "General",
+    toolbar: place?.toolbar || editorToolbarFilter.value || selectedToolbar.value || "Default",
+    group: place?.group || editorGroupFilter.value || "General",
     hosts: [],
     sessionGroups: [],
     sendMode: "line",
@@ -460,7 +518,7 @@ function closeEditor() {
       <span class="terminal-input-resize-grip" />
     </div>
 
-    <div class="quick-buttons-bar">
+    <div class="quick-buttons-bar" @contextmenu.prevent="openBarMenu($event)">
       <select
         v-if="availableToolbars.length > 1"
         v-model="selectedToolbar"
@@ -478,9 +536,9 @@ function closeEditor() {
         <option :value="ALL_GROUPS">{{ $t('inputBar.allGroups') }}</option>
         <option v-for="group in availableGroups" :key="group" :value="group">{{ group }}</option>
       </select>
-      <span v-if="visibleButtons.length === 0" class="quick-buttons-hint">
+      <button v-if="visibleButtons.length === 0" type="button" class="quick-buttons-hint" @click="addFromBar()">
         {{ $t('inputBar.noSnippets') }}
-      </span>
+      </button>
       <template v-for="(button, index) in visibleButtons" :key="button.id">
         <span
           v-if="selectedGroup === ALL_GROUPS && (index === 0 || (visibleButtons[index - 1]?.group || 'General') !== (button.group || 'General'))"
@@ -491,13 +549,34 @@ function closeEditor() {
           type="button"
           :title="`${button.command}${button.sendMode === 'raw' ? ' (raw)' : ''}`"
           @click="handleQuickButton(button)"
+          @contextmenu.prevent.stop="openBarMenu($event, button)"
         >
           {{ button.label.trim() || button.command.slice(0, 20) }}
         </button>
       </template>
+    </div>
 
-      <button class="quick-btn quick-btn--edit" type="button" :title="$t('inputBar.editQuickButtons')" @click="openEditor">
-        {{ $t('inputBar.edit') }}
+    <div
+      v-if="barMenu"
+      ref="barMenuRef"
+      class="quick-bar-menu"
+      :style="{ top: `${barMenu.y}px`, left: `${barMenu.x}px` }"
+      @contextmenu.prevent
+    >
+      <template v-if="barMenu.button">
+        <button type="button" class="quick-bar-menu-item quick-bar-menu-item--edit" @click="editFromBar(barMenu.button)">
+          {{ $t('inputBar.menuEdit') }}
+        </button>
+        <button type="button" class="quick-bar-menu-item quick-bar-menu-item--delete danger" @click="deleteFromBar(barMenu.button)">
+          {{ $t('inputBar.menuDelete') }}
+        </button>
+        <div class="quick-bar-menu-separator" />
+      </template>
+      <button type="button" class="quick-bar-menu-item quick-bar-menu-item--add" @click="addFromBar(barMenu.button)">
+        {{ $t('inputBar.menuAdd') }}
+      </button>
+      <button type="button" class="quick-bar-menu-item quick-bar-menu-item--manage" @click="editFromBar()">
+        {{ $t('inputBar.menuManage') }}
       </button>
     </div>
 
@@ -692,7 +771,7 @@ function closeEditor() {
         </div>
 
         <div class="quick-btn-editor-footer">
-          <button type="button" class="quick-btn-editor-add" @click="addButton">{{ $t('inputBar.addLabel') }}</button>
+          <button type="button" class="quick-btn-editor-add" @click="addButton()">{{ $t('inputBar.addLabel') }}</button>
           <span style="flex: 1" />
           <button type="button" class="quick-btn-editor-cancel" @click="closeEditor">{{ $t('common.cancel') }}</button>
           <button type="button" class="quick-btn-editor-save" @click="saveEditor">{{ $t('common.save') }}</button>
