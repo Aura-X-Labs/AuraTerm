@@ -218,12 +218,75 @@ export function buildBookmarkTree(
 
   const finalize = (folder: BookmarkFolder): number => {
     folder.folders.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
-    folder.connections.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
+    folder.connections.sort(compareInGroup);
     folder.count = folder.connections.length + folder.folders.reduce((total, child) => total + finalize(child), 0);
     return folder.count;
   };
   finalize(root);
   return root;
+}
+
+/** Arranged bookmarks first, by `position`; the rest after them by name. */
+function compareArranged(position: (connection: SavedConnection) => number | undefined) {
+  return (left: SavedConnection, right: SavedConnection): number => {
+    const leftOrder = position(left) ?? Number.POSITIVE_INFINITY;
+    const rightOrder = position(right) ?? Number.POSITIVE_INFINITY;
+    if (leftOrder !== rightOrder) {
+      return leftOrder < rightOrder ? -1 : 1;
+    }
+    return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+  };
+}
+
+/** Order within one group. */
+export const compareInGroup = compareArranged((connection) => connection.order);
+
+/** Order within the pinned section. */
+export const comparePinned = compareArranged((connection) => connection.pinOrder);
+
+/** The pinned bookmarks, in display order. */
+export function pinnedConnections(connections: readonly SavedConnection[]): SavedConnection[] {
+  return connections.filter((connection) => connection.pinned).sort(comparePinned);
+}
+
+/** `ids` with `id` swapped with its neighbour, or null when it is already at that end. */
+function swapWithNeighbour(ids: string[], id: string, direction: -1 | 1): string[] | null {
+  const index = ids.indexOf(id);
+  const target = index + direction;
+  if (index < 0 || target < 0 || target >= ids.length) {
+    return null;
+  }
+  const next = [...ids];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next;
+}
+
+/** The bookmarks sharing `connection`'s group (not its subgroups), in display order. */
+export function groupSiblings(connections: readonly SavedConnection[], connection: SavedConnection): SavedConnection[] {
+  const path = normalizeBookmarkPath(connection.group).join("/");
+  return connections
+    .filter((candidate) => normalizeBookmarkPath(candidate.group).join("/") === path)
+    .sort(compareInGroup);
+}
+
+/**
+ * The group's ids after moving `id` one place up (-1) or down (1), or null
+ * when it is already at that end. The whole group is returned so every member
+ * gets a position: a group that was sorted by name keeps its look apart from
+ * the one swap.
+ */
+export function moveWithinGroup(connections: readonly SavedConnection[], id: string, direction: -1 | 1): string[] | null {
+  const connection = connections.find((candidate) => candidate.id === id);
+  if (!connection) {
+    return null;
+  }
+  return swapWithNeighbour(groupSiblings(connections, connection).map((sibling) => sibling.id), id, direction);
+}
+
+/** The pinned section's ids after moving `id` one place, or null at that end.
+ *  Like a group, the whole section is returned so every pin gets a position. */
+export function moveWithinPinned(connections: readonly SavedConnection[], id: string, direction: -1 | 1): string[] | null {
+  return swapWithNeighbour(pinnedConnections(connections).map((connection) => connection.id), id, direction);
 }
 
 export function flattenBookmarkTree(root: BookmarkFolder, collapsed: ReadonlySet<string>): BookmarkTreeRow[] {

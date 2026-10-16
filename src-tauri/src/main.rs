@@ -1339,6 +1339,8 @@ fn main() {
             connections::save_connection,
             connections::delete_connection,
             connections::touch_connection,
+            connections::set_connection_pinned,
+            connections::reorder_connections,
             connections::import_bookmarks,
             connections::preview_bookmark_import,
             connections::retarget_bookmark_import,

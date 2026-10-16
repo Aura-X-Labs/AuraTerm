@@ -730,7 +730,8 @@ fn carry_over(outgoing: &mut SyncPayload, remote: &SyncPayload, config: &SyncCon
 }
 
 /// Whether uploading `outgoing` would change the tier-1 content of the cloud
-/// copy. Bookmark order is not synced, and the export stamp and device fields
+/// copy. The order of the bookmark list is not synced (a bookmark's own
+/// `order` / `pinOrder` fields are, as content), and the export stamp and device fields
 /// differ on every upload by design, so none of those count. The lineage does:
 /// a cloud copy without one (an older build uploaded it) has to be re-stamped
 /// before anything can be inferred from it.
@@ -1797,6 +1798,9 @@ pub(crate) mod tests {
             flow_control: None,
             created_at: 0,
             last_used: None,
+            pinned: false,
+            order: None,
+            pin_order: None,
             auto_reconnect: false,
             reconnect_type: "manual".to_string(),
             tunnels: Vec::new(),

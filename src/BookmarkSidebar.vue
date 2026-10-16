@@ -3,7 +3,14 @@ import { computed, ref, watch } from "vue";
 import { DEFAULT_SETTINGS, type AppSettings } from "./settings";
 import { normalizeReconnectType, type SavedConnection } from "./types";
 import { isSerialProtocol } from "./serialTransport";
-import { buildBookmarkTree, filterConnections, flattenBookmarkTree } from "./bookmarks";
+import {
+  buildBookmarkTree,
+  filterConnections,
+  flattenBookmarkTree,
+  moveWithinGroup,
+  moveWithinPinned,
+  pinnedConnections,
+} from "./bookmarks";
 import { detectImportFormat, downloadText, shareFileName } from "./bookmarkTransfer";
 import { CredentialsLockedError, useBookmarkStore } from "./composables/useBookmarkStore";
 import { t } from "./i18n";
@@ -34,6 +41,7 @@ const store = useBookmarkStore();
 const { connections, collapsedGroups, groupPaths } = store;
 
 const RECENTLY_USED_LABEL = computed(() => t("bookmarks.recentlyUsed"));
+const PINNED_LABEL = computed(() => t("bookmarks.pinned"));
 
 /** Groups in use plus the explicitly created ones, so the editor's group
  *  dropdown offers the same list as the manager page. */
@@ -81,7 +89,10 @@ function reconnectBadgeLabel(badge: "tmux" | "screen") {
   return badge === "tmux" ? "T" : "S";
 }
 
-const contextMenu = ref<{ x: number; y: number; connection: SavedConnection } | null>(null);
+/** Where the bookmark was right-clicked: moving it reorders that list. The
+ *  recent section follows use, so it has no order to change. */
+type MenuSection = "tree" | "pinned" | "recent";
+const contextMenu = ref<{ x: number; y: number; connection: SavedConnection; section: MenuSection } | null>(null);
 /** Group-level right-click: export or share the whole subtree. */
 const folderMenu = ref<{ x: number; y: number; path: string } | null>(null);
 const shareTarget = ref<string | null>(null);
@@ -123,10 +134,24 @@ watch(contextMenu, (value, _previous, onCleanup) => {
 
 const filteredConnections = computed(() => filterConnections(connections.value, searchQuery.value));
 
+const pinned = computed(() => pinnedConnections(connections.value));
+
+/* Pinned bookmarks already sit at the top; repeating them here would only
+ * push other recent ones out of the five slots. */
 const recentlyUsed = computed(() => [...connections.value]
-    .filter(c => c.lastUsed)
+    .filter(c => c.lastUsed && !c.pinned)
     .sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))
     .slice(0, 5));
+
+/** The shortcut sections above the tree. Hidden while searching, where the
+ *  tree alone answers the query. */
+const shortcutSections = computed(() => (searchQuery.value.trim() ? [] : [
+  // Folding state shares one set with group paths. A normalized group path
+  // never starts with "/", so these keys cannot collide with a group the user
+  // named "Pinned", and they survive a change of UI language.
+  { key: "pinned" as const, foldKey: "/pinned", label: PINNED_LABEL.value, items: pinned.value },
+  { key: "recent" as const, foldKey: "/recent", label: RECENTLY_USED_LABEL.value, items: recentlyUsed.value },
+].filter((section) => section.items.length > 0)));
 
 const bookmarkRows = computed(() => flattenBookmarkTree(
   buildBookmarkTree(filteredConnections.value),
@@ -138,9 +163,43 @@ async function handleDoubleClick(connection: SavedConnection) {
   emit("connect", connection);
 }
 
-function handleContextMenu(event: MouseEvent, connection: SavedConnection) {
+function handleContextMenu(event: MouseEvent, connection: SavedConnection, section: MenuSection) {
   event.preventDefault();
-  contextMenu.value = { x: event.clientX, y: event.clientY, connection };
+  contextMenu.value = { x: event.clientX, y: event.clientY, connection, section };
+}
+
+/** The list's order after the move, or null at that end of it. */
+function movedOrder(connection: SavedConnection, section: MenuSection, direction: -1 | 1) {
+  return section === "pinned"
+    ? moveWithinPinned(connections.value, connection.id, direction)
+    : moveWithinGroup(connections.value, connection.id, direction);
+}
+
+/** The open menu's move targets, worked out once per menu rather than per render. */
+const menuMoves = computed(() => {
+  const menu = contextMenu.value;
+  if (!menu || menu.section === "recent") {
+    return { up: null, down: null };
+  }
+  return {
+    up: movedOrder(menu.connection, menu.section, -1),
+    down: movedOrder(menu.connection, menu.section, 1),
+  };
+});
+
+async function moveConnection(direction: -1 | 1) {
+  const menu = contextMenu.value;
+  const ids = direction < 0 ? menuMoves.value.up : menuMoves.value.down;
+  contextMenu.value = null;
+  if (!menu || !ids) {
+    return;
+  }
+  try {
+    await store.reorder(ids, menu.section === "pinned");
+  } catch (error) {
+    console.error("Failed to reorder connections", error);
+    await reportFailure("bookmarks.saveFailed", error);
+  }
 }
 
 /** Report a failure, naming the master-password lock when that is the cause. */
@@ -162,6 +221,16 @@ async function handleDelete(connection: SavedConnection) {
   } catch (error) {
     console.error("Failed to delete connection", error);
     await reportFailure("bookmarkManager.deleteFailed", error);
+  }
+}
+
+async function togglePinned(connection: SavedConnection) {
+  contextMenu.value = null;
+  try {
+    await store.setPinned(connection.id, !connection.pinned);
+  } catch (error) {
+    console.error("Failed to pin connection", error);
+    await reportFailure("bookmarks.saveFailed", error);
   }
 }
 
@@ -272,22 +341,27 @@ async function handleImportFile(event: Event) {
     </div>
 
     <div v-else class="bookmark-list">
-      <div v-if="recentlyUsed.length && !searchQuery.trim()" class="bookmark-group" :class="{ collapsed: store.isGroupCollapsed(RECENTLY_USED_LABEL) }">
-        <div class="bookmark-group-header" @click="store.toggleGroup(RECENTLY_USED_LABEL)">
+      <div
+        v-for="section in shortcutSections"
+        :key="section.key"
+        class="bookmark-group"
+        :class="[`bookmark-group--${section.key}`, { collapsed: store.isGroupCollapsed(section.foldKey) }]"
+      >
+        <div class="bookmark-group-header" @click="store.toggleGroup(section.foldKey)">
           <div class="bookmark-group-header-left">
             <span class="bookmark-group-arrow">›</span>
-            <span class="bookmark-group-name">{{ RECENTLY_USED_LABEL }}</span>
+            <span class="bookmark-group-name">{{ section.label }}</span>
           </div>
-          <span class="bookmark-group-count">{{ recentlyUsed.length }}</span>
+          <span class="bookmark-group-count">{{ section.items.length }}</span>
         </div>
-        <ul v-if="!store.isGroupCollapsed(RECENTLY_USED_LABEL)" class="bookmark-group-list">
+        <ul v-if="!store.isGroupCollapsed(section.foldKey)" class="bookmark-group-list">
           <li
-            v-for="connection in recentlyUsed"
+            v-for="connection in section.items"
             :key="connection.id"
             class="bookmark-item"
             :title="`${buildSubtitle(connection)}\n${$t('bookmarks.doubleClickToConnect')}`"
             @dblclick="handleDoubleClick(connection)"
-            @contextmenu="handleContextMenu($event, connection)"
+            @contextmenu="handleContextMenu($event, connection, section.key)"
           >
             <span class="bookmark-icon">{{ buildIcon(connection) }}</span>
             <div class="bookmark-info">
@@ -326,12 +400,13 @@ async function handleImportFile(event: Event) {
           :style="{ paddingLeft: `${16 + row.depth * 14}px` }"
           :title="`${buildSubtitle(row.connection)}\n${$t('bookmarks.doubleClickToConnect')}`"
           @dblclick="handleDoubleClick(row.connection)"
-          @contextmenu="handleContextMenu($event, row.connection)"
+          @contextmenu="handleContextMenu($event, row.connection, 'tree')"
         >
           <span class="bookmark-icon">{{ buildIcon(row.connection) }}</span>
           <div class="bookmark-info">
             <div class="bookmark-name-row">
               <span class="bookmark-name">{{ row.connection.name }}</span>
+              <span v-if="row.connection.pinned" class="bookmark-pin-mark" :title="$t('bookmarks.pinned')">📌</span>
               <span
                 v-if="reconnectBadge(row.connection)"
                 class="bookmark-badge"
@@ -366,6 +441,21 @@ async function handleImportFile(event: Event) {
       class="bookmark-context-menu"
       :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
     >
+      <button class="bookmark-context-item bookmark-context-item--pin" @click="togglePinned(contextMenu.connection)">
+        📌 {{ contextMenu.connection.pinned ? $t('bookmarks.unpin') : $t('bookmarks.pin') }}
+      </button>
+      <template v-if="contextMenu.section !== 'recent' && !searchQuery.trim()">
+        <button
+          class="bookmark-context-item bookmark-context-item--up"
+          :disabled="!menuMoves.up"
+          @click="moveConnection(-1)"
+        >⬆ {{ $t('bookmarks.moveUp') }}</button>
+        <button
+          class="bookmark-context-item bookmark-context-item--down"
+          :disabled="!menuMoves.down"
+          @click="moveConnection(1)"
+        >⬇ {{ $t('bookmarks.moveDown') }}</button>
+      </template>
       <button class="bookmark-context-item" @click="openEditDialog(contextMenu.connection)">✏️ {{ $t('common.edit') }}</button>
       <button class="bookmark-context-item" @click="contextMenu = null; emit('manage')">🗂 {{ $t('menu.bookmarkManager') }}</button>
       <button class="bookmark-context-item danger" @click="handleDelete(contextMenu.connection)">🗑 {{ $t('common.delete') }}</button>
@@ -594,6 +684,12 @@ async function handleImportFile(event: Event) {
   line-height: 1.5;
 }
 
+.bookmark-pin-mark {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  opacity: 0.7;
+}
+
 .bookmark-host {
   font-size: 0.75rem;
   color: var(--app-text-dim);
@@ -626,9 +722,14 @@ async function handleImportFile(event: Event) {
   border-radius: 2px;
 }
 
-.bookmark-context-item:hover {
+.bookmark-context-item:hover:not(:disabled) {
   background: var(--app-accent);
   color: var(--app-accent-contrast);
+}
+
+.bookmark-context-item:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .bookmark-context-item.danger:hover {

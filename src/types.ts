@@ -315,6 +315,14 @@ export interface SavedConnection {
   flowControl?: "none" | "hardware" | "software";
   createdAt: number;
   lastUsed?: number;
+  /** Kept at the top of the bookmark sidebar. */
+  pinned?: boolean;
+  /** Position within its group, set by "move up/down". Unordered bookmarks
+   *  follow the ordered ones, by name. */
+  order?: number;
+  /** Position within the pinned section, apart from `order` so arranging the
+   *  pins leaves the groups alone. */
+  pinOrder?: number;
   /** Legacy compatibility field; reconnect behavior is driven by reconnectType */
   autoReconnect?: boolean;
   /** Reconnect behavior for SSH sessions */
