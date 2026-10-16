@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { notifyBookmarksChanged } from "./useAutoSync";
-import { collectGroupPaths } from "../bookmarks";
+import { collectGroupPaths, normalizeBookmarkPath } from "../bookmarks";
 import { reviewImport, type ImportPlan } from "../importPreview";
 import type { SavedConnection } from "../types";
 
@@ -148,6 +148,11 @@ function replaceLocal(connection: SavedConnection) {
  */
 async function save(connection: SavedConnection) {
   requireUnlocked();
+  const previous = connections.value.find((candidate) => candidate.id === connection.id);
+  if (previous && normalizeBookmarkPath(previous.group).join("/") !== normalizeBookmarkPath(connection.group).join("/")) {
+    // Its position belonged to the old group; join the new one at the end.
+    connection = { ...connection, order: undefined };
+  }
   await invoke("save_connection", { connection });
   replaceLocal(connection);
   notifyBookmarksChanged();
@@ -320,6 +325,29 @@ async function touch(id: string) {
   }
 }
 
+/** Pin a bookmark to the top of the sidebar, or unpin it. Metadata only, so
+ *  this works while credentials are locked. */
+async function setPinned(id: string, pinned: boolean) {
+  await invoke("set_connection_pinned", { id, pinned });
+  const connection = connections.value.find((candidate) => candidate.id === id);
+  if (connection) {
+    replaceLocal({ ...connection, pinned, pinOrder: undefined });
+  }
+  notifyBookmarksChanged();
+}
+
+/** Store a group's order, or the pinned section's when `pinned`: each listed
+ *  id takes its index. Metadata only, so this works while credentials are locked. */
+async function reorder(ids: readonly string[], pinned = false) {
+  await invoke("reorder_connections", { ids: [...ids], pinned });
+  const field = pinned ? "pinOrder" : "order";
+  const positions = new Map(ids.map((id, index) => [id, index]));
+  connections.value = connections.value.map((connection) => (positions.has(connection.id)
+    ? { ...connection, [field]: positions.get(connection.id) }
+    : connection));
+  notifyBookmarksChanged();
+}
+
 const groupPaths = computed(() => collectGroupPaths(connections.value));
 
 /** Shared bookmark list, group folding state, and the mutations both the
@@ -348,6 +376,8 @@ export function useBookmarkStore() {
     discardImport,
     importWithPreview,
     touch,
+    setPinned,
+    reorder,
     toggleGroup,
     expandGroup,
     isGroupCollapsed,

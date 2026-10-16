@@ -70,6 +70,17 @@ pub struct SavedConnection {
     pub flow_control: Option<String>,
     pub created_at: u64,
     pub last_used: Option<u64>,
+    /// Kept at the top of the bookmark sidebar.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Position within its group, set by "move up/down". Unordered bookmarks
+    /// follow the ordered ones, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    /// Position within the pinned section, apart from `order` so arranging the
+    /// pins leaves the groups alone. Unordered pins follow the ordered ones, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_order: Option<u32>,
     /// Legacy compatibility field; reconnect behavior is driven by reconnect_type.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_reconnect: bool,
@@ -197,6 +208,9 @@ fn sanitize_connection_for_sharing(connection: &mut SavedConnection, bundle_id: 
     connection.log_path = None;
     // Our habits, not theirs.
     connection.last_used = None;
+    connection.pinned = false;
+    connection.order = None;
+    connection.pin_order = None;
     // Passwords, private keys, auto-login responses and post-connect commands.
     sanitize_connection_for_storage(connection);
 }
@@ -443,6 +457,7 @@ pub fn save_connection(
     sanitize_connection_for_storage(&mut persisted_connection);
 
     if let Some(existing) = connections.iter_mut().find(|c| c.id == id) {
+        keep_arrangement(&mut persisted_connection, existing);
         *existing = persisted_connection;
     } else {
         connections.push(persisted_connection);
@@ -484,6 +499,54 @@ pub fn touch_connection(app: AppHandle, id: String, timestamp: u64) -> Result<()
         write_connections(&app, &connections)?;
     }
     Ok(())
+}
+
+/// Pin or unpin a bookmark. Metadata only, so it works while credentials are locked.
+#[tauri::command]
+pub fn set_connection_pinned(app: AppHandle, id: String, pinned: bool) -> Result<(), String> {
+    let mut connections = load_connections(&app)?;
+    if let Some(conn) = connections.iter_mut().find(|c| c.id == id) {
+        conn.pinned = pinned;
+        // A new pin joins the end of the section; an unpinned one forgets its place.
+        conn.pin_order = None;
+        write_connections(&app, &connections)?;
+    }
+    Ok(())
+}
+
+/// Store the order of one group's bookmarks, or of the pinned section when
+/// `pinned`: each listed id gets its index. Metadata only, so it works while
+/// credentials are locked.
+#[tauri::command]
+pub fn reorder_connections(app: AppHandle, ids: Vec<String>, pinned: bool) -> Result<(), String> {
+    let mut connections = load_connections(&app)?;
+    apply_order(&mut connections, &ids, pinned);
+    write_connections(&app, &connections)
+}
+
+/// Pins and positions belong to `set_connection_pinned` / `reorder_connections`:
+/// a save (the editor, the connect dialog's "save as", a password or tunnel
+/// update) keeps them from the stored copy, whatever the caller sent. A move to
+/// another group drops the old group's position; it joins the new one at the end.
+fn keep_arrangement(saved: &mut SavedConnection, existing: &SavedConnection) {
+    let group = |connection: &SavedConnection| connection.group.as_deref().map(normalize_group_path).unwrap_or_default();
+    saved.pinned = existing.pinned;
+    saved.pin_order = existing.pin_order;
+    saved.order = if group(saved) == group(existing) { existing.order } else { None };
+}
+
+fn apply_order(connections: &mut [SavedConnection], ids: &[String], pinned: bool) {
+    let positions: HashMap<&str, u32> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index as u32))
+        .collect();
+    for connection in connections {
+        if let Some(position) = positions.get(connection.id.as_str()) {
+            let slot = if pinned { &mut connection.pin_order } else { &mut connection.order };
+            *slot = Some(*position);
+        }
+    }
 }
 
 /// 批量删除。一次性重写元数据与凭据库：前端逐条调用 `delete_connection` 会在
@@ -543,6 +606,8 @@ pub fn move_connections(
             continue;
         }
         connection.group = target.clone();
+        // Its position belonged to the old group; join the new one at the end.
+        connection.order = None;
         moved += 1;
     }
     if moved > 0 {
@@ -565,23 +630,38 @@ pub fn rename_group(app: AppHandle, from: String, to: String) -> Result<usize, S
         return Ok(0);
     }
     let mut connections = load_connections(&app)?;
-    let mut renamed = 0;
-    for connection in &mut connections {
-        let current = connection
-            .group
-            .as_deref()
-            .map(normalize_group_path)
-            .unwrap_or_default();
-        let Some(next) = renamed_group_path(&current, &source, &target) else {
-            continue;
-        };
-        connection.group = if next.is_empty() { None } else { Some(next) };
-        renamed += 1;
-    }
+    let renamed = rename_group_in(&mut connections, &source, &target);
     if renamed > 0 {
         write_connections(&app, &connections)?;
     }
     Ok(renamed)
+}
+
+/// Move every bookmark under `source` to `target`; returns how many moved.
+fn rename_group_in(connections: &mut [SavedConnection], source: &str, target: &str) -> usize {
+    let group_of = |connection: &SavedConnection| {
+        connection.group.as_deref().map(normalize_group_path).unwrap_or_default()
+    };
+    // Groups outside the renamed subtree that already hold bookmarks. Renamed
+    // ones landing in such a group would collide with its positions, so they
+    // join it at the end instead.
+    let occupied: HashSet<String> = connections
+        .iter()
+        .map(group_of)
+        .filter(|path| renamed_group_path(path, source, target).is_none())
+        .collect();
+    let mut renamed = 0;
+    for connection in connections.iter_mut() {
+        let Some(next) = renamed_group_path(&group_of(connection), source, target) else {
+            continue;
+        };
+        if occupied.contains(&next) {
+            connection.order = None;
+        }
+        connection.group = if next.is_empty() { None } else { Some(next) };
+        renamed += 1;
+    }
+    renamed
 }
 
 /// Where a bookmark currently in `current` lands when group `source` is renamed
@@ -635,6 +715,9 @@ pub fn duplicate_connection(
     copy.name = name.unwrap_or_else(|| format!("{} copy", source.name));
     copy.created_at = now;
     copy.last_used = None;
+    copy.pinned = false;
+    copy.order = None;
+    copy.pin_order = None;
     connections.push(copy);
     write_connections(&app, &connections)?;
     Ok(new_id)
@@ -904,6 +987,9 @@ fn parse_auraterm_export(content: &str, base_group: &str) -> Result<ParsedImport
         .map(|mut connection| {
             connection.id = uuid::Uuid::new_v4().to_string();
             connection.last_used = None;
+            connection.pinned = false;
+            connection.order = None;
+            connection.pin_order = None;
             let own_group = connection
                 .group
                 .as_deref()
@@ -1356,6 +1442,7 @@ fn apply_import(
                 candidate.id = existing.id.clone();
                 candidate.created_at = existing.created_at;
                 candidate.last_used = existing.last_used;
+                keep_arrangement(&mut candidate, existing);
                 if carries_secrets {
                     if let Some(store) = credential_store.as_mut() {
                         persist_connection_secrets(&candidate, store)?;
@@ -1467,6 +1554,9 @@ fn imported_connection(name: String, group: String, protocol: &str, host: String
         flow_control: None,
         created_at: now,
         last_used: None,
+        pinned: false,
+        order: None,
+        pin_order: None,
         auto_reconnect: false,
         reconnect_type: default_reconnect_type(),
         tunnels: Vec::new(),
@@ -1718,6 +1808,104 @@ mod tests {
         assert_eq!(reloaded.port, 2217);
     }
 
+    /// A pin survives a save and load; an unpinned bookmark writes no field, so
+    /// bookmarks from before pinning existed load unpinned and unchanged files
+    /// stay byte-identical.
+    #[test]
+    fn pinned_round_trips_and_is_omitted_when_false() {
+        let mut connection = imported_connection(
+            "web".into(), "Web".into(), "ssh", "10.0.0.1".into(), 22, "ops".into(),
+        );
+        let plain = serde_json::to_value(&connection).expect("encode");
+        assert!(plain.get("pinned").is_none());
+
+        connection.pinned = true;
+        let encoded = serde_json::to_string(&connection).expect("encode");
+        let reloaded: SavedConnection = serde_json::from_str(&encoded).expect("decode");
+        assert!(reloaded.pinned);
+    }
+
+    /// A save keeps the stored pin and positions, whatever the caller sent;
+    /// a move to another group gives up the old group's position.
+    #[test]
+    fn save_keeps_the_stored_arrangement() {
+        let mut existing = imported_connection(
+            "web".into(), "Web".into(), "ssh", "10.0.0.1".into(), 22, "ops".into(),
+        );
+        existing.pinned = true;
+        existing.order = Some(2);
+        existing.pin_order = Some(1);
+
+        // The connect dialog's "save as" builds a fresh copy without them.
+        let mut saved = existing.clone();
+        saved.pinned = false;
+        saved.order = None;
+        saved.pin_order = None;
+        saved.group = Some(" Web/ ".into());
+        keep_arrangement(&mut saved, &existing);
+        assert!(saved.pinned);
+        assert_eq!(saved.order, Some(2));
+        assert_eq!(saved.pin_order, Some(1));
+
+        saved.group = Some("Db".into());
+        keep_arrangement(&mut saved, &existing);
+        assert!(saved.pinned);
+        assert_eq!(saved.order, None);
+        assert_eq!(saved.pin_order, Some(1));
+    }
+
+    /// Each listed id takes its index; bookmarks of other groups keep theirs.
+    #[test]
+    fn apply_order_numbers_the_listed_bookmarks_only() {
+        let make = |id: &str| {
+            let mut connection = imported_connection(
+                id.into(), id.into(), "ssh", "10.0.0.1".into(), 22, "ops".into(),
+            );
+            connection.id = id.to_string();
+            connection
+        };
+        let mut connections = vec![make("a"), make("b"), make("other")];
+        connections[2].order = Some(7);
+
+        apply_order(&mut connections, &["b".to_string(), "a".to_string()], false);
+
+        assert_eq!(connections[0].order, Some(1));
+        assert_eq!(connections[1].order, Some(0));
+        assert_eq!(connections[2].order, Some(7));
+
+        // The pinned section keeps its own order and leaves the group's alone.
+        apply_order(&mut connections, &["a".to_string(), "b".to_string()], true);
+        assert_eq!(connections[0].pin_order, Some(0));
+        assert_eq!(connections[1].pin_order, Some(1));
+        assert_eq!(connections[0].order, Some(1));
+    }
+
+    /// Merging a group into one that already holds bookmarks would give two
+    /// bookmarks each position; the newcomers join the end instead. A plain
+    /// rename keeps the arrangement.
+    #[test]
+    fn renaming_into_an_occupied_group_drops_the_newcomers_positions() {
+        let make = |id: &str, group: &str, order: u32| {
+            let mut connection = imported_connection(
+                id.into(), id.into(), "ssh", "10.0.0.1".into(), 22, "ops".into(),
+            );
+            connection.id = id.to_string();
+            connection.group = Some(group.to_string());
+            connection.order = Some(order);
+            connection
+        };
+        let mut connections = vec![make("a", "A", 0), make("b", "A", 1), make("c", "B", 0)];
+
+        assert_eq!(rename_group_in(&mut connections, "A", "B"), 2);
+        assert_eq!(connections[0].order, None);
+        assert_eq!(connections[1].order, None);
+        assert_eq!(connections[2].order, Some(0), "the existing members keep theirs");
+
+        let mut connections = vec![make("a", "A", 1), make("c", "B", 0)];
+        rename_group_in(&mut connections, "A", "Fresh");
+        assert_eq!(connections[0].order, Some(1));
+    }
+
     /// Bookmarks written before network serial existed must still load.
     #[test]
     fn local_serial_bookmark_without_a_transport_still_loads() {
@@ -1870,6 +2058,9 @@ mod tests {
         connection.id = "local-uuid".to_string();
         connection.log_path = Some("/Users/bill/logs/web.log".to_string());
         connection.last_used = Some(1_700_000_000_000);
+        connection.pinned = true;
+        connection.order = Some(3);
+        connection.pin_order = Some(2);
         connection.password = Some("hunter2".to_string());
         connection.post_connect_commands = vec!["sudo -i".to_string()];
         connection.auto_login_rules = vec![SavedAutoLoginRule {
@@ -1884,6 +2075,9 @@ mod tests {
         assert_eq!(connection.id, "");
         assert_eq!(connection.log_path, None);
         assert_eq!(connection.last_used, None);
+        assert!(!connection.pinned, "the recipient decides what to pin");
+        assert_eq!(connection.order, None, "the recipient arranges their own groups");
+        assert_eq!(connection.pin_order, None);
         assert_eq!(connection.password, None);
         assert!(connection.post_connect_commands.is_empty());
         assert_eq!(connection.auto_login_rules[0].response, None);
