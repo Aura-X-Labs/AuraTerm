@@ -96,6 +96,14 @@
   color: var(--app-text-dim);
   margin-right: 8px;
   font-style: italic;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.quick-buttons-hint:hover {
+  color: var(--app-text-secondary);
 }
 
 .quick-toolbar-select {
@@ -139,17 +147,44 @@
   border-color: var(--app-border-strong);
 }
 
-.quick-btn--edit {
-  background: transparent;
-  border-color: var(--app-border);
-  color: var(--app-text-dim);
-  margin-left: auto;
+/* Right-click menu of the quick-button bar */
+.quick-bar-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 140px;
+  padding: 4px;
+  background: var(--app-menu-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px var(--app-shadow);
 }
 
-.quick-btn--edit:hover {
+.quick-bar-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 2px;
   color: var(--app-text-secondary);
-  background: var(--app-surface-1);
-  border-color: var(--app-border-strong);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.quick-bar-menu-item:hover {
+  background: var(--app-accent);
+  color: var(--app-accent-contrast);
+}
+
+.quick-bar-menu-item.danger:hover {
+  background: var(--app-danger);
+}
+
+.quick-bar-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--app-border);
 }
 
 /* Textarea + send row */
