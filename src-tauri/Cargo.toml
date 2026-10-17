@@ -6,6 +6,11 @@ authors = ["William Yang"]
 edition = "2021"
 license = "GPL-3.0-or-later"
 
+[features]
+# Mac App Store build: App Sandbox paths, no local shell. Set by
+# scripts/package-appstore.sh; see src/distribution.rs.
+app-store = []
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 chrono = "0.4"

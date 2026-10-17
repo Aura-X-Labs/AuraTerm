@@ -25,6 +25,7 @@ mod ai;
 mod cloud_sync;
 mod cloud_sync_legacy;
 mod cloud_bridge;
+mod distribution;
 mod e2ee;
 mod pake;
 mod assist;
@@ -398,6 +399,9 @@ fn start_pty(
     id: String,
     cwd: Option<String>,
 ) -> Result<String, String> {
+    if !distribution::LOCAL_SHELL {
+        return Err(distribution::LOCAL_SHELL_UNAVAILABLE.to_string());
+    }
     let shell_path = resolve_local_shell_path(&app);
     zmodem.reset_session(&id);
     // Subscribe before opening so the first prompt bytes cannot be missed.
@@ -749,7 +753,7 @@ fn append_to_log(path: String, content: String) -> Result<(), String> {
 
 #[command]
 fn save_terminal_log(content: String, tab_name: String) -> Result<String, String> {
-    let logs_dir = user_home_dir().join("AuraTerm").join("logs");
+    let logs_dir = distribution::files_dir(&user_home_dir()).join("logs");
     std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
 
     // Sanitize the tab name so it is safe for use in a filename
@@ -936,8 +940,11 @@ fn build_app_menu(
     let paste_item = PredefinedMenuItem::paste(app, None)?;
     let select_all_item = PredefinedMenuItem::select_all(app, None)?;
 
-    let new_session_menu = SubmenuBuilder::new(app, l("New Session", "新建会话"))
-        .item(&new_local_item)
+    let mut new_session_menu = SubmenuBuilder::new(app, l("New Session", "新建会话"));
+    if distribution::LOCAL_SHELL {
+        new_session_menu = new_session_menu.item(&new_local_item);
+    }
+    let new_session_menu = new_session_menu
         .item(&new_ssh_item)
         .item(&new_telnet_item)
         .item(&new_serial_item)

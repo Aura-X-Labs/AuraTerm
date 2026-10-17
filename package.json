@@ -13,6 +13,7 @@
     "sync:version": "python scripts/sync_version.py",
     "tauri": "npm run sync:version && tauri",
     "tauri:store": "npm run sync:version && tauri build --no-bundle && tauri bundle --config src-tauri/tauri.microsoftstore.conf.json",
+    "package:appstore": "bash scripts/package-appstore.sh",
     "package:msix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-msix.ps1",
     "package:msixupload": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-msix.ps1 -MsixUpload",
     "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1",

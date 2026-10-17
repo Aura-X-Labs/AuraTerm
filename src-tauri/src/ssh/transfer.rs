@@ -96,7 +96,7 @@ pub(super) fn home_dir() -> PathBuf {
 }
 
 pub(super) fn default_download_dir() -> PathBuf {
-    home_dir().join("AuraTerm").join("downloads")
+    crate::distribution::files_dir(&home_dir()).join("downloads")
 }
 
 pub(super) fn unique_local_path(dir: &Path, file_name: &str) -> PathBuf {

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mac App Store entitlements, used only by scripts/package-appstore.sh through
+  tauri.appstore.conf.json. The application identifier must match the App ID
+  in the embedded provisioning profile, or App Store Connect rejects the upload.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.application-identifier</key>
+	<string>EC83H6Z7DX.com.auraxlabs.auraterm</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>EC83H6Z7DX</string>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- SSH, Telnet, RFC 2217 / raw TCP serial, cloud sync, Live Share. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Local ports for SSH port forwarding (local and dynamic tunnels). -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.device.serial</key>
+	<true/>
+	<!-- Private keys, uploads and paths the user picks in a dialog. -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<!-- Logs and downloads default to ~/Downloads/AuraTerm in this build. -->
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
+</dict>
+</plist>

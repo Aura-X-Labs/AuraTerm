@@ -2,6 +2,7 @@ import { computed, ref, watch, type Ref } from "vue";
 import type { SerialProtocol, SessionConfig } from "./types";
 
 import { isSerialProtocol, transportForProtocol } from "./serialTransport";
+import { localShellAvailable } from "./distribution";
 
 export interface PaneLayoutTab {
   id: string;
@@ -146,6 +147,11 @@ function restoreSessionConfig(value: unknown): SessionConfig | null {
   }
 
   if (value.protocol === "local") {
+    // A workspace saved by a build with local shells (or synced from one)
+    // drops those tabs here rather than opening shells that cannot start.
+    if (!localShellAvailable) {
+      return null;
+    }
     return {
       protocol: "local",
       cwd: typeof value.cwd === "string" ? value.cwd : undefined,

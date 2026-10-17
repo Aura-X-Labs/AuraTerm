@@ -850,7 +850,7 @@ pub(crate) fn decide_open(
         return Err("relay_disabled");
     }
     let kind_allowed = match kind {
-        "local_shell" => policy.allow_open_shell,
+        "local_shell" => policy.allow_open_shell && crate::distribution::LOCAL_SHELL,
         "serial" => policy.allow_open_serial,
         "bookmark" => policy.allow_open_bookmark,
         _ => false,

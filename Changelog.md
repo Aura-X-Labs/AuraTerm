@@ -1,3 +1,8 @@
+## 未发布
+
+### 新增
+- **Mac App Store 版本**：新增 App Store 专用构建 `npm run package:appstore`（`scripts/package-appstore.sh`），产出签名好的 `.pkg`，可用 Transporter 或 `--upload` 上传到 App Store Connect。App Store 版本运行在 App Sandbox 中，包标识为 `com.auraxlabs.auraterm`，与直接下载版的数据互不相通。沙盒里的本地 Shell 读不到主目录、`~/.ssh` 和 Homebrew，因此该版本不提供本地终端（菜单、命令面板、新建会话对话框、设置与 Live Share 中的相关入口一并隐藏，恢复工作区时跳过本地终端标签页）；日志与下载默认存到 `~/Downloads/AuraTerm`；选择私钥时仍在真实的 `~/.ssh` 中打开。直接下载版（DMG / Windows / Linux）不受影响。
+
 ## 0.3.9
 
 ### 新增

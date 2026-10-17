@@ -377,9 +377,9 @@ pub struct Settings {
 fn default_true() -> bool { true }
 fn default_global_scope() -> String { "global".to_string() }
 fn default_rule_cooldown() -> u64 { 1000 }
-fn default_log_save_path() -> String { "~/AuraTerm/logs".to_string() }
+fn default_log_save_path() -> String { crate::distribution::default_log_dir_tilde() }
 fn default_log_file_name_template() -> String { "{session}_{timestamp}".to_string() }
-fn default_zmodem_download_path() -> String { "~/AuraTerm/downloads".to_string() }
+fn default_zmodem_download_path() -> String { crate::distribution::default_download_dir_tilde() }
 
 
 impl Default for Settings {

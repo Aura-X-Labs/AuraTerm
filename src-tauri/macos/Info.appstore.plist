@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the Mac App Store build's Info.plist. AuraTerm only uses standard
+  algorithms (SSH, TLS, AES-GCM, SPAKE2), which is what "false" declares here;
+  confirm the same answer in App Store Connect's export compliance questions.
+-->
+<plist version="1.0">
+<dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>

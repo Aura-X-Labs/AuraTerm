@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { defaultFilesDir } from "./distribution";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { t } from "./i18n";
@@ -24,7 +25,7 @@ const selectedPath = ref<string | null>(null);
 const transferMode = ref<RemoteTransferMode>("sftp");
 // Resume assumes the existing file is a prefix of the selected file, so keep it opt-in.
 const resumeTransfers = ref(false);
-const downloadDirectory = ref("~/AuraTerm/downloads");
+const downloadDirectory = ref(`${defaultFilesDir}/downloads`);
 const loading = ref(false);
 const busy = ref(false);
 const errorMessage = ref("");
@@ -706,7 +707,7 @@ onBeforeUnmount(() => {
         <input
           v-model="downloadDirectory"
           type="text"
-          placeholder="~/AuraTerm/downloads"
+          :placeholder="`${defaultFilesDir}/downloads`"
           autocapitalize="none"
           autocorrect="off"
           spellcheck="false"
