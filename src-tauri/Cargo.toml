@@ -73,6 +73,10 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 # secret-service / DBus (the dependency the app deliberately shed earlier).
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# NSEvent.pressedMouseButtons, to hold off fitting a window to its monitor
+# while the user is still dragging it (window_bounds.rs). Already compiled for
+# tao and wry, so this adds no build cost.
+objc2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

@@ -202,11 +202,14 @@ export interface SerialHistoryItem {
   flowControl: "none" | "hardware" | "software";
 }
 
+/** Maintained by the backend; `save_settings` ignores the copy sent with it. */
 export interface WindowBounds {
   x: number;
   y: number;
   width: number;
   height: number;
+  /** The window's scale factor when the bounds were taken. */
+  scaleFactor?: number;
 }
 
 /** One text row in the input bar: 13px font × 1.5 line-height (styles/input-bar.css). */

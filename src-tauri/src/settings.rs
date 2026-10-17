@@ -127,13 +127,20 @@ pub struct SerialHistoryItem {
     pub flow_control: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The main window's last normal bounds, in physical pixels: the outer
+/// position and the content size. Maintained by the backend (see
+/// `window_bounds.rs`); the frontend never writes it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowBounds {
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// The window's scale factor when the bounds were taken. Absent in
+    /// settings saved before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -447,12 +454,33 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
-    let path = settings_path(&app)?;
+pub fn save_settings(app: AppHandle, mut settings: Settings) -> Result<(), String> {
+    let _guard = SETTINGS_WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The backend owns the window bounds and records them as the window
+    // moves. Callers hand back the copy they loaded, which would roll the
+    // window back to wherever it was then.
+    settings.window_bounds = get_settings(app.clone()).ok().and_then(|saved| saved.window_bounds);
+    write_settings(&app, &settings)
+}
+
+/// Serializes the read-modify-write saves above: cloud sync saves from a
+/// tokio worker while the window's bounds are saved on the main thread.
+static SETTINGS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Records the main window's bounds, keeping every other setting as saved.
+pub fn save_window_bounds(app: &AppHandle, bounds: WindowBounds) -> Result<(), String> {
+    let _guard = SETTINGS_WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = get_settings(app.clone())?;
+    settings.window_bounds = Some(bounds);
+    write_settings(app, &settings)
+}
+
+fn write_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let path = settings_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     crate::util::write_atomic(&path, &content)?;
     Ok(())
 }
