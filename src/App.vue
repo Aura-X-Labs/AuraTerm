@@ -2702,8 +2702,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
 
 <template>
   <div :class="appClassName">
-    <div v-if="isMainWindow" class="titlebar" @mousedown="handleTitlebarMouseDown" @dblclick="handleToggleMaximize">
-      <div v-if="isMainWindow && osType !== 'windows'" class="titlebar-controls" :aria-label="$t('titlebar.windowControls')" data-no-drag="true">
+    <div class="titlebar" @mousedown="handleTitlebarMouseDown" @dblclick="handleToggleMaximize">
+      <div v-if="osType !== 'windows'" class="titlebar-controls" :aria-label="$t('titlebar.windowControls')" data-no-drag="true">
         <button
           class="titlebar-control-btn titlebar-control-close"
           type="button"
@@ -2949,7 +2949,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
 
       <div v-else class="titlebar-title">AuraTerm</div>
 
-      <div v-if="isMainWindow && osType === 'windows'" class="titlebar-controls-win" :aria-label="$t('titlebar.windowControls')" data-no-drag="true">
+      <div v-if="osType === 'windows'" class="titlebar-controls-win" :aria-label="$t('titlebar.windowControls')" data-no-drag="true">
         <button
           class="titlebar-control-win-btn"
           type="button"
