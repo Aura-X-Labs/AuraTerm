@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { localShellAvailable } from "./distribution";
 import { purgeSerialBuffers, sendSerialBreak, setSerialParams, setSerialSignals } from "./composables/useTerminalSessionCommands";
 import { COMMON_BAUD_RATES, formatSerialParams, isSerialProtocol, serialConfigOf, sharedSessionProtocol } from "./serialTransport";
 import { listen } from "@tauri-apps/api/event";
@@ -434,6 +435,12 @@ function createDefaultLocalShellTab(tabId = "tab-0"): Tab {
   };
 }
 
+/** What a window opens with when there is nothing to restore: a local shell,
+ *  or an empty pane in a build without one. */
+function createDefaultTabs(): Tab[] {
+  return localShellAvailable ? [createDefaultLocalShellTab()] : [];
+}
+
 function updateTabSession(tabId: string, session: SessionConfig) {
   tabs.value = tabs.value.map((tab) => (
     tab.id === tabId
@@ -622,7 +629,7 @@ onMounted(async () => {
       applyRestoredWorkspaceState(restoredWorkspaceState);
       syncTabIdCounter(restoredWorkspaceState.tabs);
     } else {
-      const defaultTabs = [createDefaultLocalShellTab()];
+      const defaultTabs = createDefaultTabs();
       applyPaneLayoutFromTabs(defaultTabs, normalizedSettings.paneLayout);
       syncTabIdCounter(defaultTabs);
     }
@@ -631,7 +638,7 @@ onMounted(async () => {
     settings.value = fallbackSettings;
     settingsRef.value = fallbackSettings;
     syncLanguage(fallbackSettings.language);
-    const defaultTabs = [createDefaultLocalShellTab()];
+    const defaultTabs = createDefaultTabs();
     applyPaneLayoutFromTabs(defaultTabs, fallbackSettings.paneLayout);
     syncTabIdCounter(defaultTabs);
   }
@@ -1044,7 +1051,7 @@ async function refreshRelayOpenTargets() {
   if (!isMainWindow) return;
   const policy = settingsRef.value.liveRelay;
   const targets: RelayOpenTarget[] = [];
-  if (policy.enabled && policy.allowOpenShell) {
+  if (localShellAvailable && policy.enabled && policy.allowOpenShell) {
     targets.push({ kind: "local_shell", id: "shell", label: t("liveRelay.targetLocalShell") });
   }
   if (policy.enabled && (policy.allowOpenSerial || policy.allowOpenBookmark)) {
@@ -1113,7 +1120,7 @@ async function handleRelayOpenRequest(request: RelayOpenRequest) {
 async function openRelayTarget(request: RelayOpenRequest): Promise<string | null> {
   const policy = settingsRef.value.liveRelay;
   if (request.kind === "local_shell") {
-    if (!policy.allowOpenShell) return null;
+    if (!localShellAvailable || !policy.allowOpenShell) return null;
     const newId = mintTabId();
     // The shell path and cwd are this device's own; a peer can name
     // neither (see pty_broker.rs::OpenTerminalRequest).
@@ -2365,6 +2372,9 @@ function handleCloseActiveTab() {
 }
 
 function handleNewLocalSession() {
+  if (!localShellAvailable) {
+    return;
+  }
   const newId = mintTabId();
   const cwd = window.getStartupDir?.() ?? undefined;
   tabs.value = [...tabs.value, { id: newId, title: "Local Shell", session: { protocol: "local", cwd } }];
@@ -2619,7 +2629,9 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
   const hasTab = Boolean(activeTab.value);
   const hasSsh = Boolean(activeSshConfig.value);
   const commands: PaletteCommand[] = [
-    { id: "new-local", title: t("palette.cmd.newLocal"), group: t("palette.groups.session"), keywords: "terminal shell", run: () => handleNewLocalSession() },
+    ...(localShellAvailable
+      ? [{ id: "new-local", title: t("palette.cmd.newLocal"), group: t("palette.groups.session"), keywords: "terminal shell", run: () => handleNewLocalSession() }]
+      : []),
     { id: "new-ssh", title: t("palette.cmd.newSsh"), group: t("palette.groups.session"), keywords: "remote", run: () => openConnect("ssh") },
     { id: "new-telnet", title: t("palette.cmd.newTelnet"), group: t("palette.groups.session"), run: () => openConnect("telnet") },
     { id: "new-serial", title: t("palette.cmd.newSerial"), group: t("palette.groups.session"), keywords: "port com uart", run: () => openConnect("serial") },
@@ -2740,7 +2752,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                   <span class="titlebar-menu-item-arrow">›</span>
                 </button>
                 <div v-if="openFileSubmenuId === 'new-session'" class="titlebar-menu-submenu" @mousedown="stopDragPropagation">
-                  <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleNewLocalSessionFromMenu">
+                  <button v-if="localShellAvailable" class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleNewLocalSessionFromMenu">
                     <span>{{ $t('menu.localShell') }}</span>
                   </button>
                   <button class="titlebar-menu-item" type="button" @mousedown.stop="stopDragPropagation" @click="handleOpenConnectionFromMenu('ssh')">
@@ -3373,7 +3385,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
                   <div class="terminal-pane-empty-title">Empty Pane</div>
                   <div class="terminal-pane-empty-desc">Start a new session or drag a tab here.</div>
                   <div class="terminal-pane-empty-actions">
-                    <button class="terminal-pane-empty-btn" type="button" @click.stop="focusPane(pane.paneId); handleNewLocalSession()">
+                    <button v-if="localShellAvailable" class="terminal-pane-empty-btn" type="button" @click.stop="focusPane(pane.paneId); handleNewLocalSession()">
                       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                         <rect x="1" y="2" width="14" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/>
                         <path d="M4 6l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
@@ -3632,7 +3644,7 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
       <div class="newtab-dialog" @click.stop>
         <div class="newtab-dialog-title">New Session</div>
         <div class="newtab-options">
-          <button class="newtab-option-btn" @click="showNewTabMenu = false; handleNewLocalSession()">
+          <button v-if="localShellAvailable" class="newtab-option-btn" @click="showNewTabMenu = false; handleNewLocalSession()">
             <span class="newtab-option-icon">🖥</span>
             <span class="newtab-option-label">Local Shell</span>
             <span class="newtab-option-desc">Open a local terminal session</span>

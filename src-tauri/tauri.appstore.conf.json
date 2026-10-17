@@ -1,0 +1,13 @@
+{
+  "identifier": "com.auraxlabs.auraterm",
+  "bundle": {
+    "targets": ["app"],
+    "category": "DeveloperTool",
+    "copyright": "Copyright (c) 2026 Aura-X-Labs",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "entitlements": "macos/appstore.entitlements",
+      "infoPlist": "macos/Info.appstore.plist"
+    }
+  }
+}

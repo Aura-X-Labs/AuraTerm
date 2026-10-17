@@ -69,7 +69,7 @@ pub async fn ssh_pick_private_key_file(
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .set_directory(default_key_dir(&home_dir()))
+        .set_directory(default_key_dir(&crate::distribution::dialog_home_dir(home_dir())))
         .set_parent(&window)
         .pick_file(move |picked| {
             let _ = sender.send(picked);

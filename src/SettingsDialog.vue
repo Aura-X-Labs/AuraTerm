@@ -20,6 +20,7 @@ import {
 } from "./settings";
 import { aiClearApiKey, aiHasApiKey, aiSetApiKey, aiTestConnection } from "./ai";
 import { alertDialog, confirmDialog } from "./nativeDialogs";
+import { defaultFilesDir, localShellAvailable } from "./distribution";
 
 const props = defineProps<{
   initial: AppSettings;
@@ -807,7 +808,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
           </label>
           <div class="settings-field-full-hint">{{ selectedRendererModeDescription }}</div>
 
-          <label class="settings-field">
+          <label v-if="localShellAvailable" class="settings-field">
             <span>{{ $t('settings.shell') }}</span>
             <select :value="selectedShellPreset" @change="handleShellPresetChange">
               <option v-for="preset in shellPresets" :key="preset.value" :value="preset.value">
@@ -816,7 +817,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
             </select>
           </label>
 
-          <label v-if="showCustomPath" class="settings-field">
+          <label v-if="localShellAvailable && showCustomPath" class="settings-field">
             <span>{{ $t('settings.customShellPath') }}</span>
             <input
               type="text"
@@ -833,7 +834,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
             <span>{{ $t('settings.defaultLogSavePath') }}</span>
             <input
               type="text"
-              placeholder="e.g., ~/AuraTerm/logs"
+              :placeholder="`e.g., ${defaultFilesDir}/logs`"
               :value="settings.logSavePath"
               @input="update('logSavePath', inputValue($event))"
               autocapitalize="none"
@@ -876,7 +877,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
             <input
               type="text"
               :value="settings.zmodemDownloadPath"
-              placeholder="~/AuraTerm/downloads"
+              :placeholder="`${defaultFilesDir}/downloads`"
               @input="update('zmodemDownloadPath', inputValue($event))"
               autocapitalize="none"
               autocorrect="off"
@@ -966,7 +967,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
             >
           </label>
 
-          <label class="settings-field settings-field--toggle" :class="{ 'settings-field--disabled': !settings.liveRelay.enabled }">
+          <label v-if="localShellAvailable" class="settings-field settings-field--toggle" :class="{ 'settings-field--disabled': !settings.liveRelay.enabled }">
             <span>
               <strong>{{ $t('settings.relayOpenShell') }}</strong>
               <small>{{ $t('settings.relayOpenShellHint') }}</small>

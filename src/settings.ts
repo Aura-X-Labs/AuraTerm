@@ -1,6 +1,7 @@
 import { normalizeBookmarkPath } from "./bookmarks";
 import type { AppLanguage } from "./i18n";
 import type { SerialTransport } from "./types";
+import { defaultFilesDir } from "./distribution";
 
 export interface TerminalTheme {
   background: string;
@@ -588,7 +589,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   scrollback: 10000,
   shellPath: null,
   windowBounds: null,
-  logSavePath: "~/AuraTerm/logs",
+  logSavePath: `${defaultFilesDir}/logs`,
   logFileNameTemplate: "{session}_{timestamp}",
   theme: DEFAULT_THEME,
   uiThemeMode: "follow-terminal",
@@ -605,7 +606,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoOpenSftp: false,
   autoShareToCloud: false,
   allowRemoteSend: true,
-  zmodemDownloadPath: "~/AuraTerm/downloads",
+  zmodemDownloadPath: `${defaultFilesDir}/downloads`,
   lastSerialConfig: null,
   recentSerialConfigs: [],
   inputHistory: [],

@@ -635,7 +635,7 @@ fn download_directory(app: &AppHandle) -> PathBuf {
     crate::settings::get_settings(app.clone())
         .ok()
         .map(|settings| expand_tilde(&settings.zmodem_download_path))
-        .unwrap_or_else(|| expand_tilde("~/AuraTerm/downloads"))
+        .unwrap_or_else(|| expand_tilde(&crate::distribution::default_download_dir_tilde()))
 }
 
 fn expand_tilde(value: &str) -> PathBuf {
