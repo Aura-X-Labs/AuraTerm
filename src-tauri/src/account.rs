@@ -238,17 +238,43 @@ pub async fn auraxlab_account_login(
     read_state(&app, &bridge, false).await
 }
 
+/// Forget the account on this device: stop sharing, drop the Cloud Console
+/// enrollment and the saved sync credential. `revoke` is the credential to
+/// revoke server-side first, when the server still holds it.
+async fn sign_out_locally(app: &AppHandle, bridge: &cloud_bridge::CloudBridgeState, revoke: Option<&str>) -> Result<(), String> {
+    let _ = cloud_bridge::pause(bridge).await;
+    let unbind_result = cloud_bridge::unbind(app, bridge).await;
+    if let Some(token) = revoke {
+        cloud_sync::revoke_sync_credential(token).await;
+    }
+    let clear_result = cloud_sync::clear_account_login(app);
+    unbind_result?;
+    clear_result
+}
+
 #[tauri::command]
 pub async fn auraxlab_account_logout(app: AppHandle, bridge: State<'_, cloud_bridge::CloudBridgeState>) -> Result<AuraXLabAccountState, String> {
     let sync = cloud_sync::local_sync_account(&app)?;
-    let _ = cloud_bridge::pause(&bridge).await;
-    let unbind_result = cloud_bridge::unbind(&app, &bridge).await;
-    if let Some(account) = sync {
-        cloud_sync::revoke_sync_credential(&account.token).await;
+    sign_out_locally(&app, &bridge, sync.as_ref().map(|account| account.token.as_str())).await?;
+    read_state(&app, &bridge, false).await
+}
+
+/// Permanently delete the AuraXLab account (App Store Review Guideline
+/// 5.1.1(v)), then sign this device out. The frontend has already confirmed
+/// the deletion; the server re-checks `password`.
+#[tauri::command]
+pub async fn auraxlab_account_delete(
+    app: AppHandle,
+    bridge: State<'_, cloud_bridge::CloudBridgeState>,
+    password: String,
+) -> Result<AuraXLabAccountState, String> {
+    if password.is_empty() {
+        return Err("Password is required.".to_string());
     }
-    let clear_result = cloud_sync::clear_account_login(&app);
-    unbind_result?;
-    clear_result?;
+    cloud_sync::delete_account(&app, &password).await?;
+    // The server has already destroyed the sync credential and this device's
+    // enrollment, so there is nothing left to revoke; only local state remains.
+    sign_out_locally(&app, &bridge, None).await?;
     read_state(&app, &bridge, false).await
 }
 

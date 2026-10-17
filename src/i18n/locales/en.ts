@@ -575,6 +575,14 @@ const en = {
     signedInAs: "Signed in as",
     signOut: "Sign out",
     signedOut: "Signed out.",
+    deleteAccount: "Delete account…",
+    deleteIntro:
+      "Permanently deletes your AuraXLab account and everything the server stores for it: synced bookmarks and settings, shared bookmark codes, Live Console devices and session history, and Live Share sessions. This cannot be undone. Bookmarks and settings on this computer are kept.",
+    deletePasswordHint: "Enter your current password to confirm.",
+    deleteNow: "Delete account permanently",
+    deleteConfirm:
+      "Permanently delete the AuraXLab account \"{name}\"? Everything stored for it on the server is erased and cannot be recovered.",
+    deleted: "Your account has been deleted and this device is signed out.",
     signedOutStillBound:
       "Signed out. This device stays bound and reachable via Live Console — use \"Unbind this device\" below to remove it.",
     trafficSection: "Live Sync traffic",

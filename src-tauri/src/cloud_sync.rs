@@ -1686,6 +1686,33 @@ pub(crate) async fn revoke_sync_credential(token: &str) {
     }
 }
 
+/// Permanently delete the signed-in AuraXLab account and everything the
+/// server stores for it (App Store Review Guideline 5.1.1(v)). The saved sync
+/// credential identifies the account; `password` re-authenticates the person,
+/// so a copied credential alone cannot delete it.
+pub(crate) async fn auraxlab_delete_account(cfg: &AuraxlabProvider, password: &str) -> Result<(), String> {
+    let resp = http_client()?
+        .post(format!("{}/api/v1/auraterm/account/delete", cfg.endpoint()))
+        .basic_auth(&cfg.token, Some(""))
+        .json(&json!({ "password": password }))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    match status {
+        s if s.is_success() => Ok(()),
+        StatusCode::UNAUTHORIZED => Err(ERR_SIGN_IN.to_string()),
+        s => Err(format!("Account deletion failed: {}", json_message(&parse_json(&bytes), s))),
+    }
+}
+
+pub(crate) async fn delete_account(app: &AppHandle, password: &str) -> Result<(), String> {
+    let config = load_config(app)?;
+    ensure_signed_in(&config)?;
+    auraxlab_delete_account(&config.auraxlab, password).await
+}
+
 /// Cloud Console traffic totals for the signed-in account, as reported by
 /// `GET /api/v1/auraterm/account` (`traffic` object; absent on older servers).
 #[derive(Clone, Serialize)]
@@ -2145,6 +2172,30 @@ pub(crate) mod tests {
         let cfg = mock_provider(base);
         assert_eq!(auraxlab_pull(&cfg).await.unwrap_err(), ERR_SIGN_IN);
         assert_eq!(auraxlab_push(&cfg, &payload_text("x"), None, "d", "l").await.unwrap_err(), ERR_SIGN_IN);
+    }
+
+    #[tokio::test]
+    async fn integ_auraxlab_delete_account_posts_the_password() {
+        let base = spawn_mock(|method, url, body| {
+            let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            if method == "POST" && url == "/api/v1/auraterm/account/delete" && v["password"] == "hunter22" {
+                (200, br#"{"status":"deleted"}"#.to_vec(), vec![])
+            } else {
+                (400, br#"{"message":"unexpected request"}"#.to_vec(), vec![])
+            }
+        });
+        auraxlab_delete_account(&mock_provider(base), "hunter22").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn integ_auraxlab_delete_account_reports_why_it_failed() {
+        let base = spawn_mock(|_, _, _| (403, br#"{"error":"forbidden","message":"Incorrect password"}"#.to_vec(), vec![]));
+        assert_eq!(
+            auraxlab_delete_account(&mock_provider(base), "wrong").await.unwrap_err(),
+            "Account deletion failed: Incorrect password"
+        );
+        let base = spawn_mock(|_, _, _| (401, br#"{"error":"unauthorized"}"#.to_vec(), vec![]));
+        assert_eq!(auraxlab_delete_account(&mock_provider(base), "pw").await.unwrap_err(), ERR_SIGN_IN);
     }
 
     #[tokio::test]

@@ -1383,6 +1383,7 @@ fn main() {
             account::auraxlab_account_restore,
             account::auraxlab_account_login,
             account::auraxlab_account_logout,
+            account::auraxlab_account_delete,
             account::auraxlab_account_enable_console,
             account::auraxlab_account_pause_console,
             ai::ai_chat_start,

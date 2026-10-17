@@ -61,6 +61,12 @@ export function accountLogout(): Promise<AuraXLabAccountState> {
   return invoke("auraxlab_account_logout");
 }
 
+/** Permanently delete the AuraXLab account, then sign this device out. The
+ * caller confirms first; the server re-checks `password`. */
+export function deleteAccount(password: string): Promise<AuraXLabAccountState> {
+  return invoke("auraxlab_account_delete", { password });
+}
+
 export function enableConsole(
   email: string,
   password: string,

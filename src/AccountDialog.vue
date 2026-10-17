@@ -4,6 +4,7 @@ import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import {
   accountLogout,
   accountState,
+  deleteAccount,
   enableConsole,
   pauseConsole,
   refreshAccount,
@@ -12,6 +13,7 @@ import {
 import type { CloudBridgeStatus } from "./cloudBridge";
 import AuraxlabAuthForm from "./AuraxlabAuthForm.vue";
 import { t } from "./i18n";
+import { confirmDialog } from "./nativeDialogs";
 
 const props = withDefaults(defineProps<{
   platform: string;
@@ -30,6 +32,8 @@ const isError = ref(false);
 const bindOnLogin = ref(true);
 const deviceLabel = ref("");
 const recoveryPassword = ref("");
+const deleteOpen = ref(false);
+const deletePassword = ref("");
 let refreshGeneration = 0;
 
 const signedIn = computed(() => state.value?.signedIn ?? false);
@@ -173,6 +177,34 @@ async function signOut() {
   }
 }
 
+function toggleDelete() {
+  deleteOpen.value = !deleteOpen.value;
+  deletePassword.value = "";
+}
+
+async function removeAccount() {
+  if (!deletePassword.value) {
+    note(t("account.passwordRequired"), true);
+    return;
+  }
+  const name = state.value?.username || state.value?.email || "";
+  if (!(await confirmDialog(t("account.deleteConfirm", { name }), "warning"))) return;
+  refreshGeneration += 1;
+  refreshingProfile.value = false;
+  busy.value = true;
+  try {
+    state.value = await deleteAccount(deletePassword.value);
+    deleteOpen.value = false;
+    note(t("account.deleted"));
+    emit("changed");
+  } catch (error) {
+    note(String(error), true);
+  } finally {
+    deletePassword.value = "";
+    busy.value = false;
+  }
+}
+
 onMounted(() => {
   deviceLabel.value = props.platform;
   void refresh();
@@ -267,6 +299,18 @@ onMounted(() => {
               <button class="account-btn" type="button" @click="openExternalUrl('https://auraxlab.com/cloud/console')">{{ t('account.openConsole') }}</button>
               <button v-if="connectionStatus !== 'offline'" class="account-btn" type="button" :disabled="busy" @click="pause">{{ t('account.pauseConsole') }}</button>
               <button class="account-btn danger" type="button" :disabled="busy" @click="signOut">{{ t('account.signOut') }}</button>
+              <button class="account-btn danger" type="button" :disabled="busy" :aria-expanded="deleteOpen" @click="toggleDelete">{{ t('account.deleteAccount') }}</button>
+            </div>
+
+            <div v-if="deleteOpen" class="account-delete">
+              <p class="account-hint">{{ t('account.deleteIntro') }}</p>
+              <label class="account-inline-label" for="account-delete-password">{{ t('account.deletePasswordHint') }}</label>
+              <input id="account-delete-password" v-model="deletePassword" class="account-input" type="password"
+                autocomplete="current-password" :placeholder="t('account.password')" @keyup.enter="removeAccount" />
+              <div class="account-actions">
+                <button class="account-btn danger" type="button" :disabled="busy || !deletePassword" @click="removeAccount">{{ t('account.deleteNow') }}</button>
+                <button class="account-btn" type="button" :disabled="busy" @click="toggleDelete">{{ t('common.cancel') }}</button>
+              </div>
             </div>
           </template>
         </section>
@@ -297,6 +341,8 @@ onMounted(() => {
 .account-inline-label { display: block; margin-top: 8px; font-size: 12px; opacity: .75; }
 .account-input { box-sizing: border-box; width: 100%; margin-top: 5px; padding: 7px 9px; color: inherit; background: var(--ui-input-bg,#26262b); border: 1px solid var(--ui-border,#3a3a3a); border-radius: 6px; }
 .account-recovery { padding: 10px; border: 1px solid #8a6a2f; border-radius: 6px; }
+.account-delete { margin-top: 12px; padding: 10px; border: 1px solid #7a3338; border-radius: 6px; }
+.account-delete .account-actions { margin-top: 10px; }
 .account-warning { color: #e5c07b; font-size: 12px; }
 .account-btn { padding: 7px 12px; color: inherit; background: var(--ui-input-bg,#26262b); border: 1px solid var(--ui-border,#3a3a3a); border-radius: 6px; cursor: pointer; }
 .account-btn.primary { margin-top: 8px; color: white; background: var(--ui-accent,#2f6fd0); }.account-btn.danger { color: #ff8b8f; border-color: #7a3338; }

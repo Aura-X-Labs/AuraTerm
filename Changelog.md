@@ -2,6 +2,7 @@
 
 ### 新增
 - **Mac App Store 版本**：新增 App Store 专用构建 `npm run package:appstore`（`scripts/package-appstore.sh`），产出签名好的 `.pkg`，可用 Transporter 或 `--upload` 上传到 App Store Connect。App Store 版本运行在 App Sandbox 中，包标识为 `com.auraxlabs.auraterm`，与直接下载版的数据互不相通。沙盒里的本地 Shell 读不到主目录、`~/.ssh` 和 Homebrew，因此该版本不提供本地终端（菜单、命令面板、新建会话对话框、设置与 Live Share 中的相关入口一并隐藏，恢复工作区时跳过本地终端标签页）；日志与下载默认存到 `~/Downloads/AuraTerm`；选择私钥时仍在真实的 `~/.ssh` 中打开。直接下载版（DMG / Windows / Linux）不受影响。
+- **在应用内删除账户**：「我的账户」对话框新增「删除账户…」。输入当前密码并在系统确认框中确认后，AuraXLab 账户及服务器为其保存的全部数据都会被永久删除——已同步的书签与设置、书签分享码、Live Console 设备与会话记录、Live Share 会话；此设备随即退出登录，本机保存的同步凭据与设备绑定一并清除。本机上的书签与设置不受影响。需要 AuraXLab 服务器提供 `POST /api/v1/auraterm/account/delete`。
 
 ## 0.3.9
 
