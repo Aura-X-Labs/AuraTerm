@@ -9,14 +9,8 @@ use base64::Engine as _;
 use std::ffi::CStr;
 
 use serde::Serialize;
-use std::{
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
-use tauri::{
-    command, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalRect, PhysicalSize, Position,
-    Size, State, WindowEvent,
-};
+use std::sync::{Arc, Mutex};
+use tauri::{command, AppHandle, Emitter, Manager, State};
 
 #[macro_use]
 mod logging;
@@ -51,6 +45,7 @@ mod telnet;
 mod terminal_event_hub;
 mod shared_session;
 mod util;
+mod window_bounds;
 mod zmodem;
 
 use pty_broker::{
@@ -63,13 +58,7 @@ struct AppState {
     /// Owns every local PTY session; shared seam for the Tauri UI today and
     /// the Cloud Console agent later.
     broker: Arc<PtyBroker>,
-    window_bounds_save_state: Arc<Mutex<WindowBoundsSaveState>>,
     startup_dir: Arc<Mutex<Option<String>>>,
-}
-
-struct WindowBoundsSaveState {
-    last_saved: Option<settings::WindowBounds>,
-    last_save_at: Option<Instant>,
 }
 
 #[derive(Clone, Serialize)]
@@ -182,106 +171,6 @@ fn expand_tilde_path(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
-fn is_window_bounds_visible(bounds: &settings::WindowBounds, work_area: &PhysicalRect<i32, u32>) -> bool {
-    let left = i64::from(bounds.x);
-    let top = i64::from(bounds.y);
-    let right = left + i64::from(bounds.width);
-    let bottom = top + i64::from(bounds.height);
-
-    let work_left = i64::from(work_area.position.x);
-    let work_top = i64::from(work_area.position.y);
-    let work_right = work_left + i64::from(work_area.size.width);
-    let work_bottom = work_top + i64::from(work_area.size.height);
-
-    right > work_left && left < work_right && bottom > work_top && top < work_bottom
-}
-
-fn clamp_window_bounds_to_work_area(
-    bounds: &settings::WindowBounds,
-    work_area: &PhysicalRect<i32, u32>,
-) -> settings::WindowBounds {
-    let max_width = work_area.size.width.max(200);
-    let max_height = work_area.size.height.max(200);
-
-    let width = bounds.width.clamp(200, max_width);
-    let height = bounds.height.clamp(200, max_height);
-
-    let min_x = work_area.position.x;
-    let min_y = work_area.position.y;
-    let max_x = work_area
-        .position
-        .x
-        .saturating_add((work_area.size.width.saturating_sub(width)) as i32);
-    let max_y = work_area
-        .position
-        .y
-        .saturating_add((work_area.size.height.saturating_sub(height)) as i32);
-
-    settings::WindowBounds {
-        x: bounds.x.clamp(min_x, max_x),
-        y: bounds.y.clamp(min_y, max_y),
-        width,
-        height,
-    }
-}
-
-fn resolve_window_bounds_for_restore(
-    saved: &settings::WindowBounds,
-    work_areas: &[PhysicalRect<i32, u32>],
-) -> Option<settings::WindowBounds> {
-    if work_areas.is_empty() {
-        return None;
-    }
-
-    for work_area in work_areas {
-        if is_window_bounds_visible(saved, work_area) {
-            return Some(clamp_window_bounds_to_work_area(saved, work_area));
-        }
-    }
-
-    Some(clamp_window_bounds_to_work_area(saved, &work_areas[0]))
-}
-
-fn current_window_bounds(window: &tauri::WebviewWindow) -> Result<settings::WindowBounds, String> {
-    let position = window.outer_position().map_err(|error| error.to_string())?;
-    let size = window.outer_size().map_err(|error| error.to_string())?;
-
-    Ok(settings::WindowBounds {
-        x: position.x,
-        y: position.y,
-        width: size.width,
-        height: size.height,
-    })
-}
-
-fn save_window_bounds_if_needed(app: &AppHandle, bounds: settings::WindowBounds) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    {
-        let mut guard = state
-            .window_bounds_save_state
-            .lock()
-            .map_err(|error| error.to_string())?;
-
-        let recently_saved = guard
-            .last_save_at
-            .is_some_and(|instant| instant.elapsed() < Duration::from_millis(250));
-
-        if guard.last_saved.as_ref() == Some(&bounds) || recently_saved {
-            if guard.last_saved.as_ref() != Some(&bounds) {
-                guard.last_saved = Some(bounds);
-            }
-            return Ok(());
-        }
-
-        guard.last_saved = Some(bounds.clone());
-        guard.last_save_at = Some(Instant::now());
-    }
-
-    let mut next_settings = settings::get_settings(app.clone())?;
-    next_settings.window_bounds = Some(bounds);
-    settings::save_settings(app.clone(), next_settings)
-}
-
 /// The window that has keyboard focus. The native menubar belongs to the app,
 /// not to a window, so window-scoped menu actions (minimize, zoom, close) must
 /// look it up; with no focused window they do nothing rather than guess.
@@ -289,75 +178,6 @@ fn focused_webview_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     app.webview_windows()
         .into_values()
         .find(|window| window.is_focused().unwrap_or(false))
-}
-
-fn apply_saved_window_bounds(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Main window not found".to_string())?;
-
-    let saved_bounds = settings::get_settings(app.clone())?.window_bounds;
-    let Some(saved_bounds) = saved_bounds else {
-        return Ok(());
-    };
-
-    let monitors = window.available_monitors().map_err(|error| error.to_string())?;
-    let work_areas: Vec<PhysicalRect<i32, u32>> = monitors.into_iter().map(|monitor| monitor.work_area().clone()).collect();
-
-    let Some(bounds) = resolve_window_bounds_for_restore(&saved_bounds, &work_areas) else {
-        return Ok(());
-    };
-
-    window
-        .set_size(Size::Physical(PhysicalSize::new(bounds.width, bounds.height)))
-        .map_err(|error| error.to_string())?;
-    window
-        .set_position(Position::Physical(PhysicalPosition::new(bounds.x, bounds.y)))
-        .map_err(|error| error.to_string())?;
-
-    let state = app.state::<AppState>();
-    let mut guard = state
-        .window_bounds_save_state
-        .lock()
-        .map_err(|error| error.to_string())?;
-    guard.last_saved = Some(bounds);
-    guard.last_save_at = Some(Instant::now());
-
-    Ok(())
-}
-
-fn setup_window_bounds_persistence(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Main window not found".to_string())?;
-
-    let app_handle = app.clone();
-    let event_window = window.clone();
-    // Track the last reported inner size so we don't spam logs when the OS emits
-    // redundant Resized events with the same dimensions (common on macOS).
-    let last_logged_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    window.on_window_event(move |event| match event {
-        WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-            if let Ok(size) = event_window.inner_size() {
-                let packed = ((size.width as u64) << 32) | (size.height as u64);
-                let prev = last_logged_size.swap(packed, std::sync::atomic::Ordering::Relaxed);
-                if prev != packed {
-                    crate::debug_log!("[Window] New inner size: {}x{}", size.width, size.height);
-                }
-            }
-            if let Ok(bounds) = current_window_bounds(&event_window) {
-                let _ = save_window_bounds_if_needed(&app_handle, bounds);
-            }
-        }
-        WindowEvent::CloseRequested { .. } => {
-            if let Ok(bounds) = current_window_bounds(&event_window) {
-                let _ = save_window_bounds_if_needed(&app_handle, bounds);
-            }
-        }
-        _ => {}
-    });
-
-    Ok(())
 }
 
 /// Local Tauri UI adapter: subscribes a session's raw output on the event hub
@@ -1130,10 +950,6 @@ fn main() {
     let telnet_state = telnet::TelnetState::new(event_hub.clone());
     let app_state = AppState {
         broker: Arc::new(PtyBroker::new(Box::new(PortablePtyAdapter), event_hub.clone())),
-        window_bounds_save_state: Arc::new(Mutex::new(WindowBoundsSaveState {
-            last_saved: None,
-            last_save_at: None,
-        })),
         startup_dir: Arc::new(Mutex::new(startup_dir)),
     };
     let shared_port: Arc<dyn shared_session::SharedSessionPort> = Arc::new(
@@ -1171,12 +987,10 @@ fn main() {
                 rebuild_app_menu(_app.handle(), &state)?;
             }
 
-            if let Err(error) = apply_saved_window_bounds(_app.handle()) {
+            if let Err(error) = window_bounds::restore_main_window(_app.handle()) {
                 crate::warn_log!("failed to restore saved window bounds: {error}");
             }
-            if let Err(error) = setup_window_bounds_persistence(_app.handle()) {
-                crate::warn_log!("failed to set up window bounds persistence: {error}");
-            }
+            window_bounds::watch_monitor_layout(_app.handle());
 
             Ok(())
         })
@@ -1231,7 +1045,9 @@ fn main() {
                 _ => {}
             }
         })
+        .on_window_event(window_bounds::handle_window_event)
         .manage(MenuModelState(Mutex::new(MenuModel::default())))
+        .manage(window_bounds::WindowPlacementState::default())
         .manage(app_state)
         .manage(ssh_state)
         .manage(ssh::ForwardingState::default())
