@@ -562,6 +562,13 @@ const zhCN: Messages = {
     signedInAs: "当前账户",
     signOut: "退出登录",
     signedOut: "已退出登录。",
+    deleteAccount: "删除账户…",
+    deleteIntro:
+      "将永久删除你的 AuraXLab 账户及服务器为其保存的全部数据：已同步的书签与设置、书签分享码、Live Console 设备与会话记录，以及 Live Share 会话。此操作无法撤销。本机上的书签与设置会保留。",
+    deletePasswordHint: "请输入当前密码以确认。",
+    deleteNow: "永久删除账户",
+    deleteConfirm: "确定要永久删除 AuraXLab 账户「{name}」吗？服务器上为它保存的全部数据都会被清除，且无法恢复。",
+    deleted: "账户已删除，此设备已退出登录。",
     signedOutStillBound:
       "已退出登录。此设备仍处于绑定状态，可通过 Live Console 接入；如需移除，请点击下方「解绑此设备」。",
     trafficSection: "Live Sync 流量",

@@ -10,6 +10,7 @@ const accountMocks = vi.hoisted(() => ({
   accountState: vi.fn(),
   refreshAccount: vi.fn(),
   accountLogout: vi.fn(),
+  deleteAccount: vi.fn(),
   enableConsole: vi.fn(),
   pauseConsole: vi.fn(),
 }));
@@ -22,6 +23,12 @@ vi.mock("../account", async (importOriginal) => {
 vi.mock("@tauri-apps/plugin-shell", () => ({
   open: vi.fn(),
 }));
+
+const dialogMocks = vi.hoisted(() => ({
+  confirmDialog: vi.fn(),
+}));
+
+vi.mock("../nativeDialogs", () => dialogMocks);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -137,6 +144,75 @@ describe("AccountDialog Live return", () => {
     expect(wrapper.text()).not.toContain("离线");
     await wrapper.setProps({ bridgeStatus: { ...bridge, standby: false, reconnecting: true } });
     expect(wrapper.text()).toContain("重连中");
+    wrapper.unmount();
+  });
+});
+
+describe("AccountDialog account deletion", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setLanguage("zh-CN");
+    accountMocks.accountState.mockResolvedValue(readyState);
+    accountMocks.refreshAccount.mockResolvedValue(readyState);
+  });
+
+  async function openDeletePanel() {
+    const wrapper = shallowMount(AccountDialog, { props: { platform: "darwin" } });
+    await flushPromises();
+    const toggle = wrapper.findAll("button").find((button) => button.text() === "删除账户…");
+    expect(toggle).toBeDefined();
+    await toggle!.trigger("click");
+    return wrapper;
+  }
+
+  function deleteButton(wrapper: Awaited<ReturnType<typeof openDeletePanel>>) {
+    return wrapper.find(".account-delete button.danger");
+  }
+
+  it("confirms natively, sends the password, and shows the signed-out state", async () => {
+    dialogMocks.confirmDialog.mockResolvedValue(true);
+    accountMocks.deleteAccount.mockResolvedValue(signedOutState);
+    const wrapper = await openDeletePanel();
+
+    expect(deleteButton(wrapper).attributes("disabled")).toBeDefined();
+    await wrapper.find(".account-delete input").setValue("hunter22");
+    await deleteButton(wrapper).trigger("click");
+    await flushPromises();
+
+    expect(dialogMocks.confirmDialog).toHaveBeenCalledWith(expect.stringContaining("bill"), "warning");
+    expect(accountMocks.deleteAccount).toHaveBeenCalledWith("hunter22");
+    expect(wrapper.text()).toContain("账户已删除，此设备已退出登录。");
+    expect(wrapper.find(".account-delete").exists()).toBe(false);
+    expect(wrapper.find("auraxlab-auth-form-stub").exists()).toBe(true);
+    expect(wrapper.emitted("changed")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("sends nothing when the confirmation is declined", async () => {
+    dialogMocks.confirmDialog.mockResolvedValue(false);
+    const wrapper = await openDeletePanel();
+    await wrapper.find(".account-delete input").setValue("hunter22");
+    await deleteButton(wrapper).trigger("click");
+    await flushPromises();
+
+    expect(dialogMocks.confirmDialog).toHaveBeenCalledOnce();
+    expect(accountMocks.deleteAccount).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("bill");
+    wrapper.unmount();
+  });
+
+  it("keeps the account and clears the password when the server refuses", async () => {
+    dialogMocks.confirmDialog.mockResolvedValue(true);
+    accountMocks.deleteAccount.mockRejectedValue("Account deletion failed: Incorrect password");
+    const wrapper = await openDeletePanel();
+    await wrapper.find(".account-delete input").setValue("wrong");
+    await deleteButton(wrapper).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Incorrect password");
+    expect(wrapper.find(".account-delete").exists()).toBe(true);
+    expect((wrapper.find(".account-delete input").element as HTMLInputElement).value).toBe("");
+    expect(wrapper.emitted("changed")).toBeUndefined();
     wrapper.unmount();
   });
 });
