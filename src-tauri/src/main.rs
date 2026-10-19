@@ -171,6 +171,15 @@ fn expand_tilde_path(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+/// The window that has keyboard focus. The native menubar belongs to the app,
+/// not to a window, so window-scoped menu actions (minimize, zoom, close) must
+/// look it up; with no focused window they do nothing rather than guess.
+fn focused_webview_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    app.webview_windows()
+        .into_values()
+        .find(|window| window.is_focused().unwrap_or(false))
+}
+
 /// Local Tauri UI adapter: subscribes a session's raw output on the event hub
 /// and keeps the historical behaviour — Zmodem routing, streaming UTF-8
 /// decode, `pty-output:<id>` / `pty-exit:<id>` events — on the UI side of the
@@ -988,12 +997,12 @@ fn main() {
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
                 "minimize" => {
-                    if let Some(window) = app.webview_windows().values().next() {
+                    if let Some(window) = focused_webview_window(app) {
                         let _ = window.minimize();
                     }
                 }
                 "maximize" => {
-                    if let Some(window) = app.webview_windows().values().next() {
+                    if let Some(window) = focused_webview_window(app) {
                         if let Ok(is_maximized) = window.is_maximized() {
                             if is_maximized {
                                 let _ = window.unmaximize();
@@ -1020,11 +1029,7 @@ fn main() {
                     .build();
                 }
                 "menu-close-window" => {
-                    // In Tauri 2.0, on_menu_event is on the AppHandle, but we want to close the active window.
-                    // For now, we'll close all windows if we can't determine the active one,
-                    // or just the main one if it's the only one.
-                    // A better way would be to track the focused window.
-                    for window in app.webview_windows().values() {
+                    if let Some(window) = focused_webview_window(app) {
                         let _ = window.close();
                     }
                 }
