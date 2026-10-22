@@ -729,6 +729,15 @@ defineExpose<TerminalHandle>({
   visibleOutputContext,
 });
 
+function activateTerminalLink(event: MouseEvent, uri: string): void {
+  if (event.button !== 0) {
+    return;
+  }
+  void openExternalUrl(uri).catch((error) => {
+    console.error("failed to open link", error);
+  });
+}
+
 onMounted(() => {
   if (!terminalRootRef.value) {
     return;
@@ -750,6 +759,10 @@ onMounted(() => {
     convertEol: false,
     allowProposedApi: true,
     macOptionIsMeta: true,
+    // OSC 8 hyperlinks take precedence over WebLinksAddon. Route them through
+    // Tauri too, since Xterm's default confirm/window.open path cannot reliably
+    // launch the system browser from the webview.
+    linkHandler: { activate: activateTerminalLink },
   });
 
   fitAddon = new FitAddon();
@@ -760,19 +773,8 @@ onMounted(() => {
   terminalRef.value = terminal;
   searchAddonRef.value = searchAddon;
   const unicode11Addon = new Unicode11Addon();
-  // Make URLs in terminal output clickable. window.open is unreliable inside the
-  // Tauri webview, so route the click through the shell plugin to launch the OS
-  // default browser instead.
-  const webLinksAddon = new WebLinksAddon((event, uri) => {
-    // Honor the same modifier-click convention as editors/browsers: a plain
-    // click only opens when the link is not part of a text selection gesture.
-    if (event.button !== 0) {
-      return;
-    }
-    void openExternalUrl(uri).catch((error) => {
-      console.error("failed to open link", error);
-    });
-  });
+  // Plain-text URLs use the same system-browser handler as OSC 8 hyperlinks.
+  const webLinksAddon = new WebLinksAddon(activateTerminalLink);
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(searchAddon);
   terminal.loadAddon(unicode11Addon);
