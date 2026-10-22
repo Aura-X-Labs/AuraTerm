@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ITerminalOptions } from "@xterm/xterm";
 import TerminalComponent from "../TerminalComponent.vue";
 import { DEFAULT_SETTINGS } from "../settings";
 import { i18n } from "../i18n";
@@ -8,9 +9,11 @@ import type { SessionConfig } from "../types";
 const mockState = vi.hoisted(() => {
   const listeners = new Map<string, Array<(event: { payload: unknown }) => void>>();
   const terminals: MockTerminal[] = [];
+  const webLinkHandlers: Array<(event: MouseEvent, uri: string) => void> = [];
+  const openExternalUrl = vi.fn(async (_uri: string) => undefined);
 
   class MockTerminal {
-    options: Record<string, unknown>;
+    options: ITerminalOptions;
     cols = 80;
     rows = 24;
     unicode = { activeVersion: "" };
@@ -22,7 +25,7 @@ const mockState = vi.hoisted(() => {
     private resizeHandler: ((size: { cols: number; rows: number }) => void) | null = null;
     private selectionHandler: (() => void) | null = null;
 
-    constructor(options: Record<string, unknown>) {
+    constructor(options: ITerminalOptions) {
       this.options = { ...options };
       terminals.push(this);
     }
@@ -129,6 +132,8 @@ const mockState = vi.hoisted(() => {
     saveTerminalLog,
     startSshSession,
     terminals,
+    webLinkHandlers,
+    openExternalUrl,
     writeSessionInput,
   };
 });
@@ -155,7 +160,9 @@ vi.mock("@xterm/addon-unicode11", () => ({
 
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: class {
-    constructor(_handler?: unknown) {}
+    constructor(handler: (event: MouseEvent, uri: string) => void) {
+      mockState.webLinkHandlers.push(handler);
+    }
   },
 }));
 
@@ -168,7 +175,7 @@ vi.mock("@tauri-apps/plugin-os", () => ({
 }));
 
 vi.mock("@tauri-apps/plugin-shell", () => ({
-  open: vi.fn(async () => undefined),
+  open: mockState.openExternalUrl,
 }));
 
 vi.mock("../composables/useTerminalSearch", () => ({
@@ -204,6 +211,8 @@ describe("TerminalComponent", () => {
   beforeEach(() => {
     mockState.listeners.clear();
     mockState.terminals.length = 0;
+    mockState.webLinkHandlers.length = 0;
+    mockState.openExternalUrl.mockReset();
     mockState.listen.mockClear();
     mockState.startSshSession.mockClear();
     mockState.writeSessionInput.mockClear();
@@ -215,6 +224,65 @@ describe("TerminalComponent", () => {
     mockState.answerSshMfa.mockClear();
     mockState.answerSshHostKeyMismatch.mockClear();
     mockState.answerSshReconnectChoice.mockClear();
+  });
+
+  describe.each(["OSC 8", "plain URL"])("%s links", (kind) => {
+    function mountLinkTerminal() {
+      const wrapper = mount(TerminalComponent, {
+        global: { plugins: [i18n] },
+        props: {
+          sessionId: "link-session",
+          isVisible: true,
+          isFocused: true,
+          session: { protocol: "ssh", sshConfig: { host: "example.com", port: 22, user: "root" } },
+          settings: DEFAULT_SETTINGS,
+        },
+      });
+      const activate = (event: MouseEvent, uri: string) => {
+        if (kind === "OSC 8") {
+          const handler = mockState.terminals[0].options.linkHandler;
+          expect(handler).toBeDefined();
+          handler!.activate(event, uri, { start: { x: 1, y: 1 }, end: { x: 80, y: 1 } });
+        } else {
+          mockState.webLinkHandlers[0](event, uri);
+        }
+      };
+      return { wrapper, activate };
+    }
+
+    it("opens the complete OAuth URL in the system browser on a plain left click", async () => {
+      const { wrapper, activate } = mountLinkTerminal();
+      // Long enough to wrap, with encoded redirect and scope values that must
+      // reach the browser unchanged (synthetic authorization parameters).
+      const uri = "https://claude.com/oauth/authorize?client_id=test-client&response_type=code"
+        + "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+        + "&scope=user%3Aprofile+user%3Asessions&code_challenge=test-challenge&state=test-state";
+      activate(new MouseEvent("click", { button: 0 }), uri);
+      await flushPromises();
+      expect(mockState.openExternalUrl).toHaveBeenCalledExactlyOnceWith(uri);
+      wrapper.unmount();
+    });
+
+    it("ignores middle and right clicks", async () => {
+      const { wrapper, activate } = mountLinkTerminal();
+      for (const button of [1, 2]) {
+        activate(new MouseEvent("click", { button }), "https://example.com");
+      }
+      await flushPromises();
+      expect(mockState.openExternalUrl).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("handles a rejected browser launch", async () => {
+      const error = new Error("Browser unavailable");
+      mockState.openExternalUrl.mockRejectedValueOnce(error);
+      const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { wrapper, activate } = mountLinkTerminal();
+      activate(new MouseEvent("click", { button: 0 }), "https://example.com");
+      await flushPromises();
+      expect(logError).toHaveBeenCalledWith("failed to open link", error);
+      wrapper.unmount();
+    });
   });
 
   it("accepts reconnect success events after a manual reconnect", async () => {
