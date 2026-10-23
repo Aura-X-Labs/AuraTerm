@@ -1,3 +1,8 @@
+## 未发布
+
+### 修复
+- **Mac App Store 版本最低系统改为 macOS 12**：App Store 版只打包 arm64，App Store Connect 要求这类包的部署目标不低于 macOS 12.0，原来的 11.0 会在上传校验时被拒（ITMS-90869）。`tauri.appstore.conf.json` 的 `minimumSystemVersion` 由 11.0 改为 12.0；直接下载版不受影响。
+
 ## 0.4.0
 
 ### 新增
