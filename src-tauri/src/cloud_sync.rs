@@ -540,6 +540,8 @@ pub(crate) mod skip {
     pub const MISMATCH: &str = "mismatch";
     /// Envelope format unknown or data corrupt.
     pub const CORRUPT: &str = "corrupt";
+    /// Envelope written by a newer AuraTerm; carried over untouched.
+    pub const NEWER_FORMAT: &str = "newerFormat";
 }
 
 /// Outcome of a push / pull / two-way sync, surfaced to the UI.
@@ -897,6 +899,9 @@ fn open_envelope(envelope: &CredentialsEnvelope, password: &str) -> Result<Vec<S
         return Err(skip::CORRUPT);
     }
     let blob = STANDARD.decode(envelope.blob.trim()).map_err(|_| skip::CORRUPT)?;
+    if encryption::credentials_envelope_version(&blob).is_some_and(|version| version > encryption::ENVELOPE_MAX_VERSION) {
+        return Err(skip::NEWER_FORMAT);
+    }
     let plaintext = match encryption::decrypt_credentials_envelope(&blob, password) {
         Ok(plaintext) => Zeroizing::new(plaintext),
         Err(error) if error.contains("different master password") => return Err(skip::MISMATCH),
@@ -963,6 +968,12 @@ fn reconcile_credentials(
     let theirs = match remote.map(|envelope| open_envelope(envelope, &password)) {
         None => Vec::new(),
         Some(Ok(list)) => list,
+        Some(Err(reason)) if reason == skip::NEWER_FORMAT => {
+            // A newer build sealed it: leave it for the devices that can read
+            // it, rather than replace their credentials with this device's.
+            result.credentials_skipped = Some(reason.to_string());
+            return Ok(carried);
+        }
         Some(Err(reason)) => {
             // An envelope this device cannot read is replaced by its own, as
             // before: a changed master password must be able to move on.
@@ -2918,6 +2929,35 @@ pub(crate) mod tests {
 
         assert_eq!(desktop.bookmark_names(), ["from-desktop", "from-laptop"]);
         assert_eq!(vault_bookmark_names(&vault), ["from-desktop", "from-laptop"]);
+    }
+
+    #[tokio::test]
+    async fn sync_leaves_an_envelope_from_a_newer_build_alone() {
+        let (vault, base) = new_vault();
+        let mut desktop = FakeDevice::new(&base, "desktop");
+        desktop.save_bookmark(bookmark("a", "host"));
+        desktop.save_password("a", "pw");
+        desktop.sync().await;
+
+        // A newer build re-sealed the credentials in a layout this one cannot open.
+        let newer = {
+            let mut guard = vault.lock().unwrap();
+            let (format, text) = guard.0.clone().unwrap();
+            let mut payload = parse_payload(&text).unwrap();
+            let mut blob = STANDARD.decode(&payload.credentials.as_ref().unwrap().blob).unwrap();
+            blob[8] = encryption::ENVELOPE_MAX_VERSION + 1;
+            payload.credentials.as_mut().unwrap().blob = STANDARD.encode(&blob);
+            guard.0 = Some((format, serde_json::to_string(&payload).unwrap()));
+            payload.credentials.unwrap().blob
+        };
+        desktop.save_password("a", "changed-here");
+        desktop.save_bookmark(bookmark("a", "renamed"));
+        let result = desktop.sync().await;
+
+        assert_eq!(result.credentials_skipped.as_deref(), Some(skip::NEWER_FORMAT));
+        assert_eq!(vault_payload(&vault).credentials.unwrap().blob, newer, "not replaced by this device's envelope");
+        assert_eq!(vault_bookmark_names(&vault), ["renamed"], "everything else still syncs");
+        assert_eq!(desktop.password("a").as_deref(), Some("changed-here"));
     }
 
     #[tokio::test]

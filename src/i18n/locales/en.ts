@@ -487,6 +487,7 @@ const en = {
       masterLocked: "credentials skipped: master password locked",
       mismatch: "credentials skipped: encrypted with a different master password",
       corrupt: "credentials skipped: unreadable",
+      newerFormat: "credentials skipped: saved by a newer AuraTerm — update to sync them",
     },
     // AuraXLab sign-in / registration (AuraxlabAuthForm, AccountDialog).
     loginHint: "Sign in to your account on the official AuraXLab sync service.",
@@ -636,6 +637,7 @@ const en = {
       masterLocked: "credentials waiting for the master password",
       mismatch: "credentials skipped (different master password)",
       corrupt: "credentials skipped (unreadable)",
+      newerFormat: "credentials skipped (update AuraTerm)",
     },
     syncNow: "Sync now",
     syncSettings: "Sync settings…",
