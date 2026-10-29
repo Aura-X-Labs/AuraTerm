@@ -30,7 +30,7 @@ use crate::{PtyExitEvent, PtyOutputEvent};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -47,6 +47,12 @@ pub const MAX_INPUT_BYTES: usize = 16 * 1024;
 pub const MAX_CONSECUTIVE_DECRYPT_FAILURES: u32 = 8;
 /// End reason reported when [`MAX_CONSECUTIVE_DECRYPT_FAILURES`] is hit.
 pub const DECRYPT_FAILED_REASON: &str = "decryption_failed";
+/// End reason reported when the user closed the tab locally.
+pub const CLOSED_REASON: &str = "closed";
+/// How many closed-tab marks to remember. Marks are normally dropped when
+/// the ending is finished; the cap only bounds tabs closed after their
+/// connection was already gone, which nothing will try to revive.
+const MAX_CLOSED_MARKS: usize = 256;
 
 pub type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
@@ -126,11 +132,17 @@ struct RemoteTab {
 }
 
 type Tabs = Arc<Mutex<HashMap<String, RemoteTab>>>;
+type Closed = Arc<Mutex<VecDeque<String>>>;
 
 /// Registry of live remote tabs for one feature (one per Tauri state).
 pub struct RemoteTabs {
     protocol: &'static TabProtocol,
     tabs: Tabs,
+    /// Tabs the user closed. Kept until the ending is finished so that
+    /// neither a reader that is still unwinding nor a reconnect that is
+    /// still in flight can mistake the close for a transport drop and
+    /// bring the tab back as an invisible peer.
+    closed: Closed,
 }
 
 /// A relay connection admitted with a one-time ticket. The outbound pump is
@@ -245,11 +257,14 @@ impl RemoteTabs {
         Self {
             protocol,
             tabs: Arc::new(Mutex::new(HashMap::new())),
+            closed: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
     /// Register a freshly keyed connection as tab `id` (role starts as
     /// "viewer"; input stays dropped until the peer announces a fence).
+    /// Refused when the user already closed that tab; `outbound` is then
+    /// dropped, which closes the new socket.
     pub fn insert(
         &self,
         id: &str,
@@ -257,28 +272,54 @@ impl RemoteTabs {
         connection_id: &str,
         cipher: PeerCipher,
         outbound: tokio::sync::mpsc::Sender<Message>,
-    ) {
-        if let Ok(mut tabs) = self.tabs.lock() {
-            tabs.insert(
-                id.to_string(),
-                RemoteTab {
-                    scope_id: scope_id.to_string(),
-                    connection_id: connection_id.to_string(),
-                    cipher,
-                    role: "viewer".into(),
-                    fence: None,
-                    input_seq: 0,
-                    outbound,
-                },
-            );
+    ) -> Result<(), String> {
+        let mut tabs = self.tabs.lock().map_err(|e| e.to_string())?;
+        // Checked while holding the registry lock: `close` marks the tab
+        // before it takes this lock, so a close can never slip in between.
+        if self.is_closed(id) {
+            return Err("The remote tab was closed.".into());
         }
+        tabs.insert(
+            id.to_string(),
+            RemoteTab {
+                scope_id: scope_id.to_string(),
+                connection_id: connection_id.to_string(),
+                cipher,
+                role: "viewer".into(),
+                fence: None,
+                input_seq: 0,
+                outbound,
+            },
+        );
+        Ok(())
     }
 
-    /// Drop the tab. Dropping the outbound sender closes the writer, which
-    /// closes the socket; the reader then emits the final state/exit events.
+    /// The user closed the tab: mark it closed for good, then drop it.
+    /// Dropping the outbound sender closes the writer, which closes the
+    /// socket; the reader then reports a deliberate ending.
     pub fn close(&self, id: &str) -> Result<(), String> {
+        {
+            let mut closed = self.closed.lock().map_err(|e| e.to_string())?;
+            if !closed.iter().any(|closed_id| closed_id == id) {
+                if closed.len() >= MAX_CLOSED_MARKS {
+                    closed.pop_front();
+                }
+                closed.push_back(id.to_string());
+            }
+        }
         self.tabs.lock().map_err(|e| e.to_string())?.remove(id);
         Ok(())
+    }
+
+    /// True once the user closed tab `id`; a reconnect must not revive it.
+    pub fn is_closed(&self, id: &str) -> bool {
+        is_marked_closed(&self.closed, id)
+    }
+
+    /// Drop the closed mark once nothing can try to revive the tab any more
+    /// (an attach that failed before a reader or reconnect loop existed).
+    pub fn forget_closed(&self, id: &str) {
+        unmark_closed(&self.closed, id);
     }
 
     /// Locally downgrade the tab's role (e.g. releasing control before the
@@ -398,6 +439,7 @@ impl RemoteTabs {
             app,
             self.protocol,
             Arc::clone(&self.tabs),
+            Arc::clone(&self.closed),
             id,
             scope_id,
             connection_id,
@@ -415,7 +457,18 @@ impl RemoteTabs {
         if let Ok(mut tabs) = self.tabs.lock() {
             tabs.remove(id);
         }
+        self.forget_closed(id);
         emit_tab_end(app, self.protocol, id, end);
+    }
+}
+
+fn is_marked_closed(closed: &Closed, id: &str) -> bool {
+    closed.lock().map(|closed| closed.iter().any(|closed_id| closed_id == id)).unwrap_or(false)
+}
+
+fn unmark_closed(closed: &Closed, id: &str) {
+    if let Ok(mut closed) = closed.lock() {
+        closed.retain(|closed_id| closed_id != id);
     }
 }
 
@@ -465,6 +518,7 @@ fn spawn_reader_task<R: tauri::Runtime>(
     app: AppHandle<R>,
     protocol: &'static TabProtocol,
     tabs: Tabs,
+    closed: Closed,
     id: String,
     scope_id: String,
     connection_id: String,
@@ -652,6 +706,13 @@ fn spawn_reader_task<R: tauri::Runtime>(
         if let Ok(mut tabs) = tabs.lock() {
             tabs.remove(&id);
         }
+        // A local close drops the socket under us and looks exactly like a
+        // transport failure from here; the closed mark says otherwise, so
+        // a reconnecting caller does not bring the tab back.
+        if is_marked_closed(&closed, &id) {
+            end_reason = CLOSED_REASON.to_string();
+            deliberate = true;
+        }
         let end = TabEnd {
             reason: end_reason,
             deliberate,
@@ -667,6 +728,8 @@ fn spawn_reader_task<R: tauri::Runtime>(
                 let _ = sender.send(end);
             }
             None => {
+                // No one else can revive this tab: the mark has done its job.
+                unmark_closed(&closed, &id);
                 emit_state(TabStateEvent {
                     id: id.clone(),
                     state: "ended".into(),
@@ -761,7 +824,7 @@ mod tests {
         key: [u8; 32],
     ) -> tokio::sync::oneshot::Receiver<TabEnd> {
         let admission = connect_relay(url, "ticket").await.unwrap();
-        tabs.insert("tab", SCOPE, &admission.connection_id, PeerCipher::new(key), admission.outbound);
+        tabs.insert("tab", SCOPE, &admission.connection_id, PeerCipher::new(key), admission.outbound).unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tabs.spawn_reader_with_end(app.handle().clone(), "tab".into(), "FP".into(), admission.stream, Some(tx));
         rx
@@ -843,6 +906,40 @@ mod tests {
             assert_eq!(rebuilt, paste.as_bytes());
             assert!(last_seq >= 3);
         });
+    }
+
+    #[test]
+    fn closing_a_tab_is_a_deliberate_ending_and_blocks_revival() {
+        tauri::async_runtime::block_on(async {
+            let (received, _rx) = tokio::sync::mpsc::unbounded_channel();
+            // The relay keeps the connection open: only our close ends it.
+            let url = fake_relay(Vec::new(), received).await;
+            let app = tauri::test::mock_app();
+            let tabs = RemoteTabs::new(&TEST_PROTOCOL);
+            let end = attach(&tabs, &app, &url, [1_u8; 32]).await;
+            tabs.close("tab").unwrap();
+            let end = ended(end).await;
+            assert!(end.deliberate, "a local close must not look like a transport drop");
+            assert_eq!(end.reason, CLOSED_REASON);
+            // A reconnect that lands after the close is refused...
+            let (outbound, _keep) = tokio::sync::mpsc::channel(1);
+            assert!(tabs.insert("tab", SCOPE, CONNECTION, PeerCipher::new([1_u8; 32]), outbound).is_err());
+            assert!(!tabs.contains("tab"));
+            // ...until the ending is finished, which forgets the mark.
+            tabs.finish(app.handle(), "tab", &end);
+            assert!(!tabs.is_closed("tab"));
+        });
+    }
+
+    #[test]
+    fn closed_marks_are_bounded() {
+        let tabs = RemoteTabs::new(&TEST_PROTOCOL);
+        for index in 0..(MAX_CLOSED_MARKS + 10) {
+            tabs.close(&format!("tab-{index}")).unwrap();
+        }
+        assert!(!tabs.is_closed("tab-0"));
+        assert!(tabs.is_closed(&format!("tab-{}", MAX_CLOSED_MARKS + 9)));
+        assert_eq!(tabs.closed.lock().unwrap().len(), MAX_CLOSED_MARKS);
     }
 
     #[test]
