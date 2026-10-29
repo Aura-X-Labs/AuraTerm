@@ -153,12 +153,15 @@ pub(crate) fn three_way<T: Record>(base: Option<&[T]>, local: Vec<T>, remote: Ve
         }
     }
 
-    // What is left of the cloud copy has no local counterpart.
-    for theirs in remote {
-        let key = theirs.key();
-        if !remote_by_key.contains_key(key) {
+    // What is left of the cloud copy has no local counterpart. Taking each
+    // key out as it is visited yields an id the cloud copy lists twice only
+    // once (at its first position, as the copy the map kept — the same one
+    // the loop above compares with).
+    for listed in &remote {
+        let Some(theirs) = remote_by_key.remove(listed.key()) else {
             continue;
-        }
+        };
+        let key = theirs.key();
         if held.local_deletes.contains(key) {
             out.upload.push(theirs);
             continue;
@@ -438,6 +441,24 @@ mod tests {
         assert_eq!(names(&out.upload), ["stays", "gone-here"], "kept out of the upload, still in the upload");
         assert!(out.removed.is_empty() && out.dropped.is_empty());
         assert_eq!(out.added, 0);
+    }
+
+    #[test]
+    fn a_cloud_copy_listing_an_id_twice_yields_it_once() {
+        let remote = vec![bookmark("a", "first"), bookmark("b", "kept"), bookmark("a", "second")];
+
+        // New here, with and without a base.
+        for base in [None, Some(&[][..])] {
+            let out = three_way(base, vec![], remote.clone(), &Held::default());
+            assert_eq!(names(&out.local), ["second", "kept"]);
+            assert_eq!(names(&out.upload), ["second", "kept"]);
+            assert_eq!(out.added, 2);
+        }
+
+        // Known here: still one entry, the same copy the merge compares with.
+        let out = three_way(None, vec![bookmark("a", "local")], remote, &Held::default());
+        assert_eq!(names(&out.local), ["second", "kept"]);
+        assert_eq!(names(&out.upload), ["second", "kept"]);
     }
 
     #[test]
