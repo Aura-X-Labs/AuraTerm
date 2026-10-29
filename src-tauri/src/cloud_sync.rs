@@ -1159,11 +1159,17 @@ fn auraxlab_vault_url(cfg: &AuraxlabProvider) -> String {
 
 /// `PUT` a `rest-v2` payload. Returns the new server version.
 pub(crate) async fn auraxlab_push(cfg: &AuraxlabProvider, payload_text: &str, base_version: Option<&str>, device_id: &str, device_label: &str) -> Result<Option<String>, String> {
+    let base_version = match base_version {
+        Some(version) => version.parse::<i64>().ok()
+            .filter(|value| *value >= 0 && *value < i64::MAX)
+            .ok_or_else(|| "Invalid vault base version; pull before pushing.".to_string())?,
+        None => 0,
+    };
     let client = http_client()?;
     let body = json!({
         "format": "v2",
         "payload": payload_text,
-        "baseVersion": base_version.and_then(|v| v.parse::<i64>().ok()),
+        "baseVersion": base_version,
         "deviceId": device_id,
         "deviceLabel": device_label,
     });
@@ -1378,12 +1384,24 @@ pub async fn cloud_sync_now(app: AppHandle, confirm_deletes: Option<bool>, maste
 
 /// Upload this device's state without merging the cloud copy first.
 async fn push_only(store: &impl SyncStore, config: &mut SyncConfig) -> Result<SyncResult, String> {
-    // Read the copy being replaced only to carry over what this device does
-    // not upload. A copy that cannot be read (legacy, corrupt) is replaced
-    // outright, as before — this is the way out of a broken vault.
-    let carry = pull_remote_copy(config).await.ok().flatten();
+    // Pin the upload to the copy just read, not this device's stale version.
+    // An explicit legacy replacement is still supported; failed reads are not.
+    let (carry, version) = match auraxlab_pull(&config.auraxlab).await? {
+        Some(remote) => {
+            let version = remote.version.ok_or_else(|| "Missing remote vault version.".to_string())?;
+            let carry = match remote.content {
+                RemoteContent::Payload(text) => Some(RemoteCopy {
+                    payload: parse_payload(&text)?,
+                    version: Some(version.clone()),
+                }),
+                RemoteContent::LegacyBlob(_) => None,
+            };
+            (carry, version)
+        }
+        None => (None, "0".to_string()),
+    };
     let mut result = SyncResult::default();
-    push_current_state(store, config, None, carry.as_ref(), &mut result).await?;
+    push_current_state(store, config, Some(version), carry.as_ref(), &mut result).await?;
     result.outcome = SyncOutcome::Uploaded;
     result.message = "Uploaded to your AuraXLab account.".to_string();
     Ok(result)
@@ -2081,12 +2099,12 @@ pub(crate) mod tests {
                 "PUT" => {
                     before_put(&mut g);
                     let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-                    let base_version = v.get("baseVersion").and_then(|x| x.as_i64());
-                    if let Some(bv) = base_version {
-                        if bv != g.1 {
-                            let resp = json!({"error": "conflict", "version": g.1});
-                            return (409, serde_json::to_vec(&resp).unwrap(), vec![]);
-                        }
+                    let Some(base_version) = v.get("baseVersion").and_then(|x| x.as_i64()).filter(|v| *v >= 0) else {
+                        return (400, br#"{"message":"baseVersion must be a nonnegative integer"}"#.to_vec(), vec![]);
+                    };
+                    if base_version != g.1 {
+                        let resp = json!({"error": "conflict", "version": g.1});
+                        return (409, serde_json::to_vec(&resp).unwrap(), vec![]);
                     }
                     let stored = if v.get("format").and_then(|f| f.as_str()) == Some("v2") {
                         let payload = v.get("payload").and_then(|x| x.as_str()).unwrap_or_default();
@@ -2151,6 +2169,11 @@ pub(crate) mod tests {
         // correct push (baseVersion 1) -> v2
         let v2 = auraxlab_push(&cfg, &payload_text("two"), Some("1"), "dev", "label").await.unwrap();
         assert_eq!(v2.as_deref(), Some("2"));
+        for invalid in ["x", "-1", "9223372036854775807"] {
+            let error = auraxlab_push(&cfg, &payload_text("bad"), Some(invalid), "dev", "label").await.unwrap_err();
+            assert!(error.contains("Invalid vault base version"));
+        }
+        assert_eq!(auraxlab_pull(&cfg).await.unwrap().unwrap().version.as_deref(), Some("2"));
     }
 
     #[tokio::test]
@@ -3023,6 +3046,38 @@ pub(crate) mod tests {
 
         assert_eq!(desktop.bookmark_names(), ["one", "tablet-only", "two"]);
         assert_eq!(vault_bookmark_names(&vault), ["one", "tablet-only", "two"]);
+    }
+
+    #[tokio::test]
+    async fn push_only_does_not_upload_after_a_failed_read() {
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = writes.clone();
+        let url = spawn_mock(move |method, _url, _body| {
+            if method == "PUT" {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (200, br#"{"version":2}"#.to_vec(), vec![])
+            } else {
+                (503, br#"{"message":"temporarily unavailable"}"#.to_vec(), vec![])
+            }
+        });
+        let device = FakeDevice::new(&url, "laptop");
+        let mut config = device.config.clone();
+        config.last_remote_version = Some("1".to_string());
+        assert!(push_only(&device, &mut config).await.is_err());
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn push_only_can_replace_a_legacy_vault_at_its_current_version() {
+        let legacy = STANDARD.encode(encryption::encrypt_sync_blob(b"{\"bookmarks\":[]}", "old-pass").unwrap());
+        let vault: MockVault = Arc::new(Mutex::new((Some(("e2e-v1".into(), legacy)), 3)));
+        let url = spawn_vault_mock(vault.clone());
+        let device = FakeDevice::new(&url, "laptop");
+        device.save_bookmark(bookmark("a", "migrated"));
+        let mut config = device.config.clone();
+        push_only(&device, &mut config).await.unwrap();
+        assert_eq!(vault_version(&vault), 4);
+        assert_eq!(vault_bookmark_names(&vault), ["migrated"]);
     }
 
     #[tokio::test]
