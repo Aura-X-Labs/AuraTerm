@@ -15,7 +15,7 @@
 use russh::{client, keys::HashAlg, ChannelOpenFailure};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -234,37 +234,81 @@ pub(super) fn known_hosts_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(config_dir.join(SSH_KNOWN_HOSTS_FILE))
 }
 
+/// Serialises every read-modify-write of the trust store within this process,
+/// so two connections trusting new hosts at once cannot drop each other's
+/// entry (or interleave writes).
+static KNOWN_HOSTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub(super) async fn load_known_hosts(app: &AppHandle) -> Result<KnownHostsStore, String> {
-    let path = known_hosts_path(app)?;
-    if !path.exists() {
-        return Ok(KnownHostsStore::default());
-    }
-
-    let content = fs::read_to_string(&path)
-        .await
-        .map_err(|error| format!("Failed to read SSH known hosts: {error}"))?;
-
-    serde_json::from_str(&content)
-        .map_err(|error| format!("Failed to parse SSH known hosts: {error}"))
+    load_known_hosts_at(&known_hosts_path(app)?).await
 }
 
-pub(super) async fn save_known_hosts(
-    app: &AppHandle,
-    known_hosts: &KnownHostsStore,
-) -> Result<(), String> {
-    let path = known_hosts_path(app)?;
+async fn load_known_hosts_at(path: &Path) -> Result<KnownHostsStore, String> {
+    let content = match fs::read_to_string(path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(KnownHostsStore::default())
+        }
+        Err(error) => return Err(format!("Failed to read SSH known hosts: {error}")),
+    };
+
+    // Fail closed: silently starting over would trust whatever key the next
+    // server presents. The reset in Settings recovers without parsing.
+    serde_json::from_str(&content).map_err(|error| {
+        format!(
+            "The trusted SSH host key file is damaged ({error}). \
+             Reset the trusted host keys in Settings > Security to recover."
+        )
+    })
+}
+
+/// Write the store atomically (temp file + fsync + rename), so a crash or a
+/// full disk mid-write leaves the previous file rather than a truncated one.
+fn write_known_hosts_at(path: &Path, known_hosts: &KnownHostsStore) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
+        std::fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create config directory: {error}"))?;
     }
-
     let content = serde_json::to_string_pretty(known_hosts)
         .map_err(|error| format!("Failed to serialize SSH known hosts: {error}"))?;
-
-    fs::write(&path, content)
-        .await
+    crate::util::write_atomic(path, &content)
         .map_err(|error| format!("Failed to write SSH known hosts: {error}"))
+}
+
+/// Load, change and save the trust store as one locked step.
+pub(super) async fn update_known_hosts<T>(
+    app: &AppHandle,
+    change: impl FnOnce(&mut KnownHostsStore) -> Result<T, String>,
+) -> Result<T, String> {
+    update_known_hosts_at(&known_hosts_path(app)?, change).await
+}
+
+async fn update_known_hosts_at<T>(
+    path: &Path,
+    change: impl FnOnce(&mut KnownHostsStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = KNOWN_HOSTS_LOCK.lock().await;
+    let mut store = load_known_hosts_at(path).await?;
+    let result = change(&mut store)?;
+    write_known_hosts_at(path, &store)?;
+    Ok(result)
+}
+
+/// Replace the trust store with an empty one without reading it first, so the
+/// reset still works when the file is damaged. A file that does not parse is
+/// kept beside it as `<name>.corrupt` instead of being thrown away.
+async fn reset_known_hosts_at(path: &Path) -> Result<(), String> {
+    let _guard = KNOWN_HOSTS_LOCK.lock().await;
+    if let Ok(content) = fs::read_to_string(path).await {
+        if serde_json::from_str::<KnownHostsStore>(&content).is_err() {
+            let mut backup = path.as_os_str().to_owned();
+            backup.push(".corrupt");
+            if let Err(error) = fs::rename(path, PathBuf::from(backup)).await {
+                crate::warn_log!("[ssh] could not keep the damaged known hosts file: {error}");
+            }
+        }
+    }
+    write_known_hosts_at(path, &KnownHostsStore::default())
 }
 
 #[tauri::command]
@@ -294,18 +338,16 @@ pub async fn ssh_list_known_hosts(app: AppHandle) -> Result<Vec<TrustedSshHostKe
 
 #[tauri::command]
 pub async fn ssh_delete_known_host(app: AppHandle, host: String, port: u16) -> Result<(), String> {
-    let mut known_hosts = load_known_hosts(&app).await?;
-    known_hosts
-        .hosts
-        .remove(&known_host_scope(host.trim(), port));
-    save_known_hosts(&app, &known_hosts).await
+    update_known_hosts(&app, |known_hosts| {
+        known_hosts.hosts.remove(&known_host_scope(host.trim(), port));
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ssh_reset_known_hosts(app: AppHandle) -> Result<(), String> {
-    let mut known_hosts = load_known_hosts(&app).await?;
-    known_hosts.hosts.clear();
-    save_known_hosts(&app, &known_hosts).await
+    reset_known_hosts_at(&known_hosts_path(&app)?).await
 }
 
 pub(super) fn observed_fingerprint_value(
@@ -523,6 +565,70 @@ mod tests {
         assert!(error.contains("handshake"), "{error}");
         assert!(observed.is_none());
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    fn temp_store_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "auraterm-known-hosts-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        dir.join(SSH_KNOWN_HOSTS_FILE)
+    }
+
+    #[tokio::test]
+    async fn concurrent_updates_keep_every_entry() {
+        let path = temp_store_path("concurrent");
+        let tasks = (0..24)
+            .map(|index| {
+                let path = path.clone();
+                tokio::spawn(async move {
+                    update_known_hosts_at(&path, |store| {
+                        store.hosts.insert(format!("host{index}:22"), format!("SHA256:{index}"));
+                        Ok(())
+                    })
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        let store = load_known_hosts_at(&path).await.unwrap();
+        assert_eq!(store.hosts.len(), 24);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_damaged_store_fails_closed_and_reset_recovers_it() {
+        let path = temp_store_path("damaged");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"hosts\": {\"a:22\": \"SHA256:x\"").unwrap();
+
+        let error = load_known_hosts_at(&path).await.err().expect("a damaged file must not load");
+        assert!(error.contains("Reset"), "{error}");
+        assert!(update_known_hosts_at(&path, |_| Ok(())).await.is_err(), "nothing may overwrite it silently");
+
+        reset_known_hosts_at(&path).await.unwrap();
+        assert!(load_known_hosts_at(&path).await.unwrap().hosts.is_empty());
+        let mut backup = path.as_os_str().to_owned();
+        backup.push(".corrupt");
+        assert!(PathBuf::from(backup).exists(), "the damaged file is kept for inspection");
+
+        update_known_hosts_at(&path, |store| {
+            store.hosts.insert("b:22".to_string(), "SHA256:y".to_string());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(load_known_hosts_at(&path).await.unwrap().hosts.len(), 1);
+        let leftovers = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "atomic writes leave no temp files behind");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]
