@@ -192,3 +192,26 @@ describe("deriveUiTheme", () => {
     expect(isColorValue(derived.variables["--app-bg"])).toBe(true);
   });
 });
+
+import { rebaseSettingsEdits, withSyncedSettings } from "../settings";
+
+describe("settings written by a sync", () => {
+  it("are folded into the in-memory copy so the next save keeps them", () => {
+    const current = normalizeAppSettings({ fontSize: 14, scrollback: 1000, restoreTabsOnStartup: true });
+    const next = withSyncedSettings(current, { fontSize: 18 });
+    expect(next.fontSize).toBe(18);
+    expect(next.scrollback).toBe(1000);
+    expect(next.restoreTabsOnStartup).toBe(true);
+  });
+
+  it("replace what an open dialog left untouched, but keep its edits", () => {
+    const opened = normalizeAppSettings({ fontSize: 14, scrollback: 1000 });
+    const edited = { ...opened, scrollback: 5000 };
+    const synced = withSyncedSettings(opened, { fontSize: 18, scrollback: 2000 });
+
+    const saved = rebaseSettingsEdits(opened, edited, synced);
+
+    expect(saved.fontSize).toBe(18);
+    expect(saved.scrollback).toBe(5000);
+  });
+});

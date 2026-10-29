@@ -1018,3 +1018,30 @@ export function deriveUiTheme(theme: TerminalTheme, uiThemeMode: UiThemeMode = D
     },
   };
 }
+
+/**
+ * Settings a configuration sync wrote to disk (the backend's `settings-synced`
+ * event carries the synced subset) folded into the in-memory copy, so the
+ * next save does not write the old values back over them.
+ */
+export function withSyncedSettings(current: AppSettings, synced: Partial<AppSettings>): AppSettings {
+  return normalizeAppSettings({ ...current, ...synced });
+}
+
+/**
+ * Move edits made on a copy of `base` onto `latest`, a newer version of the
+ * same settings: a key the copy still holds as in `base` takes `latest`'s
+ * value, a key it changed keeps the edit. An open Settings dialog uses this
+ * when a sync replaces the settings under it, so saving the dialog keeps the
+ * user's edits without restoring the synced keys it never touched.
+ */
+export function rebaseSettingsEdits(base: AppSettings, edited: AppSettings, latest: AppSettings): AppSettings {
+  const next: Record<string, unknown> = { ...edited };
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  for (const key of Object.keys(latest) as Array<keyof AppSettings>) {
+    if (same(edited[key], base[key])) {
+      next[key] = latest[key];
+    }
+  }
+  return next as unknown as AppSettings;
+}
