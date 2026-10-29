@@ -70,12 +70,17 @@ pub enum SshTransferStatus {
     Started,
     Progress,
     Completed,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshTransferProgressPayload {
     pub id: String,
+    /// The caller's id for this transfer, when it supplied one (needed to
+    /// cancel it and to tell concurrent transfers apart).
+    pub transfer_id: Option<String>,
     pub direction: SshTransferDirection,
     pub status: SshTransferStatus,
     pub mode: SshTransferMode,
@@ -84,6 +89,8 @@ pub struct SshTransferProgressPayload {
     pub local_path: Option<String>,
     pub transferred_bytes: u64,
     pub total_bytes: Option<u64>,
+    /// Why a `failed` or `cancelled` transfer stopped.
+    pub message: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

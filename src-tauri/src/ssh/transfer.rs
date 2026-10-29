@@ -4,8 +4,8 @@
 //! - Remote and local path helpers (`remote_parent_path`, `join_remote_path`,
 //!   `expand_local_path`, `home_dir`, `default_download_dir`,
 //!   `unique_local_path`, `file_name_from_remote_path`).
-//! - Transfer-progress event emission helpers (`emit_transfer_progress`,
-//!   `maybe_emit_transfer_progress`).
+//! - Transfer-progress reporting and cancellation (`TransferReporter`,
+//!   `ssh_cancel_transfer`).
 //! - SFTP session bootstrap (`open_sftp_session`).
 //! - Low-level SCP primitives (`read_scp_line`, `read_scp_ack`, `scp_upload`,
 //!   `scp_download_to_path`).
@@ -15,8 +15,9 @@
 //!   - `ssh_remove_remote_entry`
 //!   - `ssh_read_remote_text_file`
 //!   - `ssh_write_remote_text_file`
-//!   - `ssh_upload_file`
+//!   - `ssh_upload_file` (streams from a local path)
 //!   - `ssh_download_file`
+//!   - `ssh_cancel_transfer`
 
 use russh::client;
 use russh_sftp::client::SftpSession;
@@ -31,9 +32,10 @@ use super::types::{
     SshTransferProgressPayload, SshTransferStatus,
 };
 use super::{
-    open_ssh_channel, shell_escape, SshState, SSH_TRANSFER_PROGRESS_EVENT,
+    open_ssh_channel, shell_escape, ReconnectCancellation, SshState, SSH_TRANSFER_PROGRESS_EVENT,
     TRANSFER_CHUNK_SIZE, TRANSFER_PROGRESS_EMIT_STEP,
 };
+use std::sync::Arc;
 
 const REMOTE_TEXT_FILE_MAX_BYTES: usize = 2 * 1024 * 1024;
 
@@ -179,71 +181,173 @@ pub(super) fn sanitize_local_file_name(name: &str, windows: bool) -> String {
     safe
 }
 
-pub(super) fn emit_transfer_progress(
-    app: &AppHandle,
-    id: &str,
+/// Emits one transfer's lifecycle on [`SSH_TRANSFER_PROGRESS_EVENT`]: started,
+/// throttled progress, and exactly one of completed / failed / cancelled.
+pub(super) struct TransferReporter {
+    /// `None` in tests, which drive transfers without a Tauri app.
+    app: Option<AppHandle>,
+    id: String,
+    transfer_id: Option<String>,
     direction: SshTransferDirection,
-    status: SshTransferStatus,
     mode: SshTransferMode,
-    file_name: &str,
-    remote_path: &str,
-    local_path: Option<&Path>,
-    transferred_bytes: u64,
+    file_name: String,
+    remote_path: String,
+    local_path: Option<PathBuf>,
     total_bytes: Option<u64>,
-) {
-    let _ = app.emit(
-        SSH_TRANSFER_PROGRESS_EVENT,
-        SshTransferProgressPayload {
+    last_reported_bytes: u64,
+}
+
+impl TransferReporter {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        app: &AppHandle,
+        id: &str,
+        transfer_id: Option<&str>,
+        direction: SshTransferDirection,
+        mode: SshTransferMode,
+        file_name: &str,
+        remote_path: &str,
+        local_path: Option<&Path>,
+        total_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            app: Some(app.clone()),
             id: id.to_string(),
+            transfer_id: transfer_id.map(str::to_string),
             direction,
-            status,
             mode,
             file_name: file_name.to_string(),
             remote_path: remote_path.to_string(),
-            local_path: local_path.map(|value| value.to_string_lossy().into_owned()),
-            transferred_bytes,
+            local_path: local_path.map(Path::to_path_buf),
             total_bytes,
-        },
-    );
+            last_reported_bytes: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn silent(direction: SshTransferDirection, mode: SshTransferMode) -> Self {
+        Self {
+            app: None,
+            id: String::new(),
+            transfer_id: None,
+            direction,
+            mode,
+            file_name: String::new(),
+            remote_path: String::new(),
+            local_path: None,
+            total_bytes: None,
+            last_reported_bytes: 0,
+        }
+    }
+
+    fn emit(&self, status: SshTransferStatus, transferred_bytes: u64, total_bytes: Option<u64>, message: Option<String>) {
+        let Some(app) = &self.app else { return };
+        let _ = app.emit(
+            SSH_TRANSFER_PROGRESS_EVENT,
+            SshTransferProgressPayload {
+                id: self.id.clone(),
+                transfer_id: self.transfer_id.clone(),
+                direction: self.direction,
+                status,
+                mode: self.mode,
+                file_name: self.file_name.clone(),
+                remote_path: self.remote_path.clone(),
+                local_path: self.local_path.as_ref().map(|value| value.to_string_lossy().into_owned()),
+                transferred_bytes,
+                total_bytes,
+                message,
+            },
+        );
+    }
+
+    fn started(&self) {
+        self.emit(SshTransferStatus::Started, 0, self.total_bytes, None);
+    }
+
+    /// Report progress at most every [`TRANSFER_PROGRESS_EMIT_STEP`] bytes.
+    fn progress(&mut self, transferred_bytes: u64) {
+        if transferred_bytes == 0
+            || self.total_bytes.is_some_and(|total| transferred_bytes >= total)
+            || transferred_bytes.saturating_sub(self.last_reported_bytes) < TRANSFER_PROGRESS_EMIT_STEP
+        {
+            return;
+        }
+        self.last_reported_bytes = transferred_bytes;
+        self.emit(SshTransferStatus::Progress, transferred_bytes, self.total_bytes, None);
+    }
+
+    fn completed(&self, transferred_bytes: u64) {
+        let total = Some(self.total_bytes.unwrap_or(transferred_bytes));
+        self.emit(SshTransferStatus::Completed, transferred_bytes, total, None);
+    }
+
+    fn ended(&self, error: &str, cancelled: bool) {
+        let status = if cancelled { SshTransferStatus::Cancelled } else { SshTransferStatus::Failed };
+        self.emit(status, self.last_reported_bytes, self.total_bytes, Some(error.to_string()));
+    }
 }
 
-pub(super) fn maybe_emit_transfer_progress(
-    app: &AppHandle,
-    id: &str,
-    direction: SshTransferDirection,
-    mode: SshTransferMode,
-    file_name: &str,
-    remote_path: &str,
-    local_path: Option<&Path>,
-    transferred_bytes: u64,
-    total_bytes: Option<u64>,
-    last_reported_bytes: &mut u64,
-) {
-    if transferred_bytes == 0 {
-        return;
+/// Error text for a transfer stopped by [`ssh_cancel_transfer`].
+pub(super) const TRANSFER_CANCELLED: &str = "Transfer cancelled";
+
+/// A running transfer's entry in the cancellation registry, removed on drop.
+struct TransferRegistration {
+    state: SshState,
+    transfer_id: Option<String>,
+    token: Arc<ReconnectCancellation>,
+}
+
+impl TransferRegistration {
+    fn new(state: &SshState, transfer_id: Option<&str>) -> Self {
+        let token = Arc::new(ReconnectCancellation::default());
+        if let Some(transfer_id) = transfer_id {
+            if let Ok(mut transfers) = state.transfers.lock() {
+                transfers.insert(transfer_id.to_string(), token.clone());
+            }
+        }
+        Self { state: state.clone(), transfer_id: transfer_id.map(str::to_string), token }
     }
 
-    if total_bytes.is_some_and(|total| transferred_bytes >= total) {
-        return;
+    /// Run `transfer` until it finishes or the transfer is cancelled; a
+    /// cancel drops it mid-flight, closing its SFTP handle or SCP channel.
+    async fn run<T>(&self, transfer: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+        tokio::select! {
+            biased;
+            _ = self.token.cancelled() => Err(TRANSFER_CANCELLED.to_string()),
+            result = transfer => result,
+        }
     }
 
-    if transferred_bytes.saturating_sub(*last_reported_bytes) < TRANSFER_PROGRESS_EMIT_STEP {
-        return;
+    fn cancelled(&self) -> bool {
+        self.token.is_cancelled()
     }
+}
 
-    *last_reported_bytes = transferred_bytes;
-    emit_transfer_progress(
-        app,
-        id,
-        direction,
-        SshTransferStatus::Progress,
-        mode,
-        file_name,
-        remote_path,
-        local_path,
-        transferred_bytes,
-        total_bytes,
-    );
+impl Drop for TransferRegistration {
+    fn drop(&mut self) {
+        if let Some(transfer_id) = &self.transfer_id {
+            if let Ok(mut transfers) = self.state.transfers.lock() {
+                transfers.remove(transfer_id);
+            }
+        }
+    }
+}
+
+/// Stop a running upload or download started with this `transfer_id`. The
+/// transfer's own command then fails with [`TRANSFER_CANCELLED`] and emits a
+/// `cancelled` status. Unknown ids (already finished) are not an error.
+#[tauri::command]
+pub async fn ssh_cancel_transfer(state: State<'_, SshState>, transfer_id: String) -> Result<(), String> {
+    let token = state
+        .transfers
+        .lock()
+        .map_err(|_| "Transfer registry unavailable".to_string())?
+        .get(&transfer_id)
+        .cloned();
+    if let Some(token) = token {
+        token.cancel();
+    }
+    Ok(())
 }
 
 pub(super) async fn open_sftp_session(state: &SshState, id: &str) -> Result<SftpSession, String> {
@@ -294,15 +398,16 @@ async fn read_scp_ack(
     }
 }
 
+/// Send `total_bytes` from `local_file` with `scp -t`.
 async fn scp_upload(
-    app: &AppHandle,
     state: &SshState,
     id: &str,
     remote_dir: &str,
     file_name: &str,
-    data: &[u8],
+    local_file: &mut fs::File,
+    total_bytes: u64,
+    reporter: &mut TransferReporter,
 ) -> Result<(), String> {
-    let remote_path = join_remote_path(remote_dir, file_name);
     let channel = open_ssh_channel(state, id).await?;
     channel
         .exec(true, format!("scp -t {}", shell_escape(remote_dir)))
@@ -312,7 +417,7 @@ async fn scp_upload(
     let mut stream = BufReader::new(channel.into_stream());
     read_scp_ack(&mut stream).await?;
 
-    let header = format!("C0644 {} {}\n", data.len(), file_name);
+    let header = format!("C0644 {} {}\n", total_bytes, file_name);
     stream
         .get_mut()
         .write_all(header.as_bytes())
@@ -325,29 +430,25 @@ async fn scp_upload(
         .map_err(|error| format!("Failed to flush SCP header: {error}"))?;
     read_scp_ack(&mut stream).await?;
 
-    let total_bytes = data.len() as u64;
+    // SCP announced the size up front, so send exactly that many bytes.
     let mut transferred_bytes = 0_u64;
-    let mut last_reported_bytes = 0_u64;
-
-    for chunk in data.chunks(TRANSFER_CHUNK_SIZE) {
+    let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
+    while transferred_bytes < total_bytes {
+        let want = (total_bytes - transferred_bytes).min(buffer.len() as u64) as usize;
+        let read = local_file
+            .read(&mut buffer[..want])
+            .await
+            .map_err(|error| format!("Failed to read local file: {error}"))?;
+        if read == 0 {
+            return Err("The local file got shorter while it was being uploaded".to_string());
+        }
         stream
             .get_mut()
-            .write_all(chunk)
+            .write_all(&buffer[..read])
             .await
             .map_err(|error| format!("Failed to write SCP data: {error}"))?;
-        transferred_bytes += chunk.len() as u64;
-        maybe_emit_transfer_progress(
-            app,
-            id,
-            SshTransferDirection::Upload,
-            SshTransferMode::Scp,
-            file_name,
-            &remote_path,
-            None,
-            transferred_bytes,
-            Some(total_bytes),
-            &mut last_reported_bytes,
-        );
+        transferred_bytes += read as u64;
+        reporter.progress(transferred_bytes);
     }
     stream
         .get_mut()
@@ -370,13 +471,12 @@ async fn scp_upload(
 }
 
 async fn scp_download_to_path(
-    app: &AppHandle,
     state: &SshState,
     id: &str,
     remote_path: &str,
     destination: &Path,
-    file_name: &str,
     total_bytes: Option<u64>,
+    reporter: &mut TransferReporter,
 ) -> Result<u64, String> {
     let channel = open_ssh_channel(state, id).await?;
     channel
@@ -451,8 +551,7 @@ async fn scp_download_to_path(
     let mut remaining = size;
     let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
     let mut transferred_bytes = 0_u64;
-    let mut last_reported_bytes = 0_u64;
-    let expected_total = total_bytes.or(Some(size));
+    reporter.total_bytes = total_bytes.or(Some(size));
 
     while remaining > 0 {
         let next = remaining.min(buffer.len() as u64) as usize;
@@ -466,18 +565,7 @@ async fn scp_download_to_path(
             .map_err(|error| format!("Failed to write local file: {error}"))?;
         remaining -= next as u64;
         transferred_bytes += next as u64;
-        maybe_emit_transfer_progress(
-            app,
-            id,
-            SshTransferDirection::Download,
-            SshTransferMode::Scp,
-            file_name,
-            remote_path,
-            Some(destination),
-            transferred_bytes,
-            expected_total,
-            &mut last_reported_bytes,
-        );
+        reporter.progress(transferred_bytes);
     }
 
     let mut trailer = [0_u8; 1];
@@ -685,44 +773,102 @@ pub async fn ssh_write_remote_text_file(
     Ok(())
 }
 
+/// Upload one local file into `remote_dir`, streaming it from disk.
+///
+/// The webview passes the path the user picked (file dialog or drop) rather
+/// than the file's bytes: a JSON number array of a large file exhausted the
+/// WebView's memory, and could not be cancelled. Pass a `transfer_id` to make
+/// the upload cancellable with [`ssh_cancel_transfer`].
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_upload_file(
     app: AppHandle,
     state: State<'_, SshState>,
     id: String,
     remote_dir: String,
-    file_name: String,
-    data: Vec<u8>,
+    local_path: String,
+    transfer_id: Option<String>,
     mode: SshTransferMode,
     resume: bool,
 ) -> Result<(), String> {
-    let file_name = Path::new(&file_name)
+    let local_path = PathBuf::from(local_path);
+    let file_name = local_path
         .file_name()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
         .ok_or_else(|| "Invalid file name".to_string())?;
     let remote_path = join_remote_path(&remote_dir, &file_name);
-    let total_bytes = data.len() as u64;
 
-    emit_transfer_progress(
+    let registration = TransferRegistration::new(state.inner(), transfer_id.as_deref());
+    let mut reporter = TransferReporter::new(
         &app,
         &id,
+        transfer_id.as_deref(),
         SshTransferDirection::Upload,
-        SshTransferStatus::Started,
         mode,
         &file_name,
         &remote_path,
+        Some(&local_path),
         None,
-        0,
-        Some(total_bytes),
     );
+
+    let result = registration
+        .run(upload_local_file(
+            state.inner(),
+            &id,
+            &remote_dir,
+            &remote_path,
+            &file_name,
+            &local_path,
+            mode,
+            resume,
+            &mut reporter,
+        ))
+        .await;
+    match result {
+        Ok(total_bytes) => {
+            reporter.completed(total_bytes);
+            Ok(())
+        }
+        Err(error) => {
+            reporter.ended(&error, registration.cancelled());
+            Err(error)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_local_file(
+    state: &SshState,
+    id: &str,
+    remote_dir: &str,
+    remote_path: &str,
+    file_name: &str,
+    local_path: &Path,
+    mode: SshTransferMode,
+    resume: bool,
+    reporter: &mut TransferReporter,
+) -> Result<u64, String> {
+    let mut local_file = fs::File::open(local_path)
+        .await
+        .map_err(|error| format!("Failed to open {}: {error}", local_path.display()))?;
+    let metadata = local_file
+        .metadata()
+        .await
+        .map_err(|error| format!("Failed to inspect {}: {error}", local_path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", local_path.display()));
+    }
+    let total_bytes = metadata.len();
+    reporter.total_bytes = Some(total_bytes);
+    reporter.started();
 
     match mode {
         SshTransferMode::Sftp => {
-            let sftp = open_sftp_session(state.inner(), &id).await?;
+            let sftp = open_sftp_session(state, id).await?;
             let resume_offset = if resume {
-                sftp.metadata(remote_path.clone()).await.map(|metadata| metadata.len()).unwrap_or(0)
+                sftp.metadata(remote_path.to_string()).await.map(|metadata| metadata.len()).unwrap_or(0)
             } else {
                 0
             };
@@ -731,79 +877,59 @@ pub async fn ssh_upload_file(
             }
             let mut remote_file = if resume_offset > 0 {
                 let mut file = sftp
-                    .open_with_flags(remote_path.clone(), OpenFlags::CREATE | OpenFlags::WRITE)
+                    .open_with_flags(remote_path.to_string(), OpenFlags::CREATE | OpenFlags::WRITE)
                     .await
                     .map_err(|error| format!("Failed to resume remote file: {error}"))?;
                 file.seek(SeekFrom::Start(resume_offset))
                     .await
                     .map_err(|error| format!("Failed to seek remote file: {error}"))?;
+                local_file
+                    .seek(SeekFrom::Start(resume_offset))
+                    .await
+                    .map_err(|error| format!("Failed to seek local file: {error}"))?;
                 file
             } else {
-                sftp.create(remote_path.clone())
+                sftp.create(remote_path.to_string())
                     .await
                     .map_err(|error| format!("Failed to create remote file: {error}"))?
             };
-            let mut transferred_bytes = resume_offset;
-            let mut last_reported_bytes = 0_u64;
 
-            for chunk in data[resume_offset as usize..].chunks(TRANSFER_CHUNK_SIZE) {
+            let mut transferred_bytes = resume_offset;
+            let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
+            loop {
+                let read = local_file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| format!("Failed to read local file: {error}"))?;
+                if read == 0 {
+                    break;
+                }
                 remote_file
-                    .write_all(chunk)
+                    .write_all(&buffer[..read])
                     .await
                     .map_err(|error| format!("Failed to upload file over SFTP: {error}"))?;
-                transferred_bytes += chunk.len() as u64;
-                maybe_emit_transfer_progress(
-                    &app,
-                    &id,
-                    SshTransferDirection::Upload,
-                    mode,
-                    &file_name,
-                    &remote_path,
-                    None,
-                    transferred_bytes,
-                    Some(total_bytes),
-                    &mut last_reported_bytes,
-                );
+                transferred_bytes += read as u64;
+                reporter.progress(transferred_bytes);
             }
             remote_file
                 .shutdown()
                 .await
                 .map_err(|error| format!("Failed to finalize SFTP upload: {error}"))?;
             let _ = sftp.close().await;
-            emit_transfer_progress(
-                &app,
-                &id,
-                SshTransferDirection::Upload,
-                SshTransferStatus::Completed,
-                mode,
-                &file_name,
-                &remote_path,
-                None,
-                total_bytes,
-                Some(total_bytes),
-            );
-            Ok(())
+            Ok(transferred_bytes)
         }
         SshTransferMode::Scp => {
-            scp_upload(&app, state.inner(), &id, &remote_dir, &file_name, &data).await?;
-            emit_transfer_progress(
-                &app,
-                &id,
-                SshTransferDirection::Upload,
-                SshTransferStatus::Completed,
-                mode,
-                &file_name,
-                &remote_path,
-                None,
-                total_bytes,
-                Some(total_bytes),
-            );
-            Ok(())
+            scp_upload(state, id, remote_dir, file_name, &mut local_file, total_bytes, reporter).await?;
+            Ok(total_bytes)
         }
     }
 }
 
+/// Download one remote file into `local_dir` (the default download folder when
+/// empty). Pass a `transfer_id` to make it cancellable with
+/// [`ssh_cancel_transfer`].
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_download_file(
     app: AppHandle,
     state: State<'_, SshState>,
@@ -811,6 +937,7 @@ pub async fn ssh_download_file(
     remote_path: String,
     local_dir: Option<String>,
     expected_size: Option<u64>,
+    transfer_id: Option<String>,
     mode: SshTransferMode,
     resume: bool,
 ) -> Result<String, String> {
@@ -827,28 +954,64 @@ pub async fn ssh_download_file(
     };
     let total_bytes = expected_size.filter(|value| *value > 0);
 
-    emit_transfer_progress(
+    let registration = TransferRegistration::new(state.inner(), transfer_id.as_deref());
+    let mut reporter = TransferReporter::new(
         &app,
         &id,
+        transfer_id.as_deref(),
         SshTransferDirection::Download,
-        SshTransferStatus::Started,
         mode,
         &file_name,
         &remote_path,
         Some(&destination_path),
-        0,
         total_bytes,
     );
+    reporter.started();
 
-    let transferred_bytes = match mode {
+    let result = registration
+        .run(download_remote_file(
+            state.inner(),
+            &id,
+            &remote_path,
+            &destination_path,
+            total_bytes,
+            mode,
+            resume,
+            &mut reporter,
+        ))
+        .await;
+    match result {
+        Ok(transferred_bytes) => {
+            reporter.completed(transferred_bytes);
+            Ok(destination_path.to_string_lossy().into_owned())
+        }
+        Err(error) => {
+            reporter.ended(&error, registration.cancelled());
+            Err(error)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_remote_file(
+    state: &SshState,
+    id: &str,
+    remote_path: &str,
+    destination_path: &Path,
+    total_bytes: Option<u64>,
+    mode: SshTransferMode,
+    resume: bool,
+    reporter: &mut TransferReporter,
+) -> Result<u64, String> {
+    match mode {
         SshTransferMode::Sftp => {
-            let sftp = open_sftp_session(state.inner(), &id).await?;
+            let sftp = open_sftp_session(state, id).await?;
             let mut remote_file = sftp
-                .open(remote_path.clone())
+                .open(remote_path.to_string())
                 .await
                 .map_err(|error| format!("Failed to open remote file: {error}"))?;
             let resume_offset = if resume {
-                fs::metadata(&destination_path).await.map(|metadata| metadata.len()).unwrap_or(0)
+                fs::metadata(destination_path).await.map(|metadata| metadata.len()).unwrap_or(0)
             } else {
                 0
             };
@@ -865,12 +1028,11 @@ pub async fn ssh_download_file(
                 .write(true)
                 .append(resume_offset > 0)
                 .truncate(resume_offset == 0)
-                .open(&destination_path)
+                .open(destination_path)
                 .await
                 .map_err(|error| format!("Failed to create local file: {error}"))?;
             let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
             let mut transferred_bytes = resume_offset;
-            let mut last_reported_bytes = 0_u64;
 
             loop {
                 let read = remote_file
@@ -885,62 +1047,156 @@ pub async fn ssh_download_file(
                     .await
                     .map_err(|error| format!("Failed to write local file: {error}"))?;
                 transferred_bytes += read as u64;
-                maybe_emit_transfer_progress(
-                    &app,
-                    &id,
-                    SshTransferDirection::Download,
-                    mode,
-                    &file_name,
-                    &remote_path,
-                    Some(&destination_path),
-                    transferred_bytes,
-                    total_bytes,
-                    &mut last_reported_bytes,
-                );
+                reporter.progress(transferred_bytes);
             }
             remote_file
                 .shutdown()
                 .await
                 .map_err(|error| format!("Failed to finalize SFTP download: {error}"))?;
             let _ = sftp.close().await;
-            transferred_bytes
+            Ok(transferred_bytes)
         }
         SshTransferMode::Scp => {
             if resume {
                 return Err("Resume is available for SFTP transfers only".to_string());
             }
-            scp_download_to_path(
-                &app,
-                state.inner(),
-                &id,
-                &remote_path,
-                &destination_path,
-                &file_name,
-                total_bytes,
-            )
-            .await?
+            scp_download_to_path(state, id, remote_path, destination_path, total_bytes, reporter).await
         }
-    };
-
-    emit_transfer_progress(
-        &app,
-        &id,
-        SshTransferDirection::Download,
-        SshTransferStatus::Completed,
-        mode,
-        &file_name,
-        &remote_path,
-        Some(&destination_path),
-        transferred_bytes,
-        Some(total_bytes.unwrap_or(transferred_bytes)),
-    );
-
-    Ok(destination_path.to_string_lossy().into_owned())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_cancelled_transfer_stops_and_leaves_the_registry() {
+        let state = SshState::default();
+        let registration = TransferRegistration::new(&state, Some("t1"));
+        let token = state.transfers.lock().unwrap().get("t1").cloned().expect("registered");
+
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            token.cancel();
+        });
+        // A transfer that would otherwise never finish (a stalled server).
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            registration.run(std::future::pending::<Result<(), String>>()),
+        )
+        .await
+        .expect("cancel must stop the transfer");
+        assert_eq!(result, Err(TRANSFER_CANCELLED.to_string()));
+        assert!(registration.cancelled());
+        canceller.await.unwrap();
+
+        drop(registration);
+        assert!(state.transfers.lock().unwrap().is_empty());
+    }
+
+    /// A minimal `scp -t` sink: acks the start, the header and the data, and
+    /// keeps what it received.
+    #[derive(Clone, Default)]
+    struct ScpSink {
+        received: Arc<std::sync::Mutex<Vec<u8>>>,
+        header: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl russh::server::Handler for ScpSink {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            _: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            session.data(channel, vec![0u8])?;
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            let mut header = self.header.lock().unwrap();
+            let mut received = self.received.lock().unwrap();
+            received.extend_from_slice(data);
+            if header.is_none() {
+                if let Some(end) = received.iter().position(|byte| *byte == b'\n') {
+                    *header = Some(String::from_utf8_lossy(&received[..end]).into_owned());
+                    received.drain(..=end);
+                    session.data(channel, vec![0u8])?;
+                }
+            }
+            if let Some(line) = header.as_ref() {
+                let size: usize = line.split(' ').nth(1).unwrap().parse().unwrap();
+                if received.len() == size + 1 {
+                    session.data(channel, vec![0u8])?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn scp_upload_streams_the_file_from_disk() {
+        let sink = ScpSink::default();
+        let (address, server) = super::super::test_support::spawn_server(sink.clone()).await;
+        let mut client = super::super::test_support::connect(address).await;
+        assert!(client.authenticate_none("test").await.unwrap().success());
+        let state = SshState::default();
+        state.upsert_session("tab", |s| s.handle = Some(Arc::new(client))).await;
+
+        let dir = std::env::temp_dir().join(format!("auraterm-upload-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payload.bin");
+        // Several chunks plus a remainder.
+        let content: Vec<u8> = (0..(TRANSFER_CHUNK_SIZE * 3 + 123)).map(|index| (index % 251) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        let mut reporter = TransferReporter::silent(SshTransferDirection::Upload, SshTransferMode::Scp);
+        let sent = upload_local_file(
+            &state,
+            "tab",
+            "/tmp",
+            "/tmp/payload.bin",
+            "payload.bin",
+            &path,
+            SshTransferMode::Scp,
+            false,
+            &mut reporter,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sent, content.len() as u64);
+        assert_eq!(sink.header.lock().unwrap().as_deref(), Some(format!("C0644 {} payload.bin", content.len()).as_str()));
+        let received = sink.received.lock().unwrap().clone();
+        assert_eq!(&received[..content.len()], &content[..]);
+        assert_eq!(received[content.len()..], [0u8], "terminated with the SCP end marker");
+        assert_eq!(reporter.total_bytes, Some(content.len() as u64));
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn remote_names_are_split_on_slashes_only() {
