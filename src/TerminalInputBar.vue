@@ -210,6 +210,13 @@ function navigateHistory(direction: 1 | -1) {
 }
 
 function handleKeyDown(event: KeyboardEvent) {
+  // While an input method is composing, arrows/PageUp/PageDown pick and page
+  // through candidates and Enter/Escape commit or cancel — they are not ours.
+  // WebKit reports some composition keydowns only through keyCode 229.
+  if (event.isComposing || event.keyCode === 229) {
+    return;
+  }
+
   // Ctrl/Cmd+K: toggle AI command-generation mode.
   if ((event.ctrlKey || event.metaKey) && (event.key === "k" || event.key === "K")) {
     event.preventDefault();
