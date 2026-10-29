@@ -85,4 +85,34 @@ describe("AiAssistantPanel", () => {
     expect(wrapper.find(".ai-message.assistant .ai-message-body.error").exists()).toBe(true);
     wrapper.unmount();
   });
+
+  it("releases the stream listener even when closed before it was registered", async () => {
+    ai.state.holdListen = true;
+    const wrapper = mountPanel();
+    wrapper.unmount();
+    ai.state.releaseListen?.();
+    await flushPromises();
+    expect(ai.state.unlistened).toBe(1);
+    expect(ai.state.handlers).toHaveLength(0);
+  });
+
+  it("does not leave a failed cancel as an unhandled rejection", async () => {
+    let resolveStart: (id: string) => void = () => {};
+    ai.aiChatStart.mockImplementation((...args: unknown[]) => new Promise<string>((resolve) => {
+      resolveStart = () => resolve(args[2] as string);
+    }));
+    ai.aiChatCancel.mockRejectedValue(new Error("backend gone"));
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = mountPanel();
+    await flushPromises();
+    await sendMessage(wrapper, "hello");
+    resolveStart("");
+    await flushPromises();
+
+    wrapper.unmount();
+    await flushPromises();
+    expect(ai.aiChatCancel).toHaveBeenCalledTimes(1);
+    expect(logError).toHaveBeenCalled();
+    logError.mockRestore();
+  });
 });
