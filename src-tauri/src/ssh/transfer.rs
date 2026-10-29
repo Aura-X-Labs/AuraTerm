@@ -126,13 +126,57 @@ pub(super) fn unique_local_path(dir: &Path, file_name: &str) -> PathBuf {
     dir.join(file_name)
 }
 
+/// The last component of a remote (POSIX) path, made safe to create inside
+/// the local download directory.
+///
+/// The remote path is split on `/` only — never parsed as a local path, where
+/// on Windows `C:x` is a drive-relative path that `PathBuf::join` would let
+/// escape the download directory.
 pub(super) fn file_name_from_remote_path(path: &str) -> Result<String, String> {
-    Path::new(path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .ok_or_else(|| format!("Invalid remote path: {path}"))
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(format!("Invalid remote path: {path}"));
+    }
+    Ok(sanitize_local_file_name(name, cfg!(windows)))
+}
+
+/// Device names Windows reserves in every directory, with or without an
+/// extension (`CON`, `con.txt`, `COM1.log`, ...).
+const WINDOWS_RESERVED_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Turn a name chosen by the remote side into one this platform stores as a
+/// plain file in the target directory.
+///
+/// Everywhere: control characters and path separators become `_`. On
+/// Windows also: `<>:"\|?*` become `_` (a `:` would otherwise write an NTFS
+/// alternate data stream), trailing dots and spaces are dropped (Win32 strips
+/// them, merging names), and reserved device names get a `_` prefix.
+pub(super) fn sanitize_local_file_name(name: &str, windows: bool) -> String {
+    let mut safe: String = name
+        .chars()
+        .map(|c| match c {
+            '/' => '_',
+            '\\' if windows => '_',
+            c if c.is_control() => '_',
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' if windows => '_',
+            c => c,
+        })
+        .collect();
+
+    if windows {
+        safe.truncate(safe.trim_end_matches(['.', ' ']).len());
+        let stem = safe.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+        if WINDOWS_RESERVED_NAMES.contains(&stem.as_str()) {
+            safe.insert(0, '_');
+        }
+    }
+    if safe.is_empty() || safe == "." || safe == ".." {
+        safe = "_".repeat(safe.len().max(1));
+    }
+    safe
 }
 
 pub(super) fn emit_transfer_progress(
@@ -892,4 +936,52 @@ pub async fn ssh_download_file(
     );
 
     Ok(destination_path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_names_are_split_on_slashes_only() {
+        assert_eq!(file_name_from_remote_path("/var/log/syslog").unwrap(), "syslog");
+        assert_eq!(file_name_from_remote_path("/var/log/").unwrap(), "log");
+        assert_eq!(file_name_from_remote_path("relative").unwrap(), "relative");
+        for bad in ["", "/", "/tmp/..", "/tmp/.", "//"] {
+            assert!(file_name_from_remote_path(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn windows_names_cannot_escape_or_hit_special_files() {
+        let windows = |name: &str| sanitize_local_file_name(name, true);
+        // `:` would write an NTFS alternate data stream; `C:x` is drive-relative.
+        assert_eq!(windows("notes.txt:secret"), "notes.txt_secret");
+        assert_eq!(windows("C:x"), "C_x");
+        assert_eq!(windows("a\\..\\b"), "a_.._b");
+        assert_eq!(windows("what?<>|*\"q\""), "what______q_");
+        // Reserved device names, with or without an extension, any case.
+        assert_eq!(windows("CON"), "_CON");
+        assert_eq!(windows("con.txt"), "_con.txt");
+        assert_eq!(windows("Com1.log"), "_Com1.log");
+        assert_eq!(windows("lpt9"), "_lpt9");
+        assert_eq!(windows("console"), "console");
+        assert_eq!(windows("COM10"), "COM10");
+        // Win32 drops trailing dots and spaces.
+        assert_eq!(windows("report. . "), "report");
+        assert_eq!(windows("..."), "_");
+        assert_eq!(windows("tab\there"), "tab_here");
+
+        let joined = std::path::Path::new("downloads").join(windows("C:x"));
+        assert_eq!(joined, std::path::Path::new("downloads").join("C_x"));
+    }
+
+    #[test]
+    fn other_platforms_keep_legal_characters() {
+        let unix = |name: &str| sanitize_local_file_name(name, false);
+        assert_eq!(unix("a:b?*"), "a:b?*");
+        assert_eq!(unix("CON"), "CON");
+        assert_eq!(unix("trailing. "), "trailing. ");
+        assert_eq!(unix("bell\u{7}"), "bell_");
+    }
 }
