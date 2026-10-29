@@ -436,13 +436,7 @@ pub fn save_connection(
 ) -> Result<String, String> {
     let secret = encryption::resolve_secret(&app, &master_state)?;
 
-    // 加载现有凭据存储；若解密失败（如主密码曾被重置导致密文不兼容），则从空存储开始，
-    // 避免因遗留文件阻断所有新连接的保存。
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
-        .unwrap_or_else(|e| {
-            crate::warn_log!("[save_connection] credential store unreadable ({}), resetting", e);
-            encryption::CredentialStore { credentials: Vec::new() }
-        });
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)?;
 
     // 持久化凭据
     persist_connection_secrets(&connection, &mut credential_store)?;
@@ -475,9 +469,7 @@ pub fn delete_connection(
 ) -> Result<(), String> {
     let secret = encryption::resolve_secret(&app, &master_state)?;
 
-    // 从凭据存储中移除；若旧文件解密失败则从空存储开始（相当于凭据已丢失，继续删除连接元数据）
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
-        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)?;
     credential_store
         .credentials
         .retain(|c| c.connection_id != id);
@@ -563,8 +555,7 @@ pub fn delete_connections(
     let doomed: HashSet<&str> = ids.iter().map(String::as_str).collect();
 
     let secret = encryption::resolve_secret(&app, &master_state)?;
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
-        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)?;
     credential_store
         .credentials
         .retain(|credential| !doomed.contains(credential.connection_id.as_str()));
@@ -692,8 +683,7 @@ pub fn duplicate_connection(
 
     let new_id = uuid::Uuid::new_v4().to_string();
     let secret = encryption::resolve_secret(&app, &master_state)?;
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)
-        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)?;
     if let Some(mut existing) = credential_store
         .credentials
         .iter()
@@ -1403,10 +1393,7 @@ fn apply_import(
         None
     };
     let mut credential_store = match &secret {
-        Some(secret) => Some(
-            encryption::load_encrypted_credentials(app, secret)
-                .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() }),
-        ),
+        Some(secret) => Some(encryption::load_encrypted_credentials(app, secret)?),
         None => None,
     };
 

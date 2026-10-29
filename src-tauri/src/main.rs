@@ -364,8 +364,7 @@ fn set_master_password(
     // 迁移而非清空：用当前的本地密钥解出现有凭据，再用新主密码重加密。
     let local_secret =
         encryption::CredentialSecret::LocalKey(encryption::load_or_create_local_key(&app)?);
-    let store = encryption::load_encrypted_credentials(&app, &local_secret)
-        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    let store = encryption::load_encrypted_credentials(&app, &local_secret)?;
 
     let mut rng = rand::thread_rng();
     let salt: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
@@ -380,7 +379,7 @@ fn set_master_password(
     settings.master_password_salt = Some(base64::engine::general_purpose::STANDARD.encode(&salt));
     settings.credentials_initialized = true;
     settings.remember_master_password = remember;
-    settings::save_settings(app.clone(), settings)?;
+    settings::save_security_settings(app.clone(), &settings)?;
 
     if remember {
         keychain::store_password(&password)?;
@@ -410,8 +409,7 @@ fn change_master_password(
 
     let old_secret =
         encryption::CredentialSecret::Password(zeroize::Zeroizing::new(current_password));
-    let store = encryption::load_encrypted_credentials(&app, &old_secret)
-        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    let store = encryption::load_encrypted_credentials(&app, &old_secret)?;
 
     let mut rng = rand::thread_rng();
     let salt: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
@@ -424,7 +422,7 @@ fn change_master_password(
     settings.master_password_hash = Some(new_hash);
     settings.master_password_salt = Some(base64::engine::general_purpose::STANDARD.encode(&salt));
     settings.remember_master_password = remember;
-    settings::save_settings(app.clone(), settings)?;
+    settings::save_security_settings(app.clone(), &settings)?;
 
     if remember {
         keychain::store_password(&new_password)?;
@@ -455,8 +453,7 @@ fn disable_master_password(
 
     let pw_secret =
         encryption::CredentialSecret::Password(zeroize::Zeroizing::new(current_password));
-    let store = encryption::load_encrypted_credentials(&app, &pw_secret)
-        .unwrap_or_else(|_| encryption::CredentialStore { credentials: Vec::new() });
+    let store = encryption::load_encrypted_credentials(&app, &pw_secret)?;
     let local_secret =
         encryption::CredentialSecret::LocalKey(encryption::load_or_create_local_key(&app)?);
     encryption::save_encrypted_credentials(&app, &store, &local_secret)?;
@@ -464,7 +461,7 @@ fn disable_master_password(
     settings.master_password_hash = None;
     settings.master_password_salt = None;
     settings.remember_master_password = false;
-    settings::save_settings(app.clone(), settings)?;
+    settings::save_security_settings(app.clone(), &settings)?;
     let _ = keychain::clear();
     master_state.clear();
     encryption::clear_kdf_cache();
@@ -493,7 +490,7 @@ fn set_remember_master_password(
         let _ = keychain::clear();
         settings.remember_master_password = false;
     }
-    settings::save_settings(app.clone(), settings)?;
+    settings::save_security_settings(app.clone(), &settings)?;
     Ok(())
 }
 
@@ -513,9 +510,9 @@ fn verify_master_password(
     let ok = encryption::verify_master_password(&password, &stored_hash)?;
     if ok {
         if remember && keychain::is_available() {
-            let _ = keychain::store_password(&password);
+            keychain::store_password(&password)?;
             settings.remember_master_password = true;
-            let _ = settings::save_settings(app.clone(), settings);
+            settings::save_security_settings(app.clone(), &settings)?;
         }
         master_state.set(password);
     }

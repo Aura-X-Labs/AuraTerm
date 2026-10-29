@@ -61,6 +61,24 @@ describe("inputBarHeight", () => {
     expect(normalizeAppSettings({ inputBarHeight: 0 }).inputBarHeight).toBe(0);
   });
 
+  describe("backend-owned security settings", () => {
+    it("does not round-trip encryption metadata from backend snapshots", () => {
+      const snapshot = {
+        fontSize: 22,
+        masterPasswordHash: "stale-hash",
+        masterPasswordSalt: "stale-salt",
+        credentialsInitialized: true,
+        rememberMasterPassword: true,
+      };
+      const normalized = normalizeAppSettings(snapshot);
+      expect(normalized.fontSize).toBe(22);
+      for (const key of ["masterPasswordHash", "masterPasswordSalt", "credentialsInitialized", "rememberMasterPassword"]) {
+        expect(normalized).not.toHaveProperty(key);
+        expect(DEFAULT_SETTINGS).not.toHaveProperty(key);
+      }
+    });
+  });
+
   it("falls back to the default for missing or unusable values", () => {
     expect(normalizeAppSettings({}).inputBarHeight).toBe(DEFAULT_INPUT_BAR_HEIGHT);
     // The backend stores `None` until the first save, which arrives as null.

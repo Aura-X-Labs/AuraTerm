@@ -442,6 +442,10 @@ fn settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
     let path = settings_path(&app)?;
+    read_settings(&path)
+}
+
+fn read_settings(path: &std::path::Path) -> Result<Settings, String> {
     if !path.exists() {
         return Ok(Settings::default());
     }
@@ -456,11 +460,30 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
 #[tauri::command]
 pub fn save_settings(app: AppHandle, mut settings: Settings) -> Result<(), String> {
     let _guard = SETTINGS_WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    // The backend owns the window bounds and records them as the window
-    // moves. Callers hand back the copy they loaded, which would roll the
-    // window back to wherever it was then.
-    settings.window_bounds = get_settings(app.clone()).ok().and_then(|saved| saved.window_bounds);
-    write_settings(&app, &settings)
+    save_settings_at(&settings_path(&app)?, &mut settings)
+}
+
+fn save_settings_at(path: &std::path::Path, settings: &mut Settings) -> Result<(), String> {
+    // Frontend snapshots must not roll back backend-owned state.
+    let saved = read_settings(path)?;
+    settings.window_bounds = saved.window_bounds.clone();
+    copy_security_fields(settings, &saved);
+    write_settings_at(path, settings)
+}
+
+fn copy_security_fields(target: &mut Settings, source: &Settings) {
+    target.master_password_hash = source.master_password_hash.clone();
+    target.master_password_salt = source.master_password_salt.clone();
+    target.credentials_initialized = source.credentials_initialized;
+    target.remember_master_password = source.remember_master_password;
+}
+
+/// Only backend password commands may change the encryption metadata.
+pub fn save_security_settings(app: AppHandle, security: &Settings) -> Result<(), String> {
+    let _guard = SETTINGS_WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut saved = get_settings(app.clone())?;
+    copy_security_fields(&mut saved, security);
+    write_settings(&app, &saved)
 }
 
 /// Serializes the read-modify-write saves above: cloud sync saves from a
@@ -477,6 +500,10 @@ pub fn save_window_bounds(app: &AppHandle, bounds: WindowBounds) -> Result<(), S
 
 fn write_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let path = settings_path(app)?;
+    write_settings_at(&path, settings)
+}
+
+fn write_settings_at(path: &std::path::Path, settings: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -504,6 +531,47 @@ mod tests {
     use super::Settings;
     use std::{collections::BTreeSet, fs, path::PathBuf};
     use serde_json::json;
+
+    #[test]
+    fn stale_settings_cannot_replace_backend_security_fields() {
+        let path = std::env::temp_dir().join(format!("auraterm-settings-{}.json", uuid::Uuid::new_v4()));
+        for enabled in [true, false] {
+            let saved = Settings {
+                master_password_hash: enabled.then(|| "new-hash".to_string()),
+                master_password_salt: enabled.then(|| "new-salt".to_string()),
+                credentials_initialized: true,
+                remember_master_password: enabled,
+                ..Settings::default()
+            };
+            super::write_settings_at(&path, &saved).unwrap();
+            let mut stale = Settings {
+                master_password_hash: (!enabled).then(|| "old-hash".to_string()),
+                master_password_salt: (!enabled).then(|| "old-salt".to_string()),
+                remember_master_password: !enabled,
+                font_size: 22,
+                ..Settings::default()
+            };
+            super::save_settings_at(&path, &mut stale).unwrap();
+            let actual = super::read_settings(&path).unwrap();
+            assert_eq!(actual.master_password_hash, saved.master_password_hash);
+            assert_eq!(actual.master_password_salt, saved.master_password_salt);
+            assert_eq!(actual.credentials_initialized, saved.credentials_initialized);
+            assert_eq!(actual.remember_master_password, saved.remember_master_password);
+            assert_eq!(actual.font_size, 22);
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn settings_save_preserves_unreadable_file() {
+        let path = std::env::temp_dir().join(format!("auraterm-settings-{}.json", uuid::Uuid::new_v4()));
+        fs::write(&path, "broken settings").unwrap();
+        let result = super::save_settings_at(&path, &mut Settings::default());
+        let contents = fs::read_to_string(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(result.is_err());
+        assert_eq!(contents, "broken settings");
+    }
 
     fn frontend_settings_ts_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -596,7 +664,10 @@ mod tests {
     #[test]
     fn settings_schema_keys_match_frontend_app_settings_interface() {
         let frontend_keys = load_frontend_app_settings_keys();
-        let backend_keys = serialized_settings_keys(&Settings::default());
+        let mut backend_keys = serialized_settings_keys(&Settings::default());
+        for key in ["masterPasswordHash", "masterPasswordSalt", "credentialsInitialized", "rememberMasterPassword"] {
+            backend_keys.remove(key);
+        }
 
         assert_eq!(backend_keys, frontend_keys);
     }
@@ -612,7 +683,11 @@ mod tests {
             .expect("round-tripped settings should serialize to JSON");
 
         assert_eq!(serialized, reserialized);
-        assert_eq!(reserialized.as_object().expect("round-trip JSON should be an object").keys().cloned().collect::<BTreeSet<_>>(), frontend_keys);
+        let mut keys = reserialized.as_object().expect("round-trip JSON should be an object").keys().cloned().collect::<BTreeSet<_>>();
+        for key in ["masterPasswordHash", "masterPasswordSalt", "credentialsInitialized", "rememberMasterPassword"] {
+            keys.remove(key);
+        }
+        assert_eq!(keys, frontend_keys);
         assert_eq!(reserialized["inputHistory"], json!([]));
         assert_eq!(reserialized["logFileNameTemplate"], json!("{session}_{timestamp}"));
     }
