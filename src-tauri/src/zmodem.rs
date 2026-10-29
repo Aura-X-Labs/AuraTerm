@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
 
@@ -11,6 +13,12 @@ const RECEIVE_SIGNATURE: &[u8] = b"**\x18B00";
 const SEND_SIGNATURE: &[u8] = b"**\x18B01";
 const PROGRESS_STEP: u64 = 64 * 1024;
 const MAX_BROWSER_UPLOAD: usize = 256 * 1024 * 1024;
+/// How long a transfer may go without a byte from the remote before it is
+/// abandoned. Both directions only advance when the remote answers, so this
+/// long a silence means it has died (sz/rz killed, link gone). Until then all
+/// output is fed to the transfer, so the terminal would otherwise stay blank.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -92,10 +100,26 @@ enum Transfer {
     Receiving(ReceiveTransfer),
 }
 
-#[derive(Default)]
 struct StreamSession {
     detector: Detector,
     transfer: Option<Transfer>,
+    /// When the transfer last started or heard from the remote.
+    last_activity: Instant,
+}
+
+impl Default for StreamSession {
+    fn default() -> Self {
+        Self { detector: Detector::default(), transfer: None, last_activity: Instant::now() }
+    }
+}
+
+impl Transfer {
+    fn direction(&self) -> Direction {
+        match self {
+            Transfer::AwaitingUpload { .. } | Transfer::Sending(_) => Direction::Upload,
+            Transfer::Receiving(_) => Direction::Download,
+        }
+    }
 }
 
 struct SendTransfer {
@@ -122,9 +146,59 @@ struct ReceiveTransfer {
 #[derive(Clone, Default)]
 pub struct ZmodemState {
     sessions: Arc<Mutex<HashMap<String, StreamSession>>>,
+    watchdog_started: Arc<AtomicBool>,
 }
 
 impl ZmodemState {
+    /// Start the idle sweep the first time a transfer begins.
+    fn ensure_watchdog(&self, app: &AppHandle) {
+        if self.watchdog_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let state = self.clone();
+        let app = app.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(IDLE_SWEEP_INTERVAL);
+            for (id, direction) in state.take_idle(Instant::now()) {
+                emit_event(
+                    &app,
+                    &id,
+                    direction,
+                    "failed",
+                    None,
+                    None,
+                    0,
+                    None,
+                    Some(format!(
+                        "No Zmodem data from the remote for {} seconds; transfer abandoned",
+                        IDLE_TIMEOUT.as_secs()
+                    )),
+                );
+            }
+        });
+    }
+
+    /// End every transfer that has been idle for [`IDLE_TIMEOUT`] as of `now`,
+    /// returning which ones so they can be reported.
+    fn take_idle(&self, now: Instant) -> Vec<(String, Direction)> {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return Vec::new();
+        };
+        let mut expired = Vec::new();
+        for (id, session) in sessions.iter_mut() {
+            let Some(transfer) = session.transfer.as_ref() else {
+                continue;
+            };
+            if now.saturating_duration_since(session.last_activity) < IDLE_TIMEOUT {
+                continue;
+            }
+            expired.push((id.clone(), transfer.direction()));
+            session.transfer = None;
+            session.detector.reset();
+        }
+        expired
+    }
+
     pub fn reset_session(&self, id: &str) {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.remove(id);
@@ -149,6 +223,8 @@ impl ZmodemState {
                 };
             };
             emit_event(app, id, direction, "detected", None, None, 0, None, None);
+            session.last_activity = Instant::now();
+            self.ensure_watchdog(app);
             match direction {
                 Direction::Upload => {
                     session.transfer = Some(Transfer::AwaitingUpload { wire: protocol });
@@ -199,6 +275,7 @@ impl ZmodemState {
             return ProcessedChunk { terminal, response };
         }
 
+        session.last_activity = Instant::now();
         match session.transfer.as_mut() {
             Some(Transfer::AwaitingUpload { wire }) => wire.extend_from_slice(bytes),
             Some(Transfer::Sending(transfer)) => transfer.wire.extend_from_slice(bytes),
@@ -256,6 +333,9 @@ impl ZmodemState {
             transferred: 0,
             last_reported: 0,
         }));
+        // Picking the file may have taken a while; the clock starts now.
+        session.last_activity = Instant::now();
+        self.ensure_watchdog(app);
         emit_event(
             app,
             id,
@@ -304,10 +384,10 @@ fn drive_transfer(app: &AppHandle, id: &str, session: &mut StreamSession) -> Vec
         _ => Ok(()),
     };
     if let Err(error) = result {
-        let direction = match session.transfer {
-            Some(Transfer::Sending(_)) | Some(Transfer::AwaitingUpload { .. }) => Direction::Upload,
-            _ => Direction::Download,
-        };
+        let direction = session
+            .transfer
+            .as_ref()
+            .map_or(Direction::Download, Transfer::direction);
         emit_event(
             app,
             id,
@@ -672,7 +752,46 @@ pub fn zmodem_cancel(app: AppHandle, state: tauri::State<'_, ZmodemState>, id: S
 mod tests {
     use super::{
         find_signature, longest_signature_prefix_suffix, safe_file_name, Detector, Direction,
+        StreamSession, Transfer, ZmodemState, IDLE_TIMEOUT,
     };
+    use std::time::{Duration, Instant};
+
+    fn awaiting_upload(last_activity: Instant) -> StreamSession {
+        StreamSession {
+            transfer: Some(Transfer::AwaitingUpload { wire: Vec::new() }),
+            last_activity,
+            ..StreamSession::default()
+        }
+    }
+
+    #[test]
+    fn a_transfer_the_remote_has_gone_quiet_on_is_abandoned() {
+        let state = ZmodemState::default();
+        let now = Instant::now();
+        {
+            let mut sessions = state.sessions.lock().unwrap();
+            sessions.insert("stalled".into(), awaiting_upload(now - IDLE_TIMEOUT - Duration::from_secs(1)));
+            sessions.insert("busy".into(), awaiting_upload(now - Duration::from_secs(5)));
+            // No transfer running: nothing to time out, however old.
+            sessions.insert("idle-shell".into(), StreamSession {
+                last_activity: now - IDLE_TIMEOUT * 10,
+                ..StreamSession::default()
+            });
+        }
+
+        let expired = state.take_idle(now);
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, "stalled");
+        assert!(matches!(expired[0].1, Direction::Upload));
+        let sessions = state.sessions.lock().unwrap();
+        // Output flows to the terminal again instead of into a dead transfer.
+        assert!(sessions["stalled"].transfer.is_none());
+        assert!(sessions["busy"].transfer.is_some());
+        drop(sessions);
+        // Reported once, not on every sweep.
+        assert!(state.take_idle(now).is_empty());
+    }
 
     #[test]
     fn detector_preserves_normal_output_and_split_signatures() {
