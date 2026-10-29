@@ -130,13 +130,7 @@ pub fn ai_set_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
     }
     let key = encryption::load_or_create_local_key(&app)?;
     let encrypted = encryption::encrypt_data(trimmed.as_bytes(), &key)?;
-    fs::write(&path, &encrypted).map_err(|e| format!("Failed to write AI API key: {}", e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::util::write_private_atomic(&path, &encrypted).map_err(|e| format!("Failed to write AI API key: {}", e))
 }
 
 #[tauri::command]

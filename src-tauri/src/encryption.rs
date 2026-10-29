@@ -96,6 +96,10 @@ pub fn load_or_create_local_key<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Zeroizing<[u8; 32]>, String> {
     let path = local_key_path(app)?;
+    // Two first-use callers racing would each generate a key, and whatever the
+    // loser encrypted could never be read again.
+    static CREATE: Mutex<()> = Mutex::new(());
+    let _guard = CREATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if path.exists() {
         let raw = Zeroizing::new(
@@ -116,15 +120,8 @@ pub fn load_or_create_local_key<R: tauri::Runtime>(
 
     let mut key = Zeroizing::new([0u8; 32]);
     rand::thread_rng().fill(&mut key[..]);
-    fs::write(&path, &key[..]).map_err(|e| format!("Failed to write local key: {}", e))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, permissions)
-            .map_err(|e| format!("Failed to set local key permissions: {}", e))?;
-    }
+    crate::util::write_private_atomic(&path, &key[..])
+        .map_err(|e| format!("Failed to write local key: {}", e))?;
 
     Ok(key)
 }
@@ -566,19 +563,9 @@ pub fn save_encrypted_credentials(
     let mut file_content = header.to_bytes();
     file_content.extend_from_slice(&encrypted_data);
 
-    fs::write(&credentials_path, &file_content)
-        .map_err(|e| format!("Failed to write credentials file: {}", e))?;
-
-    // 设置文件权限为 0600 (Unix)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&credentials_path, permissions)
-            .map_err(|e| format!("Failed to set file permissions: {}", e))?;
-    }
-
-    Ok(())
+    // 原子写入（临时文件 + fsync + rename，0600）：崩溃或断电不会留下写了一半的凭据库。
+    crate::util::write_private_atomic(&credentials_path, &file_content)
+        .map_err(|e| format!("Failed to write credentials file: {}", e))
 }
 
 /// 获取凭据文件路径

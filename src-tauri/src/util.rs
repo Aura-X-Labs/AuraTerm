@@ -89,6 +89,18 @@ impl Utf8StreamDecoder {
 /// truncated/corrupt file — important for frequently-rewritten state such as
 /// `settings.json` (workspace persistence) and `connections.json`.
 pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
+    write_atomic_bytes(path, content.as_bytes(), false)
+}
+
+/// [`write_atomic`] for secrets (credential store, device key, encrypted sync
+/// state): the temp file is created owner-only (0600 on unix) *before* any
+/// byte is written, so the data is never readable by others, not even while
+/// it is still being written.
+pub fn write_private_atomic(path: &Path, content: &[u8]) -> Result<(), String> {
+    write_atomic_bytes(path, content, true)
+}
+
+fn write_atomic_bytes(path: &Path, content: &[u8], private: bool) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Invalid file path (no parent): {}", path.display()))?;
@@ -103,21 +115,28 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
         .unwrap_or_default();
     let tmp_path = parent.join(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
 
-    let mut tmp_file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut tmp_file = options
         .open(&tmp_path)
         .map_err(|error| format!("Failed to open temp file: {error}"))?;
 
-    tmp_file
-        .write_all(content.as_bytes())
-        .map_err(|error| format!("Failed to write temp file: {error}"))?;
-    tmp_file
-        .sync_all()
-        .map_err(|error| format!("Failed to flush temp file: {error}"))?;
-
+    let written = tmp_file
+        .write_all(content)
+        .map_err(|error| format!("Failed to write temp file: {error}"))
+        .and_then(|()| tmp_file.sync_all().map_err(|error| format!("Failed to flush temp file: {error}")));
     drop(tmp_file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
 
     fs::rename(&tmp_path, path).map_err(|error| {
         let _ = fs::remove_file(&tmp_path);
@@ -889,5 +908,26 @@ mod tests {
         filter.push(&[IAC, DO, COM_PORT_OPTION]);
         filter.push(&subnegotiation(SET_DATASIZE + 100, &[7]));
         assert_eq!(filter.com_port().expect("com port").effective().data_bits, 7);
+    }
+
+    #[test]
+    fn private_atomic_write_replaces_the_file_owner_only_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("auraterm-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.enc");
+        std::fs::write(&path, b"old contents that are longer").unwrap();
+
+        super::write_private_atomic(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|e| e.file_name()).collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("secret.enc")]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

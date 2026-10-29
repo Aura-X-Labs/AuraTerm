@@ -174,16 +174,72 @@ fn sync_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join(SYNC_CONFIG_FILE))
 }
 
+/// What `sync_config.enc` holds.
+enum ConfigFile {
+    Missing,
+    Readable(SyncConfig),
+    /// Present, but it does not decrypt or parse (torn write, another
+    /// device's key, a newer format): the reason.
+    Unreadable(String),
+}
+
+/// Read the config at `path`. Only an I/O failure (or an unusable device key)
+/// is an error; a file that exists but cannot be opened is
+/// [`ConfigFile::Unreadable`], so callers can decide whether to recover.
+fn read_config_file(
+    path: &std::path::Path,
+    load_key: impl FnOnce() -> Result<Zeroizing<[u8; 32]>, String>,
+) -> Result<ConfigFile, String> {
+    if !path.exists() {
+        return Ok(ConfigFile::Missing);
+    }
+    let encrypted = fs::read(path).map_err(|e| format!("Failed to read sync config: {e}"))?;
+    let key = load_key()?;
+    let Ok(plaintext) = encryption::decrypt_data(&encrypted, &key).map(Zeroizing::new) else {
+        return Ok(ConfigFile::Unreadable("Sync config is corrupt or was written on another device".to_string()));
+    };
+    Ok(match serde_json::from_slice(&plaintext) {
+        Ok(config) => ConfigFile::Readable(config),
+        Err(e) => ConfigFile::Unreadable(format!("Failed to parse sync config: {e}")),
+    })
+}
+
+/// Move an unreadable config out of the way (kept beside it, never deleted),
+/// so the next write starts from a clean default.
+fn set_aside_unreadable_config(path: &std::path::Path) -> Result<(), String> {
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(".unreadable");
+    fs::rename(path, &aside).map_err(|e| format!("Failed to set aside the unreadable sync config: {e}"))
+}
+
 pub(crate) fn load_config(app: &AppHandle) -> Result<SyncConfig, String> {
     let path = sync_config_path(app)?;
-    if !path.exists() {
-        return Ok(SyncConfig::default());
+    match read_config_file(&path, || encryption::load_or_create_local_key(app))? {
+        ConfigFile::Missing => Ok(SyncConfig::default()),
+        ConfigFile::Readable(config) => migrate_loaded_config(app, config),
+        ConfigFile::Unreadable(reason) => Err(reason),
     }
-    let encrypted = fs::read(&path).map_err(|e| format!("Failed to read sync config: {e}"))?;
-    let key = encryption::load_or_create_local_key(app)?;
-    let plaintext =
-        Zeroizing::new(encryption::decrypt_data(&encrypted, &key).map_err(|_| "Sync config is corrupt or was written on another device".to_string())?);
-    let mut config: SyncConfig = serde_json::from_slice(&plaintext).map_err(|e| format!("Failed to parse sync config: {e}"))?;
+}
+
+/// [`load_config`] for signing in and out. Both replace the account anyway,
+/// so an unreadable config — whose credential nobody can use any more — must
+/// not lock the user out of either: it is set aside and replaced by a fresh
+/// default.
+fn load_config_for_account_change(app: &AppHandle) -> Result<SyncConfig, String> {
+    let path = sync_config_path(app)?;
+    match read_config_file(&path, || encryption::load_or_create_local_key(app))? {
+        ConfigFile::Missing => Ok(SyncConfig::default()),
+        ConfigFile::Readable(config) => migrate_loaded_config(app, config),
+        ConfigFile::Unreadable(reason) => {
+            crate::warn_log!("[cloud_sync] {reason}; setting it aside and starting over");
+            set_aside_unreadable_config(&path)?;
+            forget_base(app);
+            Ok(SyncConfig::default())
+        }
+    }
+}
+
+fn migrate_loaded_config(app: &AppHandle, mut config: SyncConfig) -> Result<SyncConfig, String> {
     let mut changed = migrate_legacy_auraxlab_config(&mut config);
     changed |= migrate_removed_providers(&mut config);
     if changed {
@@ -204,13 +260,7 @@ fn write_device_file(app: &AppHandle, path: &std::path::Path, plaintext: &[u8]) 
     }
     let key = encryption::load_or_create_local_key(app)?;
     let encrypted = encryption::encrypt_data(plaintext, &key)?;
-    fs::write(path, &encrypted).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::util::write_private_atomic(path, &encrypted)
 }
 
 fn sync_base_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -1646,8 +1696,16 @@ pub(crate) struct LocalSyncAccount {
     pub(crate) token: String,
 }
 
+/// `None` when signed out — and when the stored config cannot be read: its
+/// credential is unusable, so the account shows as signed out and signing in
+/// (or out) replaces the file.
 pub(crate) fn local_sync_account(app: &AppHandle) -> Result<Option<LocalSyncAccount>, String> {
-    let config = load_config(app)?;
+    let path = sync_config_path(app)?;
+    let config = match read_config_file(&path, || encryption::load_or_create_local_key(app))? {
+        ConfigFile::Missing => return Ok(None),
+        ConfigFile::Readable(config) => migrate_loaded_config(app, config)?,
+        ConfigFile::Unreadable(_) => return Ok(None),
+    };
     if !is_signed_in(&config) {
         return Ok(None);
     }
@@ -1663,7 +1721,7 @@ pub(crate) fn store_account_login(app: &AppHandle, subject: &str, email: &str, u
     if subject.trim().is_empty() || !token.starts_with("axsync_") {
         return Err("AuraXLab returned an invalid account credential.".to_string());
     }
-    let mut config = load_config(app)?;
+    let mut config = load_config_for_account_change(app)?;
     if config.auraxlab.account_subject != subject {
         // Another account's vault: nothing known about the old one applies.
         forget_remote(&mut config);
@@ -1680,7 +1738,7 @@ pub(crate) fn store_account_login(app: &AppHandle, subject: &str, email: &str, u
 }
 
 pub(crate) fn clear_account_login(app: &AppHandle) -> Result<(), String> {
-    let mut config = load_config(app)?;
+    let mut config = load_config_for_account_change(app)?;
     config.provider.clear();
     config.auraxlab.account_subject.clear();
     config.auraxlab.email.clear();
@@ -2017,6 +2075,35 @@ pub(crate) mod tests {
         config.provider = "auraxlab".into();
         assert!(!migrate_removed_providers(&mut config));
         assert!(!config.legacy_provider_notice);
+    }
+
+    #[test]
+    fn an_unreadable_sync_config_is_reported_and_can_be_set_aside() {
+        let dir = std::env::temp_dir().join(format!("auraterm-sync-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SYNC_CONFIG_FILE);
+        let key = || Ok(Zeroizing::new([7u8; 32]));
+
+        assert!(matches!(read_config_file(&path, key).unwrap(), ConfigFile::Missing));
+
+        let config = SyncConfig { provider: "auraxlab".into(), device_id: "dev".into(), ..Default::default() };
+        let encrypted = encryption::encrypt_data(&serde_json::to_vec(&config).unwrap(), &[7u8; 32]).unwrap();
+        crate::util::write_private_atomic(&path, &encrypted).unwrap();
+        match read_config_file(&path, key).unwrap() {
+            ConfigFile::Readable(read) => assert_eq!(read.device_id, "dev"),
+            _ => panic!("a config written with this device's key reads back"),
+        }
+
+        // A torn write, or a file this device's key cannot open.
+        fs::write(&path, &encrypted[..encrypted.len() / 2]).unwrap();
+        assert!(matches!(read_config_file(&path, key).unwrap(), ConfigFile::Unreadable(_)));
+        crate::util::write_private_atomic(&path, &encrypted).unwrap();
+        assert!(matches!(read_config_file(&path, || Ok(Zeroizing::new([8u8; 32]))).unwrap(), ConfigFile::Unreadable(_)));
+
+        set_aside_unreadable_config(&path).unwrap();
+        assert!(matches!(read_config_file(&path, key).unwrap(), ConfigFile::Missing));
+        assert_eq!(fs::read(dir.join("sync_config.enc.unreadable")).unwrap(), encrypted, "kept, not deleted");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
