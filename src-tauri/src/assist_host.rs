@@ -508,19 +508,75 @@ async fn stop_assist<R: tauri::Runtime>(
     let _ = app.emit("assist-changed", ());
     if tell_server {
         if let Some(device) = device {
-            let response = client
-                .delete(format!("{}/api/v1/auraterm/console/assist/sessions/{}", device.base_url, assist.assist_id))
-                .header("Authorization", format!("Bearer {}", device.credential))
-                .json(&json!({"reason": reason}))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            if !response.status().is_success() && response.status().as_u16() != 404 {
-                return Err(format!("Could not end remote assist: {}", response.status()));
+            if let Err(failure) = end_server_session(client, &device, &assist.assist_id, &reason).await {
+                if !failure.retryable {
+                    return Err(format!("Could not end remote assist: {}", failure.message));
+                }
+                // The local share is already gone, so the user has nothing
+                // left to retry with: keep telling the server until it
+                // hears us or the session would have expired anyway.
+                let deadline = assist.created_at + Duration::from_secs(assist.max_duration_seconds);
+                spawn_server_end_retry(client.clone(), device, assist.assist_id.clone(), reason, deadline);
+                return Err(format!(
+                    "Remote assist ended on this device, but AuraXLab could not be told yet ({}); retrying in the background.",
+                    failure.message
+                ));
             }
         }
     }
     Ok(())
+}
+
+/// First retry of a server-side end that failed; doubles up to the max.
+const END_RETRY_BASE: Duration = Duration::from_secs(2);
+const END_RETRY_MAX: Duration = Duration::from_secs(60);
+
+struct EndFailure {
+    message: String,
+    /// Network errors and server-side/transient statuses are worth another
+    /// try; a refusal (bad credential, malformed request) is not.
+    retryable: bool,
+}
+
+/// Tell AuraXLab the assist session is over (which also closes the
+/// guests' relay connections). A 404 means it already is.
+async fn end_server_session(client: &reqwest::Client, device: &DeviceConfig, assist_id: &str, reason: &str) -> Result<(), EndFailure> {
+    let response = client
+        .delete(format!("{}/api/v1/auraterm/console/assist/sessions/{}", device.base_url, assist_id))
+        .header("Authorization", format!("Bearer {}", device.credential))
+        .json(&json!({"reason": reason}))
+        .send()
+        .await
+        .map_err(|e| EndFailure { message: e.to_string(), retryable: true })?;
+    let status = response.status();
+    if status.is_success() || status.as_u16() == 404 {
+        return Ok(());
+    }
+    Err(EndFailure {
+        message: status.to_string(),
+        retryable: status.is_server_error() || matches!(status.as_u16(), 408 | 425 | 429),
+    })
+}
+
+fn spawn_server_end_retry(client: reqwest::Client, device: DeviceConfig, assist_id: String, reason: String, deadline: SystemTime) {
+    tauri::async_runtime::spawn(async move {
+        let mut delay = END_RETRY_BASE;
+        loop {
+            tokio::time::sleep(delay).await;
+            if SystemTime::now() >= deadline {
+                crate::warn_log!("[assist] gave up ending {assist_id} on the server: it has expired by now");
+                return;
+            }
+            match end_server_session(&client, &device, &assist_id, &reason).await {
+                Ok(()) => return,
+                Err(failure) if failure.retryable => delay = (delay * 2).min(END_RETRY_MAX),
+                Err(failure) => {
+                    crate::warn_log!("[assist] could not end {assist_id} on the server: {}", failure.message);
+                    return;
+                }
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -1789,6 +1845,48 @@ mod tests {
         assert_eq!(decode_hex("410d0a").unwrap(), b"A\r\n");
         assert!(decode_hex("41f").is_err());
         assert!(decode_hex("zz").is_err());
+    }
+
+    #[test]
+    fn a_failed_server_end_is_retried_in_the_background() {
+        // Fake AuraXLab whose first DELETE fails like a flaky network
+        // would; later ones succeed.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let deletes = Arc::new(Mutex::new(0_usize));
+        let deletes_seen = Arc::clone(&deletes);
+        std::thread::spawn(move || {
+            for request in server.incoming_requests() {
+                let status = if request.method() == &tiny_http::Method::Delete
+                    && request.url().ends_with("/assist/sessions/assist-test-1")
+                {
+                    let mut count = deletes_seen.lock().unwrap();
+                    *count += 1;
+                    if *count == 1 { 503 } else { 200 }
+                } else {
+                    404
+                };
+                let _ = request.respond(tiny_http::Response::from_string("{}").with_status_code(status));
+            }
+        });
+        tauri::async_runtime::block_on(async {
+            let h = harness_at(ControlPolicy::OnRequest, false, &base_url);
+            let handle = h.app.handle().clone();
+            let error = stop_assist(&h.state.client, &h.state.inner, &h.port, &handle, "host_ended".into(), true)
+                .await
+                .expect_err("the failed DELETE is reported");
+            assert!(error.contains("retrying"), "{error}");
+            // Locally the share is over at once: no output, no guests.
+            assert!(h.state.inner.lock().unwrap().assist.is_none());
+            // The server is told as soon as it is reachable again.
+            for _ in 0..100 {
+                if *deletes.lock().unwrap() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(*deletes.lock().unwrap(), 2, "the server end was not retried");
+        });
     }
 
     #[test]
