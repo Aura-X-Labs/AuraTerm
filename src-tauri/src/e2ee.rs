@@ -6,6 +6,15 @@
 //! into the AAD together with the session id, the relay connection id and the
 //! sender's direction label. The relay only ever sees `E2EE_FRAME` envelopes:
 //! it can drop or reorder them, but never read, forge or replay them.
+//!
+//! Receivers accept any counter strictly greater than the last one they
+//! accepted. The sender advances its counter before the frame is handed to
+//! the transport, so a send that fails leaves a gap; demanding `last + 1`
+//! would turn that one lost frame into a permanently wedged channel. A
+//! monotonic window keeps replay protection (nothing at or below the last
+//! accepted counter is ever accepted again) without that failure mode, and
+//! is wire-compatible with peers that still send strictly sequential
+//! counters.
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
@@ -82,8 +91,9 @@ impl PeerCipher {
     }
 
     /// Unwrap an envelope sent by the peer. `peer_direction` is *their*
-    /// label. Counters must arrive in strict order; anything else is treated
-    /// as a replay and rejected without advancing state.
+    /// label. The counter must be strictly greater than the last accepted
+    /// one (gaps from lost frames are fine); anything at or below it is
+    /// treated as a replay and rejected without advancing state.
     pub fn decrypt(
         &self,
         session_id: &str,
@@ -118,7 +128,7 @@ impl PeerCipher {
             .ok_or_else(|| "missing E2EE counter".to_string())?;
         {
             let counters = self.counters.lock().map_err(|e| e.to_string())?;
-            if counter != counters.received + 1 {
+            if counter <= counters.received {
                 return Err("replayed or out-of-order E2EE frame".into());
             }
         }
@@ -133,7 +143,13 @@ impl PeerCipher {
             )
             .map_err(|_| "E2EE authentication failed".to_string())?;
         let decoded = serde_json::from_slice(&plaintext).map_err(|_| "invalid E2EE payload".to_string())?;
-        self.counters.lock().map_err(|e| e.to_string())?.received = counter;
+        // Re-check under the lock: a concurrent decrypt of a later frame
+        // may have advanced the window while this one was being opened.
+        let mut counters = self.counters.lock().map_err(|e| e.to_string())?;
+        if counter <= counters.received {
+            return Err("replayed or out-of-order E2EE frame".into());
+        }
+        counters.received = counter;
         Ok(decoded)
     }
 }
@@ -158,6 +174,41 @@ mod tests {
         // Wrong connection id in AAD.
         let host3 = PeerCipher::new(key);
         assert!(host3.decrypt("s", "other", DIRECTION_GUEST, &envelope).is_err());
+    }
+
+    #[test]
+    fn a_lost_frame_does_not_wedge_the_channel() {
+        let key = [9_u8; 32];
+        let host = PeerCipher::new(key);
+        let guest = PeerCipher::new(key);
+        let first = guest.encrypt("s", "c", DIRECTION_HOST, &json!({"n": 1})).unwrap();
+        // Counter 2 never reaches the peer (the send failed after the
+        // counter advanced).
+        let lost = guest.encrypt("s", "c", DIRECTION_HOST, &json!({"n": 2})).unwrap();
+        let third = guest.encrypt("s", "c", DIRECTION_HOST, &json!({"n": 3})).unwrap();
+        let fourth = guest.encrypt("s", "c", DIRECTION_HOST, &json!({"n": 4})).unwrap();
+        assert_eq!(host.decrypt("s", "c", DIRECTION_HOST, &first).unwrap()["n"], 1);
+        assert_eq!(host.decrypt("s", "c", DIRECTION_HOST, &third).unwrap()["n"], 3);
+        assert_eq!(host.decrypt("s", "c", DIRECTION_HOST, &fourth).unwrap()["n"], 4);
+        // Still replay-safe: anything at or below the last accepted counter
+        // is refused, including the late arrival of the skipped frame.
+        assert!(host.decrypt("s", "c", DIRECTION_HOST, &lost).is_err());
+        assert!(host.decrypt("s", "c", DIRECTION_HOST, &third).is_err());
+        assert!(host.decrypt("s", "c", DIRECTION_HOST, &fourth).is_err());
+    }
+
+    #[test]
+    fn a_forged_counter_does_not_advance_state() {
+        let key = [3_u8; 32];
+        let host = PeerCipher::new(key);
+        let guest = PeerCipher::new(key);
+        let real = guest.encrypt("s", "c", DIRECTION_GUEST, &json!({"n": 1})).unwrap();
+        // The counter is bound into the AAD: bumping it on the wire breaks
+        // authentication and must not move the replay window forward.
+        let mut forged = real.clone();
+        forged["counter"] = json!(1_000_000);
+        assert!(host.decrypt("s", "c", DIRECTION_GUEST, &forged).is_err());
+        assert_eq!(host.decrypt("s", "c", DIRECTION_GUEST, &real).unwrap()["n"], 1);
     }
 }
 
