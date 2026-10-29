@@ -265,7 +265,11 @@ pub struct PortablePtyAdapter;
 
 struct PortablePtyHandle {
     master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Queue to the session's writer thread. A PTY write blocks once the
+    /// tty input queue is full, which happens as soon as a large paste meets
+    /// a foreground program that is not reading; it must not block the
+    /// caller, which holds the broker lock (and used to be the main thread).
+    input: mpsc::Sender<Vec<u8>>,
     child: Box<dyn Child + Send>,
     events: Option<mpsc::Receiver<TerminalEvent>>,
 }
@@ -309,12 +313,20 @@ impl LocalTerminalPort for PortablePtyAdapter {
             .map_err(|error| error.to_string())?;
         drop(pty_pair.slave);
 
-        let writer = Arc::new(Mutex::new(
-            pty_pair
-                .master
-                .take_writer()
-                .map_err(|error| error.to_string())?,
-        ));
+        let mut writer = pty_pair
+            .master
+            .take_writer()
+            .map_err(|error| error.to_string())?;
+        let (input, input_queue) = mpsc::channel::<Vec<u8>>();
+        // Ends when the handle (the only sender) is dropped, or when a write
+        // fails because the child is gone; later writes then report an error.
+        thread::spawn(move || {
+            while let Ok(chunk) = input_queue.recv() {
+                if writer.write_all(&chunk).and_then(|()| writer.flush()).is_err() {
+                    break;
+                }
+            }
+        });
         let mut reader = pty_pair
             .master
             .try_clone_reader()
@@ -347,7 +359,7 @@ impl LocalTerminalPort for PortablePtyAdapter {
 
         Ok(Box::new(PortablePtyHandle {
             master: pty_pair.master,
-            writer,
+            input,
             child,
             events: Some(receiver),
         }))
@@ -360,9 +372,9 @@ impl TerminalHandle for PortablePtyHandle {
     }
 
     fn write(&self, bytes: &[u8]) -> Result<(), TerminalError> {
-        let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
-        writer.write_all(bytes).map_err(|error| error.to_string())?;
-        writer.flush().map_err(|error| error.to_string())
+        self.input
+            .send(bytes.to_vec())
+            .map_err(|_| "PTY input is closed".to_string())
     }
 
     fn resize(&self, size: TerminalSize) -> Result<(), TerminalError> {
@@ -713,5 +725,53 @@ mod tests {
             }
         }
         assert!(saw_exit, "expected Exit after close");
+    }
+
+    /// A paste larger than the PTY input buffer, sent while the foreground
+    /// program is not reading, must not block the caller: the Tauri command
+    /// used to run on the main thread and froze every window.
+    #[cfg(unix)]
+    #[test]
+    fn input_does_not_block_when_the_program_is_not_reading() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("auraterm-pty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("never-reads.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let hub = Arc::new(TerminalEventHub::new());
+        let broker = Arc::new(PtyBroker::new(Box::new(PortablePtyAdapter), Arc::clone(&hub)));
+        broker
+            .open(OpenTerminalRequest {
+                session_id: "stuck".to_string(),
+                size: TerminalSize { cols: 80, rows: 24 },
+                shell_path: script.to_string_lossy().into_owned(),
+                cwd: None,
+            })
+            .unwrap();
+
+        // Far more than any tty input queue holds. Complete lines: canonical
+        // mode silently drops the excess of one over-long line instead.
+        let paste = b"# a comment line the stuck program never reads\n".repeat(32 * 1024);
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer_broker = Arc::clone(&broker);
+        thread::spawn(move || {
+            let result = writer_broker.input("stuck", LOCAL_OWNER, &paste, LOCAL_OWNER);
+            let _ = done_tx.send(result.map(|_| ()));
+        });
+        let outcome = done_rx.recv_timeout(Duration::from_secs(3));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(outcome, Ok(Ok(()))), "input blocked: {outcome:?}");
+
+        // Nor is anything else on the broker held up behind the paste.
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let closer = Arc::clone(&broker);
+        thread::spawn(move || {
+            let _ = closed_tx.send(closer.close("stuck", CloseReason::LocalRequest));
+        });
+        assert!(matches!(closed_rx.recv_timeout(Duration::from_secs(3)), Ok(Ok(()))));
+        assert!(!broker.contains("stuck"));
     }
 }
