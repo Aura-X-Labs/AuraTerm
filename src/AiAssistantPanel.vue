@@ -129,10 +129,15 @@ async function send() {
   messages.value.push({ role: "assistant", content: "", streaming: true });
   scrollToBottom();
 
+  // Known before the request starts, so stream events that beat the invoke's
+  // reply (an immediate failure) are not dropped as belonging to nobody.
+  const requestId = crypto.randomUUID();
+  activeRequestId.value = requestId;
   try {
     const system = terminalSystemPrompt({ os: props.env.os, shell: props.env.shell });
-    activeRequestId.value = await aiChatStart(history, system);
+    await aiChatStart(history, system, requestId);
   } catch (error) {
+    if (activeRequestId.value !== requestId) return;
     const current = messages.value[messages.value.length - 1];
     if (current) {
       current.streaming = false;

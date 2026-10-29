@@ -21,9 +21,19 @@ export interface AiStreamEventPayload {
   outputTokens?: number;
 }
 
-/** Start a streaming chat; resolves to the request id the events will carry. */
-export function aiChatStart(messages: AiChatMessage[], system?: string): Promise<string> {
-  return invoke<string>("ai_chat_start", { messages, system: system ?? null });
+/**
+ * Start a streaming chat whose events carry `requestId`; resolves to that id.
+ *
+ * The caller picks the id before starting so it can recognise events that
+ * arrive before this call resolves — a request that fails straight away
+ * reports its error before the invoke has returned.
+ */
+export function aiChatStart(
+  messages: AiChatMessage[],
+  system: string | undefined,
+  requestId: string,
+): Promise<string> {
+  return invoke<string>("ai_chat_start", { messages, system: system ?? null, requestId });
 }
 
 export function aiChatCancel(requestId: string): Promise<void> {
