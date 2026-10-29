@@ -43,7 +43,7 @@ pub(crate) struct DeviceConfig {
     boot_id: String,
     pub(crate) relay_connection: String,
     /// kid -> Ed25519 public key bytes (authority verification material).
-    authority_keys: HashMap<String, Vec<u8>>,
+    pub(crate) authority_keys: HashMap<String, Vec<u8>>,
 }
 
 /// On-disk form of the device identity (encrypted with the device-local
@@ -1169,7 +1169,18 @@ async fn process_inbound_frame(
         let Some(peer_public) = frame.get("peer_public_key").and_then(|v| v.as_str()) else {
             return;
         };
-        let role = frame.get("role").and_then(|v| v.as_str()).unwrap_or("shared_viewer").to_string();
+        // The relay routes this key; only the control plane may vouch for
+        // it. An unsigned or substituted key never gets a handshake, and the
+        // role comes from the signed claims rather than the frame.
+        let Ok(authorized) = crate::peer_key_auth::verify_e2ee_init(
+            &device.authority_keys,
+            &device.device_id,
+            &frame,
+            crate::peer_key_auth::unix_now(),
+        ) else {
+            return;
+        };
+        let role = authorized.role;
         let Ok((peer, agent_public)) = derive_peer_cipher(cloud_id, connection_id, peer_public) else {
             return;
         };
@@ -1844,7 +1855,7 @@ pub(crate) mod test_support {
             label: "Test Host".into(),
             boot_id: "boot-test".into(),
             relay_connection: "conn-test".into(),
-            authority_keys: HashMap::new(),
+            authority_keys: crate::peer_key_auth::test_support::authority_keys(),
         });
         guard.transport = Some(AgentTransport::Ws { outbound: tx });
         guard.want_online = true;
