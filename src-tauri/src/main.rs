@@ -219,8 +219,14 @@ fn attach_tauri_ui_adapter(
     });
 }
 
+// Opening a PTY (fork/exec; ConPTY setup on Windows) is async so Tauri runs it
+// off the main thread, where any stall freezes every window. Input, resize and
+// close stay synchronous: they only queue bytes for the session's writer
+// thread, make one ioctl or kill the child, so they never block, and
+// synchronous commands keep the order the frontend sent them in (async ones
+// run concurrently, so a close could otherwise land after the restart's open).
 #[command]
-fn start_pty(
+async fn start_pty(
     app: AppHandle,
     state: State<'_, AppState>,
     zmodem: State<'_, zmodem::ZmodemState>,
