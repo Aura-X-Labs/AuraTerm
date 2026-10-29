@@ -689,6 +689,9 @@ async fn set_role<R: tauri::Runtime>(
         if from_pending && !was_pending {
             return Err("Guest is no longer waiting for approval.".into());
         }
+        if was_pending && !from_pending {
+            return Err("Guest is still waiting for host approval.".into());
+        }
         let mut frames = Vec::new();
         let mut event = None;
         let granting = matches!(target, GuestState::Controller { .. });
@@ -994,7 +997,17 @@ async fn handle_guest_envelope<R: tauri::Runtime>(
     let Ok(inner_frame) = cipher.decrypt(assist_id, connection_id, DIRECTION_GUEST, frame) else {
         return;
     };
-    match inner_frame.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
+    let kind = inner_frame.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != "ASSIST_HELLO" {
+        let active = inner.lock().ok()
+            .and_then(|guard| guard.assist.as_ref()
+                .and_then(|assist| assist.guests.get(connection_id).map(|guest| guest.is_active())))
+            .unwrap_or(false);
+        if !active {
+            return;
+        }
+    }
+    match kind {
         "ASSIST_HELLO" => {
             let knock = {
                 let Ok(mut guard) = inner.lock() else { return };
@@ -1562,6 +1575,21 @@ mod tests {
             let cipher = h.join("guest-2", &secret).await.unwrap();
             let state = h.next_plain("guest-2", &cipher).await;
             assert_eq!(state["state"], "pending_approval");
+            let handle = h.app.handle().clone();
+            assert!(set_role(&h.state.client, &h.state.inner, &handle, "guest-2", GuestState::Viewer, false).await.is_err());
+            h.send_plain("guest-2", &cipher, json!({"kind": "ASSIST_HELLO", "client": "web", "display_name": "Pending"})).await;
+            h.send_plain("guest-2", &cipher, json!({"kind": "CONTROL_RELEASE"})).await;
+            h.send_plain("guest-2", &cipher, json!({"kind": "CONTROL_REQUEST"})).await;
+            h.send_plain("guest-2", &cipher, json!({"kind": "INPUT", "fence": 0, "input_seq": 1, "data_hex": "41"})).await;
+            {
+                let guard = h.state.inner.lock().unwrap();
+                let guest = &guard.assist.as_ref().unwrap().guests["guest-2"];
+                assert!(matches!(guest.state, GuestState::PendingApproval),
+                    "guest frames must not bypass host approval");
+                assert_eq!(guest.display_name, "Pending");
+                assert!(!guest.control_requested);
+            }
+            assert!(h.written.lock().unwrap().is_empty());
             // No snapshot and no output before approval.
             spawn_output_pump(h.state.client.clone(), Arc::clone(&h.state.inner), ASSIST_ID.into());
             h.hub.publish(LOCAL_ID, &TerminalEvent::Output(b"secret output".to_vec()));
