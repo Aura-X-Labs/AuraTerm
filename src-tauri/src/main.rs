@@ -22,6 +22,7 @@ mod cloud_bridge;
 mod distribution;
 mod e2ee;
 mod pake;
+mod peer_key_auth;
 mod assist;
 mod assist_host;
 mod assist_client;

@@ -7,10 +7,13 @@
 //! concurrency cap and kick. The server's stored policy copy only lets
 //! grant requests fail fast — every admission decision is taken *here*.
 //!
-//! Identity metadata flow: the relay data plane forwards nothing but the
-//! consumer's E2EE public key (E2EE_INIT), so the control plane pushes a
-//! `RELAY_GRANT_ISSUED` frame at grant time binding that key's hash to the
-//! consumer's device id and label. Phase 2 admits viewers only — the relay
+//! Identity metadata flow: the relay data plane forwards the consumer's
+//! E2EE public key in E2EE_INIT together with the control plane's signed
+//! authorization of it (`peer_key_auth`), which binds the key's hash to the
+//! session, this device, the relay role and the consumer's device id and
+//! label. A key without a valid authorization gets no handshake at all.
+//! The older `RELAY_GRANT_ISSUED` push carries the same metadata unsigned
+//! and is only a display fallback. Phase 2 admits viewers only — the relay
 //! itself refuses upstream frames from non-controller browsers, so a
 //! relay_viewer cannot even send INPUT (phase 3 territory).
 
@@ -19,6 +22,7 @@ use crate::cloud_bridge::{
     send_frame, sha256_hex, BridgeInner, CloudBridgeState, RemoteTxEvent, MAX_TX_BYTES,
 };
 use crate::e2ee::{sas_fingerprint, PeerCipher, DIRECTION_BROWSER};
+use crate::peer_key_auth::{unix_now, verify_e2ee_init};
 use crate::settings::LiveRelaySettings;
 use crate::shared_session::SharedSessionPort;
 use serde::{Deserialize, Serialize};
@@ -124,6 +128,11 @@ impl RelayProviderState {
     }
 }
 
+/// A peer label as the knock dialog may show it.
+fn display_label(label: &str) -> String {
+    label.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
 fn unix_seconds(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -207,7 +216,7 @@ pub(crate) async fn handle_frame<R: tauri::Runtime>(
             ) else {
                 return true;
             };
-            let label = frame.get("consumer_label").and_then(|v| v.as_str()).unwrap_or("");
+            let label = display_label(frame.get("consumer_label").and_then(|v| v.as_str()).unwrap_or(""));
             if let Ok(mut guard) = inner.lock() {
                 let now = SystemTime::now();
                 guard
@@ -218,7 +227,7 @@ pub(crate) async fn handle_frame<R: tauri::Runtime>(
                     key_hash.to_string(),
                     RelayGrantMeta {
                         consumer_device_id: consumer_id.to_string(),
-                        consumer_label: label.chars().filter(|c| !c.is_control()).take(64).collect(),
+                        consumer_label: label,
                         issued_at: now,
                     },
                 );
@@ -285,7 +294,6 @@ async fn handle_relay_init<R: tauri::Runtime>(
     app: &AppHandle<R>,
     frame: &serde_json::Value,
 ) {
-    let role = frame.get("role").and_then(|v| v.as_str()).unwrap_or("");
     let (Some(cloud_id), Some(connection_id), Some(peer_public)) = (
         frame.get("session_id").and_then(|v| v.as_str()),
         frame.get("connection_id").and_then(|v| v.as_str()),
@@ -316,6 +324,12 @@ async fn handle_relay_init<R: tauri::Runtime>(
         (device, share_label.unwrap_or_default(), policy, denial, grant)
     };
     let (device, share_label, policy, denial, grant) = admission;
+    // Only a key the control plane signed for this session, this device and
+    // this relay role is answered at all — before the handshake, so a key a
+    // compromised relay injected never even learns whether it was denied.
+    let Ok(authorized) = verify_e2ee_init(&device.authority_keys, &device.device_id, frame, unix_now()) else {
+        return;
+    };
 
     // Handshake: derive, prove our identity, answer with E2EE_READY.
     let Ok((cipher, agent_public)) = derive_peer_cipher(cloud_id, connection_id, peer_public) else {
@@ -346,12 +360,18 @@ async fn handle_relay_init<R: tauri::Runtime>(
         let _ = send_e2ee_frame(client, inner, cloud_id, connection_id, &cipher, &state).await;
         return;
     }
-    let (consumer_label, consumer_device_id) = grant
-        .map(|meta| (meta.consumer_label, meta.consumer_device_id))
-        .unwrap_or_default();
+    // Who is knocking: the signed claims when the server put them there,
+    // else the (unauthenticated, display-only) RELAY_GRANT_ISSUED hint.
+    let (consumer_label, consumer_device_id) = match authorized.consumer_device_id {
+        Some(id) => (display_label(authorized.consumer_label.as_deref().unwrap_or("")), id),
+        None => grant
+            .map(|meta| (meta.consumer_label, meta.consumer_device_id))
+            .unwrap_or_default(),
+    };
     // Only a relay_controller ticket can carry frames upstream at all; a
     // relay_viewer is refused by the relay, so never offer it the button.
-    let may_request_control = role == "relay_controller";
+    // The role is the signed one, so a relay cannot upgrade a viewer.
+    let may_request_control = authorized.role == "relay_controller";
 
     if policy.require_approval {
         let state = json!({"kind": "RELAY_STATE", "state": "pending_approval",
@@ -1057,6 +1077,7 @@ mod tests {
     use super::*;
     use crate::cloud_bridge::test_support::{install_fake_device, install_fake_share};
     use crate::e2ee::DIRECTION_AGENT;
+    use crate::peer_key_auth::test_support::{authorize, sign_claims};
     use crate::relay_client::derive_browser_cipher;
     use crate::shared_session::{SessionProtocol, SharedSessionPort, TxPolicy};
     use crate::terminal_event_hub::{SubscriptionToken, TerminalEvent, TerminalEventHub};
@@ -1089,6 +1110,8 @@ mod tests {
 
     const CLOUD_ID: &str = "cloud-session-1";
     const CONNECTION_ID: &str = "conn-relay-1";
+    /// The fake enrollment's device id (`install_fake_device`).
+    const DEVICE_ID: &str = "device-test";
 
     struct Harness {
         app: tauri::App<tauri::test::MockRuntime>,
@@ -1171,7 +1194,8 @@ mod tests {
                 harness.app.handle(),
                 &json!({"kind": "E2EE_INIT", "session_id": CLOUD_ID,
                         "connection_id": connection_id,
-                        "peer_public_key": own_public, "role": role}),
+                        "peer_public_key": own_public, "role": role,
+                        "peer_key_authorization": authorize(CLOUD_ID, DEVICE_ID, &own_public, role)}),
             )
             .await
         );
@@ -1224,6 +1248,100 @@ mod tests {
         cipher
             .decrypt(CLOUD_ID, connection_id, DIRECTION_AGENT, &envelope["frame"])
             .expect("decryptable envelope")
+    }
+
+    // ── viewer-key authorization (audit 2026-10-29) ───────────────────────
+
+    fn fresh_public_key() -> String {
+        let secret = EphemeralSecret::random(&mut rand::rngs::OsRng);
+        URL_SAFE_NO_PAD.encode(secret.public_key().to_encoded_point(false).as_bytes())
+    }
+
+    /// Push one E2EE_INIT and report whether the provider answered at all.
+    async fn offer(harness: &mut Harness, frame: serde_json::Value) -> bool {
+        assert!(
+            handle_frame(&reqwest::Client::new(), &harness.state.inner, &harness.port, harness.app.handle(), &frame).await,
+            "relay-role E2EE_INIT is always claimed by the provider"
+        );
+        let answered = harness.outbound.try_recv().is_ok();
+        let guard = harness.state.inner.lock().unwrap();
+        answered || !guard.relay.pending.is_empty() || !guard.relay.peers.is_empty()
+    }
+
+    /// A key the relay made up — unsigned, signed for someone else's key,
+    /// for another session or device, or past its lifetime — never gets
+    /// E2EE_READY, a denial, a knock or a peer slot.
+    #[test]
+    fn relay_injected_keys_get_no_handshake() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(false));
+            let key = fresh_public_key();
+            let base = json!({"kind": "E2EE_INIT", "session_id": CLOUD_ID,
+                              "connection_id": CONNECTION_ID,
+                              "peer_public_key": key, "role": "relay_viewer"});
+            let mut unsigned = base.clone();
+            unsigned["peer_key_authorization"] = json!(null);
+            let mut substituted = base.clone();
+            substituted["peer_key_authorization"] =
+                json!(authorize(CLOUD_ID, DEVICE_ID, &fresh_public_key(), "relay_viewer"));
+            let mut other_session = base.clone();
+            other_session["peer_key_authorization"] =
+                json!(authorize("cloud-session-2", DEVICE_ID, &key, "relay_viewer"));
+            let mut other_device = base.clone();
+            other_device["peer_key_authorization"] =
+                json!(authorize(CLOUD_ID, "device-other", &key, "relay_viewer"));
+            let mut expired = base.clone();
+            expired["peer_key_authorization"] = json!(sign_claims(&json!({
+                "session_id": CLOUD_ID, "device_id": DEVICE_ID,
+                "peer_key_hash": sha256_hex(&key), "role": "relay_viewer", "exp": 1})));
+            for (name, frame) in [("unsigned", unsigned), ("substituted", substituted),
+                                  ("other session", other_session), ("other device", other_device),
+                                  ("expired", expired)] {
+                assert!(!offer(&mut harness, frame).await, "{name} key must get no answer");
+            }
+            // The control check: the same key, properly signed, is answered.
+            let mut signed = base;
+            signed["peer_key_authorization"] = json!(authorize(CLOUD_ID, DEVICE_ID, &key, "relay_viewer"));
+            assert!(offer(&mut harness, signed).await);
+        });
+    }
+
+    /// A relay that rewrites relay_viewer to relay_controller in the frame
+    /// does not get a peer that may ask for control.
+    #[test]
+    fn relay_cannot_upgrade_a_viewer_to_controller() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(false));
+            let key = fresh_public_key();
+            let frame = json!({"kind": "E2EE_INIT", "session_id": CLOUD_ID,
+                               "connection_id": CONNECTION_ID, "peer_public_key": key,
+                               "role": "relay_controller",
+                               "peer_key_authorization": authorize(CLOUD_ID, DEVICE_ID, &key, "relay_viewer")});
+            assert!(!offer(&mut harness, frame).await);
+        });
+    }
+
+    /// The label shown in the knock dialog is the signed one; the plain
+    /// RELAY_GRANT_ISSUED hint (relay-forwarded) cannot override it.
+    #[test]
+    fn signed_peer_identity_outranks_the_grant_hint() {
+        tauri::async_runtime::block_on(async {
+            let mut harness = harness(enabled_policy(true));
+            let secret = EphemeralSecret::random(&mut rand::rngs::OsRng);
+            let key = URL_SAFE_NO_PAD.encode(secret.public_key().to_encoded_point(false).as_bytes());
+            let client = reqwest::Client::new();
+            handle_frame(&client, &harness.state.inner, &harness.port, harness.app.handle(),
+                &json!({"kind": "RELAY_GRANT_ISSUED", "session_id": CLOUD_ID,
+                        "peer_key_hash": sha256_hex(&key), "consumer_device_id": "device-evil",
+                        "consumer_label": "Your boss", "role": "relay_viewer"})).await;
+            assert!(offer(&mut harness, json!({"kind": "E2EE_INIT", "session_id": CLOUD_ID,
+                "connection_id": CONNECTION_ID, "peer_public_key": key, "role": "relay_viewer",
+                "peer_key_authorization": authorize(CLOUD_ID, DEVICE_ID, &key, "relay_viewer")})).await);
+            let guard = harness.state.inner.lock().unwrap();
+            let pending = guard.relay.pending.get(CONNECTION_ID).expect("knock is pending");
+            assert_eq!(pending.consumer_label, "Travel laptop");
+            assert_eq!(pending.consumer_device_id, "device-b");
+        });
     }
 
     #[test]
@@ -1619,7 +1737,8 @@ mod tests {
                 harness.app.handle(),
                 &json!({"kind": "E2EE_INIT", "session_id": CLOUD_ID,
                         "connection_id": "conn-relay-2",
-                        "peer_public_key": own_public, "role": "relay_viewer"}),
+                        "peer_public_key": own_public, "role": "relay_viewer",
+                        "peer_key_authorization": authorize(CLOUD_ID, DEVICE_ID, &own_public, "relay_viewer")}),
             )
             .await;
             let ready = harness.outbound.recv().await.unwrap();
