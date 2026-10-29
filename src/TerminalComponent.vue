@@ -1020,6 +1020,8 @@ onMounted(() => {
       unlistenSerialStatus?.();
       unlistenSerialReconnecting?.();
       unlistenZmodem?.();
+      unlistenAssistState?.();
+      unlistenAssistState = null;
       if (ptyId.value) {
         const id = ptyId.value;
         ptyId.value = null;
@@ -1030,6 +1032,27 @@ onMounted(() => {
     };
 
     onCleanup(cleanup);
+
+    // Assist and relay guests mirror the same state payload on their own
+    // channel. Returns false when the tab closed while the listener was
+    // registering, after releasing it, so the caller must not go on to join.
+    const listenGuestState = async (eventName: string): Promise<boolean> => {
+      unlistenAssistState?.();
+      unlistenAssistState = null;
+      const unlisten = await listen<AssistGuestView & { id: string }>(eventName, (event) => {
+        assistGuest.value = event.payload;
+        applyRemoteSize();
+        if (terminal) {
+          terminal.options.disableStdin = event.payload.role !== "controller";
+        }
+      });
+      if (disposed) {
+        unlisten();
+        return false;
+      }
+      unlistenAssistState = unlisten;
+      return true;
+    };
 
     const connect = async () => {
       if (!terminal) {
@@ -1232,14 +1255,9 @@ onMounted(() => {
           case "assist": {
             assistGuest.value = { state: "handshake", role: "viewer" };
             terminal.writeln(t("assist.guestJoining"));
-            unlistenAssistState?.();
-            unlistenAssistState = await listen<AssistGuestView & { id: string }>(`assist-client-state:${newId}`, (event) => {
-              assistGuest.value = event.payload;
-              applyRemoteSize();
-              if (terminal) {
-                terminal.options.disableStdin = event.payload.role !== "controller";
-              }
-            });
+            if (!(await listenGuestState(`assist-client-state:${newId}`))) {
+              return;
+            }
             const joined = await invoke<{ fingerprint: string }>("assist_join", {
               id: newId,
               code: session.assistConfig.code,
@@ -1249,18 +1267,12 @@ onMounted(() => {
             break;
           }
           case "relay": {
-            // Same shape as an assist guest: a remote-driven mirror. The
-            // backend emits the identical state payload on its own channel.
+            // Same shape as an assist guest: a remote-driven mirror.
             assistGuest.value = { state: "handshake", role: "viewer" };
             terminal.writeln(t("liveRelay.tabConnecting", { device: session.relayConfig.deviceLabel }));
-            unlistenAssistState?.();
-            unlistenAssistState = await listen<AssistGuestView & { id: string }>(`relay-client-state:${newId}`, (event) => {
-              assistGuest.value = event.payload;
-              applyRemoteSize();
-              if (terminal) {
-                terminal.options.disableStdin = event.payload.role !== "controller";
-              }
-            });
+            if (!(await listenGuestState(`relay-client-state:${newId}`))) {
+              return;
+            }
             const joined = await invoke<{ fingerprint: string }>("relay_connect", {
               id: newId,
               deviceId: session.relayConfig.deviceId,

@@ -99,6 +99,7 @@ const mockState = vi.hoisted(() => {
   const answerSshMfa = vi.fn(async () => undefined);
   const answerSshHostKeyMismatch = vi.fn(async () => undefined);
   const answerSshReconnectChoice = vi.fn(async () => undefined);
+  const invoke = vi.fn(async (_command: string, _args?: unknown): Promise<unknown> => undefined);
 
   const listen = vi.fn(async (eventName: string, handler: (event: { payload: unknown }) => void) => {
     const handlers = listeners.get(eventName) ?? [];
@@ -125,6 +126,7 @@ const mockState = vi.hoisted(() => {
     appendToLog,
     closeSession,
     emitEvent,
+    invoke,
     listen,
     listeners,
     persistUpdatedSshPassword,
@@ -164,6 +166,10 @@ vi.mock("@xterm/addon-web-links", () => ({
       mockState.webLinkHandlers.push(handler);
     }
   },
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: mockState.invoke,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -214,6 +220,7 @@ describe("TerminalComponent", () => {
     mockState.webLinkHandlers.length = 0;
     mockState.openExternalUrl.mockReset();
     mockState.listen.mockClear();
+    mockState.invoke.mockReset();
     mockState.startSshSession.mockClear();
     mockState.writeSessionInput.mockClear();
     mockState.resizeSession.mockClear();
@@ -578,5 +585,59 @@ describe("TerminalComponent", () => {
     expect(terminal.written.join("")).toContain("\x1b[38;2;0;255;0mREADY 7\x1b[0m");
     expect(mockState.writeSessionInput).toHaveBeenCalledWith("ssh-session-rule", "continue 7\n", session);
     wrapper.unmount();
+  });
+
+  describe.each([
+    ["assist", "assist-client-state", { protocol: "assist", assistConfig: { code: "BCDF-GHJK-LMNP" } }],
+    ["relay", "relay-client-state", {
+      protocol: "relay",
+      relayConfig: { deviceId: "device-1", sessionId: "cloud-1", deviceLabel: "Desk", shareLabel: "build" },
+    }],
+  ] as const)("%s guest tab", (_kind, stateEvent, session) => {
+    function mountGuest(sessionId: string) {
+      return mount(TerminalComponent, {
+        global: { plugins: [i18n] },
+        props: {
+          sessionId,
+          isVisible: true,
+          isFocused: true,
+          session: session as SessionConfig,
+          settings: DEFAULT_SETTINGS,
+        },
+      });
+    }
+
+    it("releases its state listener when the tab closes", async () => {
+      mockState.invoke.mockResolvedValue({ fingerprint: "ABCD-EFGH" });
+      const wrapper = mountGuest("guest-tab");
+      await flushPromises();
+      expect(mockState.listeners.get(`${stateEvent}:guest-tab`)).toHaveLength(1);
+      wrapper.unmount();
+      await flushPromises();
+      expect(mockState.listeners.get(`${stateEvent}:guest-tab`) ?? []).toHaveLength(0);
+    });
+
+    it("releases a state listener that registers after the tab closed", async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const plainListen = mockState.listen.getMockImplementation()!;
+      mockState.listen.mockImplementation(async (eventName, handler) => {
+        if (eventName.startsWith(`${stateEvent}:`)) await gate;
+        return plainListen(eventName, handler);
+      });
+      mockState.invoke.mockResolvedValue({ fingerprint: "ABCD-EFGH" });
+      try {
+        const wrapper = mountGuest("guest-slow");
+        await flushPromises();
+        wrapper.unmount();
+        release();
+        await flushPromises();
+        expect(mockState.listeners.get(`${stateEvent}:guest-slow`) ?? []).toHaveLength(0);
+        // The tab is gone: it must not go on to join.
+        expect(mockState.invoke).not.toHaveBeenCalled();
+      } finally {
+        mockState.listen.mockImplementation(plainListen);
+      }
+    });
   });
 });
