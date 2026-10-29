@@ -272,12 +272,9 @@ pub async fn ssh_start_tunnel(
                 );
             }
 
-            let forward_result = {
-                let guard = handle.lock().await;
-                guard
-                    .tcpip_forward(bind_address.clone(), spec.bind_port as u32)
-                    .await
-            };
+            let forward_result = handle
+                .tcpip_forward(bind_address.clone(), spec.bind_port as u32)
+                .await;
 
             match forward_result {
                 Ok(_) => {
@@ -317,8 +314,7 @@ pub async fn ssh_stop_tunnel(
 
     if runtime.tunnel_type == TunnelType::Remote {
         if let Some(handle) = ssh_state.handle(&session_id).await {
-            let guard = handle.lock().await;
-            let _ = guard
+            let _ = handle
                 .cancel_tcpip_forward(runtime.bind_address.clone(), runtime.bind_port as u32)
                 .await;
         }
@@ -476,17 +472,16 @@ async fn handle_forward_connection(
         }
     };
 
-    let channel = {
-        let guard = handle.lock().await;
-        guard
-            .channel_open_direct_tcpip(
-                target_host.clone(),
-                target_port as u32,
-                peer.ip().to_string(),
-                peer.port() as u32,
-            )
-            .await
-    };
+    // No lock around the open: the server may take minutes to confirm (or
+    // refuse) a target it cannot reach, and other channels must not wait on it.
+    let channel = handle
+        .channel_open_direct_tcpip(
+            target_host.clone(),
+            target_port as u32,
+            peer.ip().to_string(),
+            peer.port() as u32,
+        )
+        .await;
 
     let channel = match channel {
         Ok(channel) => channel,

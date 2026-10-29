@@ -12,9 +12,14 @@ use std::sync::{
     Arc,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
 
-type SharedSshHandle = Arc<Mutex<client::Handle<known_hosts::ClientHandler>>>;
+/// The russh handle for one connection. Every post-authentication method on
+/// `client::Handle` takes `&self` and waits on its own reply channel, so the
+/// handle is shared without a lock: a channel open that the server is slow to
+/// confirm (a SOCKS target that never answers) must not stall every other
+/// tunnel, SFTP request and PTY on the same connection.
+type SharedSshHandle = Arc<client::Handle<known_hosts::ClientHandler>>;
 type LocalAgentStream = Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin + 'static>;
 pub(super) const SSH_TRANSFER_PROGRESS_EVENT: &str = "ssh-transfer-progress";
 pub(super) const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
@@ -53,6 +58,8 @@ mod transfer;
 mod forwarding;
 mod probe;
 mod key_file;
+#[cfg(test)]
+mod test_support;
 
 // Types consumed externally (`main.rs`, frontend payloads) are re-exported at
 // the module root. A few of them (`SshHostKeyMismatchPromptPayload`,
@@ -433,7 +440,7 @@ async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) {
         // The IO task owns another handle/channel reference. Removing the
         // record alone cannot close it; disconnect also wakes channel.wait().
         if let Some(handle) = session.handle {
-            if let Err(error) = handle.lock().await
+            if let Err(error) = handle
                 .disconnect(russh::Disconnect::ByApplication, "Session closed", "en").await
             {
                 crate::warn_log!("[ssh] {} disconnect failed: {}", id, error);
@@ -474,8 +481,7 @@ async fn open_ssh_channel(
     id: &str,
 ) -> Result<russh::Channel<client::Msg>, String> {
     let handle = get_ssh_handle(state, id).await?;
-    let guard = handle.lock().await;
-    guard
+    handle
         .channel_open_session()
         .await
         .map_err(|error| format!("Failed to open SSH channel: {error}"))
@@ -669,8 +675,7 @@ pub async fn close_ssh_pty(
             if let Ok(handle) = get_ssh_handle(state.inner(), &id).await {
                 // Best-effort: open a channel, run the kill command, ignore errors.
                 let _ = async {
-                    let guard = handle.lock().await;
-                    let channel = guard.channel_open_session().await?;
+                    let channel = handle.channel_open_session().await?;
                     channel.exec(true, cmd).await?;
                     // Drain until EOF so the server has time to process the command.
                     let mut ch = channel;
@@ -745,7 +750,7 @@ fn authenticate_ssh(
         )
         .await
         .map_err(|error| format!("ProxyJump {}@{}:{}: {error}", jump.user, jump.host, jump.port))?;
-        current = Some(Arc::new(Mutex::new(session)));
+        current = Some(Arc::new(session));
     }
 
     let (mut session, observed) = if let Some(previous) = current.as_ref() {
@@ -784,7 +789,7 @@ fn authenticate_ssh(
     )
     .await?;
 
-    Ok(Arc::new(Mutex::new(session)))
+    Ok(Arc::new(session))
     })
 }
 
@@ -793,8 +798,7 @@ async fn open_proxy_channel(
     host: String,
     port: u16,
 ) -> Result<russh::Channel<client::Msg>, String> {
-    let guard = handle.lock().await;
-    guard
+    handle
         .channel_open_direct_tcpip(host.clone(), port.into(), "127.0.0.1".to_string(), 0)
         .await
         .map_err(|error| format!("ProxyJump channel to {host}:{port} failed: {error}"))
@@ -1055,18 +1059,14 @@ async fn reissue_remote_forwards(
     if binds.is_empty() {
         return;
     }
-    let guard = handle.lock().await;
     for (bind_address, bind_port) in binds {
-        let _ = guard.tcpip_forward(bind_address, bind_port).await;
+        let _ = handle.tcpip_forward(bind_address, bind_port).await;
     }
 }
 
 /// Check whether a command exists on the remote host.
 async fn run_remote_command_capture(handle: SharedSshHandle, command: String) -> Result<String, String> {
-    let Ok(channel) = ({
-        let guard = handle.lock().await;
-        guard.channel_open_session().await
-    }) else {
+    let Ok(channel) = handle.channel_open_session().await else {
         return Err("Failed to open remote command channel".to_string());
     };
 
@@ -1210,12 +1210,10 @@ async fn open_pty_channel(
     reconnect_type: Option<ReconnectType>,
     agent_forwarding: bool,
 ) -> Result<(russh::Channel<client::Msg>, bool), String> {
-    let guard = handle.lock().await;
-    let channel = guard
+    let channel = handle
         .channel_open_session()
         .await
         .map_err(|error| format!("Channel error: {error}"))?;
-    drop(guard);
 
     channel
         .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
@@ -2042,7 +2040,7 @@ async fn run_channel_io_loop(
     if let Err(error) = channel.close().await {
         crate::warn_log!("[ssh] {} channel close failed: {}", id, error);
     }
-    if let Err(error) = handle.lock().await
+    if let Err(error) = handle
         .disconnect(russh::Disconnect::ByApplication, "PTY closed", "en").await
     {
         crate::warn_log!("[ssh] {} transport close failed: {}", id, error);
@@ -2202,7 +2200,7 @@ mod tests {
         assert!(client.authenticate_none("test").await.unwrap().success());
         let channel = client.channel_open_session().await.unwrap();
         channel.request_shell(true).await.unwrap();
-        let handle = Arc::new(Mutex::new(client));
+        let handle = Arc::new(client);
         let state = SshState::new(Arc::new(crate::terminal_event_hub::TerminalEventHub::default()));
         let (input_tx, _input_rx) = mpsc::channel(1);
         state.upsert_session("manual", |s| {
@@ -2219,6 +2217,70 @@ mod tests {
         assert!(ended.is_ok(), "closing a Manual tab must end the remote SSH connection");
         assert!(!state.contains("manual").await);
         drop(channel);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_channel_open_does_not_block_other_channels() {
+        use super::*;
+        use russh::{server, Channel};
+        use std::time::Duration;
+
+        /// Accepts session channels at once but never answers a direct-tcpip
+        /// open, like a server whose SOCKS target silently drops SYNs.
+        struct Server {
+            parked: Vec<server::ChannelOpenHandle>,
+        }
+        impl server::Handler for Server {
+            type Error = russh::Error;
+
+            async fn auth_none(&mut self, _: &str) -> Result<server::Auth, Self::Error> {
+                Ok(server::Auth::Accept)
+            }
+
+            async fn channel_open_session(
+                &mut self,
+                _: Channel<server::Msg>,
+                reply: server::ChannelOpenHandle,
+                _: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                reply.accept().await;
+                Ok(())
+            }
+
+            async fn channel_open_direct_tcpip(
+                &mut self,
+                _: Channel<server::Msg>,
+                _: &str,
+                _: u32,
+                _: &str,
+                _: u32,
+                reply: server::ChannelOpenHandle,
+                _: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                self.parked.push(reply);
+                Ok(())
+            }
+        }
+
+        let (address, server) = test_support::spawn_server(Server { parked: Vec::new() }).await;
+        let mut client = test_support::connect(address).await;
+        assert!(client.authenticate_none("test").await.unwrap().success());
+        let handle: SharedSshHandle = Arc::new(client);
+        let state = SshState::default();
+        state.upsert_session("tab", |s| s.handle = Some(handle.clone())).await;
+
+        let stalled = tokio::spawn(open_proxy_channel(handle.clone(), "10.255.255.1".to_string(), 9));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!stalled.is_finished(), "the test server must keep the open pending");
+
+        let session = tokio::time::timeout(Duration::from_secs(2), open_ssh_channel(&state, "tab")).await;
+        assert!(
+            matches!(session, Ok(Ok(_))),
+            "a pending direct-tcpip open must not hold up an SFTP/session channel"
+        );
+
+        stalled.abort();
+        server.abort();
     }
 
     #[test]
