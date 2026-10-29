@@ -39,6 +39,13 @@ use tokio_tungstenite::tungstenite::Message;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound on one INPUT frame's payload; larger writes are dropped.
 pub const MAX_INPUT_BYTES: usize = 16 * 1024;
+/// Peer frames in a row that may fail to decrypt before the tab gives up
+/// with a visible error. A lone bad frame (a relay hiccup, a stale replay)
+/// is skipped; a run of them means the channel is unusable, and a tab that
+/// silently stops updating is worse than one that says so.
+pub const MAX_CONSECUTIVE_DECRYPT_FAILURES: u32 = 8;
+/// End reason reported when [`MAX_CONSECUTIVE_DECRYPT_FAILURES`] is hit.
+pub const DECRYPT_FAILED_REASON: &str = "decryption_failed";
 
 pub type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
@@ -450,6 +457,7 @@ fn spawn_reader_task<R: tauri::Runtime>(
         // Set when the peer ends the tab on purpose; a transport drop
         // leaves it false, which is the only case worth reconnecting after.
         let mut deliberate = false;
+        let mut decrypt_failures = 0_u32;
         let emit_state = |event: TabStateEvent| {
             let _ = app.emit(&util::session_event(state_event, &event.id), event);
         };
@@ -477,8 +485,22 @@ fn spawn_reader_task<R: tauri::Runtime>(
                 Some("E2EE_FRAME") => {}
                 _ => continue,
             }
-            let Ok(inner) = cipher.decrypt(&scope_id, &connection_id, protocol.peer_direction, &frame) else {
-                continue;
+            let inner = match cipher.decrypt(&scope_id, &connection_id, protocol.peer_direction, &frame) {
+                Ok(inner) => {
+                    decrypt_failures = 0;
+                    inner
+                }
+                Err(error) => {
+                    decrypt_failures += 1;
+                    crate::warn_log!("[remote-tab] {id}: dropped undecryptable peer frame ({decrypt_failures}): {error}");
+                    if decrypt_failures >= MAX_CONSECUTIVE_DECRYPT_FAILURES {
+                        // Not deliberate: a fresh admission brings a fresh
+                        // key, so a caller that reconnects may recover.
+                        end_reason = DECRYPT_FAILED_REASON.to_string();
+                        break;
+                    }
+                    continue;
+                }
             };
             let kind = inner.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             let class = (protocol.classify)(kind);
@@ -650,5 +672,118 @@ mod tests {
         assert_eq!(encode_hex(b"ls\n"), "6c730a");
         assert_eq!(decode_hex("6c730a"), b"ls\n");
         assert!(decode_hex("abc").is_empty());
+    }
+
+    // ── reader loop against an in-process fake relay ──────────────────────
+
+    use crate::e2ee::{DIRECTION_GUEST, DIRECTION_HOST};
+    use tokio::net::TcpListener;
+
+    static TEST_PROTOCOL: TabProtocol = TabProtocol {
+        state_event: "test-remote-state",
+        own_direction: DIRECTION_GUEST,
+        peer_direction: DIRECTION_HOST,
+        ended_message: "Test ended",
+        default_end_reason: "host_ended",
+        classify: |kind| match kind {
+            "STATE" => FrameClass::PeerState,
+            "OUTPUT" => FrameClass::Output,
+            "END" => FrameClass::SessionEnd,
+            _ => FrameClass::Ignore,
+        },
+    };
+
+    const SCOPE: &str = "scope-1";
+    const CONNECTION: &str = "conn-1";
+
+    /// Relay that admits one connection, sends `frames`, then forwards
+    /// whatever the tab sends to `received` until the tab hangs up.
+    async fn fake_relay(
+        frames: Vec<serde_json::Value>,
+        received: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tauri::async_runtime::spawn(async move {
+            let Ok((tcp, _)) = listener.accept().await else { return };
+            let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+            let (mut sink, mut stream) = ws.split();
+            let Some(Ok(Message::Text(_auth))) = stream.next().await else { return };
+            let _ = sink
+                .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": CONNECTION}).to_string().into()))
+                .await;
+            for frame in frames {
+                let _ = sink.send(Message::Text(frame.to_string().into())).await;
+            }
+            while let Some(Ok(message)) = stream.next().await {
+                if let Message::Text(text) = message {
+                    if let Ok(value) = serde_json::from_str(&text) {
+                        let _ = received.send(value);
+                    }
+                }
+            }
+        });
+        url
+    }
+
+    /// Admit tab `id` through `url` and return how its reader ended.
+    async fn attach(
+        tabs: &RemoteTabs,
+        app: &tauri::App<tauri::test::MockRuntime>,
+        url: &str,
+        key: [u8; 32],
+    ) -> tokio::sync::oneshot::Receiver<TabEnd> {
+        let admission = connect_relay(url, "ticket").await.unwrap();
+        tabs.insert("tab", SCOPE, &admission.connection_id, PeerCipher::new(key), admission.outbound);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tabs.spawn_reader_with_end(app.handle().clone(), "tab".into(), "FP".into(), admission.stream, Some(tx));
+        rx
+    }
+
+    async fn ended(rx: tokio::sync::oneshot::Receiver<TabEnd>) -> TabEnd {
+        tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("reader ends within 5s")
+            .expect("reader reports its ending")
+    }
+
+    #[test]
+    fn reader_survives_a_lost_frame() {
+        tauri::async_runtime::block_on(async {
+            let key = [1_u8; 32];
+            let host = PeerCipher::new(key);
+            let mut frames = Vec::new();
+            frames.push(host.encrypt(SCOPE, CONNECTION, DIRECTION_HOST, &json!({"kind": "OUTPUT", "data_hex": "41"})).unwrap());
+            // The host's send of this frame failed after its counter moved.
+            let _lost = host.encrypt(SCOPE, CONNECTION, DIRECTION_HOST, &json!({"kind": "OUTPUT", "data_hex": "42"})).unwrap();
+            frames.push(host.encrypt(SCOPE, CONNECTION, DIRECTION_HOST, &json!({"kind": "END", "reason": "after_gap"})).unwrap());
+            let (received, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let url = fake_relay(frames, received).await;
+            let app = tauri::test::mock_app();
+            let tabs = RemoteTabs::new(&TEST_PROTOCOL);
+            let end = ended(attach(&tabs, &app, &url, key).await).await;
+            assert_eq!(end.reason, "after_gap");
+            assert!(end.deliberate);
+        });
+    }
+
+    #[test]
+    fn persistent_decryption_failure_ends_the_tab_visibly() {
+        tauri::async_runtime::block_on(async {
+            // Every frame is sealed with a key the tab does not hold.
+            let wrong = PeerCipher::new([2_u8; 32]);
+            let frames = (0..MAX_CONSECUTIVE_DECRYPT_FAILURES)
+                .map(|_| wrong.encrypt(SCOPE, CONNECTION, DIRECTION_HOST, &json!({"kind": "OUTPUT", "data_hex": "41"})).unwrap())
+                .collect();
+            let (received, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let url = fake_relay(frames, received).await;
+            let app = tauri::test::mock_app();
+            let tabs = RemoteTabs::new(&TEST_PROTOCOL);
+            let end = ended(attach(&tabs, &app, &url, [1_u8; 32]).await).await;
+            assert_eq!(end.reason, DECRYPT_FAILED_REASON);
+            // A transport-level failure: a reconnecting caller may retry.
+            assert!(!end.deliberate);
+            assert!(!tabs.contains("tab"));
+        });
     }
 }
