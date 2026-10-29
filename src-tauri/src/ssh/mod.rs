@@ -3,7 +3,7 @@ use russh::{
     keys::{
         agent::{client::AgentClient, AgentIdentity}, decode_secret_key, PrivateKeyWithHashAlg,
     },
-    ChannelMsg,
+    ChannelMsg, MethodKind,
 };
 
 use std::collections::HashMap;
@@ -921,41 +921,112 @@ fn authenticate_connected_session<'a>(
     let private_key = private_key.filter(|value| !value.trim().is_empty());
     let method = effective_auth_method(auth_type, &password, &private_key);
 
-    let interactive = match method.as_str() {
+    // Decode up front: a key that will not decode is a local problem and must
+    // not cost a round trip (or a retry).
+    let decoded_key = match method.as_str() {
         "key" => {
-            let key = private_key.ok_or_else(|| ConnectError::terminal("Private key is required"))?;
+            let key = private_key.as_deref().ok_or_else(|| ConnectError::terminal("Private key is required"))?;
             // A wrong or missing passphrase fails identically on every retry.
-            let decoded = decode_private_key(&key, passphrase.as_deref()).map_err(ConnectError::terminal)?;
-            match authenticate_with_decoded_key(&mut session, user.clone(), Arc::new(decoded)).await? {
-                client::AuthResult::Success => None,
-                client::AuthResult::Failure { .. } => {
-                    return Err(ConnectError::terminal("Private key authentication failed"))
-                }
-            }
+            Some(Arc::new(decode_private_key(key, passphrase.as_deref()).map_err(ConnectError::terminal)?))
         }
-        "agent" => {
-            return authenticate_with_agent(session, user).await;
-        }
-        "password" => {
-            let password = password.ok_or_else(|| ConnectError::terminal("Password is required"))?;
-            match session.authenticate_password(user.clone(), password).await {
-                Ok(client::AuthResult::Success) => None,
-                Ok(client::AuthResult::Failure { .. }) => {
-                    Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await)
-                }
-                Err(error) => return Err(format!("Password auth error: {error}").into()),
-            }
-        }
-        "none" => Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await),
+        "password" if password.is_none() => return Err(ConnectError::terminal("Password is required")),
+        "agent" | "password" | "none" => None,
         other => return Err(ConnectError::terminal(format!("Unsupported SSH auth type: {other}"))),
     };
 
-    if let Some(result) = interactive {
-        run_keyboard_interactive(&mut session, result, prompts, auth_response_rx).await?;
+    // Factors the server already accepted (`partial_success`), and whether
+    // keyboard-interactive was tried at all.
+    let mut accepted = Vec::<MethodKind>::new();
+    let mut tried_interactive = false;
+    let mut step = match method.as_str() {
+        "key" => MethodKind::PublicKey,
+        "agent" => MethodKind::PublicKey,
+        "password" => MethodKind::Password,
+        _ => MethodKind::KeyboardInteractive,
+    };
+    // Each round answers one factor; a server asking for more than a few
+    // (publickey, then password, then OTP) is not one we can satisfy anyway.
+    for _ in 0..4 {
+        tried_interactive |= step == MethodKind::KeyboardInteractive;
+        let result = match step {
+            MethodKind::PublicKey => match &decoded_key {
+                Some(key) => authenticate_with_decoded_key(&mut session, user.clone(), key.clone()).await?,
+                None => match try_agent_identities(&mut session, &user).await {
+                    Ok(result) => result,
+                    // No agent, or an empty one: retrying every 5 s will not start one.
+                    Err(AgentAuthError::Unavailable(message)) => return Err(ConnectError::terminal(message)),
+                    Err(error) => return Err(error.into_message().into()),
+                },
+            },
+            MethodKind::Password => {
+                let password = password.clone().unwrap_or_default();
+                session
+                    .authenticate_password(user.clone(), password)
+                    .await
+                    .map_err(|error| format!("Password auth error: {error}"))?
+            }
+            _ => {
+                let started = session.authenticate_keyboard_interactive_start(user.clone(), None).await;
+                run_keyboard_interactive(&mut session, started, prompts, auth_response_rx).await?
+            }
+        };
+
+        let (remaining, partial_success) = match result {
+            client::AuthResult::Success => return Ok(session),
+            client::AuthResult::Failure { remaining_methods, partial_success } => (remaining_methods, partial_success),
+        };
+
+        step = if partial_success {
+            // This factor was accepted and the server wants another one, e.g.
+            // publickey followed by a keyboard-interactive OTP.
+            accepted.push(step);
+            match next_auth_factor(&remaining, &accepted, decoded_key.is_some() || method == "agent", password.is_some()) {
+                Some(next) => next,
+                None => {
+                    let offered = remaining.iter().map(|kind| <&str>::from(kind)).collect::<Vec<_>>().join(", ");
+                    return Err(ConnectError::terminal(format!(
+                        "The server requires another authentication step ({offered}) that this connection cannot provide"
+                    )));
+                }
+            }
+        } else if step == MethodKind::Password && !tried_interactive {
+            // Many servers reject the plain password method but take the same
+            // password (or an OTP) through keyboard-interactive.
+            MethodKind::KeyboardInteractive
+        } else {
+            return Err(ConnectError::terminal(match (step, method.as_str()) {
+                (MethodKind::PublicKey, "agent") => "SSH agent authentication failed for every identity",
+                (MethodKind::PublicKey, _) => "Private key authentication failed",
+                _ => "Authentication failed",
+            }));
+        };
     }
-    Ok(session)
+    Err(ConnectError::terminal("Authentication failed: too many authentication steps"))
     })
 }
+
+/// After a factor was accepted with `partial_success`, pick the next method
+/// the server still offers and this connection can answer, without repeating
+/// one that already passed. A method that was *rejected* earlier may be tried
+/// again: with `AuthenticationMethods keyboard-interactive,password` the
+/// password is refused until the OTP step is done. Keyboard-interactive comes
+/// first: it is how OTPs and most second factors are asked for.
+fn next_auth_factor(
+    remaining: &[MethodKind],
+    accepted: &[MethodKind],
+    has_public_key: bool,
+    has_password: bool,
+) -> Option<MethodKind> {
+    [
+        (MethodKind::KeyboardInteractive, true),
+        (MethodKind::Password, has_password),
+        (MethodKind::PublicKey, has_public_key),
+    ]
+    .into_iter()
+    .find(|(kind, available)| *available && remaining.contains(kind) && !accepted.contains(kind))
+    .map(|(kind, _)| kind)
+}
+
 
 /// The auth method to use when the caller did not name one: a key beats a
 /// password beats keyboard-interactive. Expects blank values already dropped.
@@ -1060,35 +1131,18 @@ fn try_agent_identities<'a>(
     })
 }
 
-fn authenticate_with_agent(
-    mut session: client::Handle<known_hosts::ClientHandler>,
-    user: String,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, ConnectError>> + Send>> {
-    Box::pin(async move {
-    match try_agent_identities(&mut session, &user).await {
-        Ok(client::AuthResult::Success) => Ok(session),
-        Ok(client::AuthResult::Failure { .. }) => {
-            Err(ConnectError::terminal("SSH agent authentication failed for every identity"))
-        }
-        // No agent, or an empty one: retrying every 5 s will not start one.
-        Err(AgentAuthError::Unavailable(message)) => Err(ConnectError::terminal(message)),
-        Err(error) => Err(error.into_message().into()),
-    }
-    })
-}
-
 async fn run_keyboard_interactive(
     session: &mut client::Handle<known_hosts::ClientHandler>,
     result: Result<client::KeyboardInteractiveAuthResponse, russh::Error>,
     prompt_sink: &PromptSink,
     auth_response_rx: &mut mpsc::Receiver<String>,
-) -> Result<(), ConnectError> {
+) -> Result<client::AuthResult, ConnectError> {
     let mut response = result.map_err(|error| format!("Keyboard interactive init failed: {error}"))?;
     loop {
         match response {
-            client::KeyboardInteractiveAuthResponse::Success => return Ok(()),
-            client::KeyboardInteractiveAuthResponse::Failure { .. } => {
-                return Err(ConnectError::terminal("Authentication failed"))
+            client::KeyboardInteractiveAuthResponse::Success => return Ok(client::AuthResult::Success),
+            client::KeyboardInteractiveAuthResponse::Failure { remaining_methods, partial_success } => {
+                return Ok(client::AuthResult::Failure { remaining_methods, partial_success })
             }
             client::KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
                 prompt_sink(KeyboardInteractivePromptPayload {
@@ -2397,6 +2451,101 @@ mod tests {
         // Network trouble is still worth another attempt.
         assert!(ConnectError::from("Connection error: Connection refused".to_string()).retryable);
         assert!(!ConnectError::from("Permission denied (publickey)".to_string()).retryable);
+    }
+
+    #[tokio::test]
+    async fn a_partially_accepted_factor_continues_to_the_next_one() {
+        use super::*;
+        use russh::server;
+        use std::borrow::Cow;
+
+        /// `AuthenticationMethods keyboard-interactive,password`: an OTP first,
+        /// then the password. (russh's server clears `partial_success` on
+        /// publickey replies, so publickey+OTP is covered by the factor-choice
+        /// test below; the client path after a partial success is the same.)
+        #[derive(Default)]
+        struct Server {
+            otp_accepted: bool,
+        }
+        impl server::Handler for Server {
+            type Error = russh::Error;
+
+            async fn auth_password(&mut self, _: &str, password: &str) -> Result<server::Auth, Self::Error> {
+                if self.otp_accepted && password == "pw" {
+                    return Ok(server::Auth::Accept);
+                }
+                Ok(server::Auth::Reject {
+                    proceed_with_methods: Some(russh::MethodSet::from(&[MethodKind::KeyboardInteractive][..])),
+                    partial_success: false,
+                })
+            }
+
+            async fn auth_keyboard_interactive<'a>(
+                &'a mut self,
+                _: &str,
+                _: &str,
+                response: Option<server::Response<'a>>,
+            ) -> Result<server::Auth, Self::Error> {
+                match response {
+                    None => Ok(server::Auth::Partial {
+                        name: Cow::Borrowed(""),
+                        instructions: Cow::Borrowed(""),
+                        prompts: Cow::Owned(vec![(Cow::Borrowed("Verification code: "), false)]),
+                    }),
+                    Some(mut answers) => match answers.next().as_deref() == Some(&b"123456"[..]) {
+                        true => {
+                            self.otp_accepted = true;
+                            Ok(server::Auth::Reject {
+                                proceed_with_methods: Some(russh::MethodSet::from(&[MethodKind::Password][..])),
+                                partial_success: true,
+                            })
+                        }
+                        false => Ok(server::Auth::reject()),
+                    },
+                }
+            }
+        }
+
+        let (address, server) = test_support::spawn_server(Server::default()).await;
+        let session = test_support::connect(address).await;
+
+        let prompted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx, mut rx) = mpsc::channel(4);
+        let prompts: PromptSink = {
+            let prompted = prompted.clone();
+            Arc::new(move |payload: KeyboardInteractivePromptPayload| {
+                prompted.lock().unwrap().extend(payload.prompts.into_iter().map(|prompt| prompt.text));
+                let _ = tx.try_send("123456".to_string());
+            })
+        };
+
+        let session = authenticate_connected_session(
+            session,
+            "user".to_string(),
+            Some("password".to_string()),
+            Some("pw".to_string()),
+            None,
+            None,
+            &prompts,
+            &mut rx,
+        )
+        .await
+        .map_err(|error| error.message);
+        assert!(session.is_ok(), "{:?}", session.err());
+        assert_eq!(*prompted.lock().unwrap(), vec!["Verification code: ".to_string()]);
+        server.abort();
+    }
+
+    #[test]
+    fn the_next_factor_is_one_the_server_offers_and_we_can_answer() {
+        use super::next_auth_factor;
+        use russh::MethodKind::{KeyboardInteractive, Password, PublicKey};
+
+        assert_eq!(next_auth_factor(&[KeyboardInteractive], &[PublicKey], true, false), Some(KeyboardInteractive));
+        assert_eq!(next_auth_factor(&[Password], &[PublicKey], true, true), Some(Password));
+        assert_eq!(next_auth_factor(&[Password], &[PublicKey], true, false), None);
+        assert_eq!(next_auth_factor(&[PublicKey], &[Password], false, true), None);
+        assert_eq!(next_auth_factor(&[PublicKey, KeyboardInteractive], &[KeyboardInteractive], true, false), Some(PublicKey));
     }
 
     #[test]
