@@ -49,6 +49,15 @@ pub struct SubscriptionToken {
     token: u64,
 }
 
+/// A position in subscription order; see [`TerminalEventHub::mark`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubscriptionMark(u64);
+
+impl SubscriptionMark {
+    /// After every subscription, past and future.
+    pub const ALL: Self = Self(u64::MAX);
+}
+
 #[derive(Default)]
 pub struct TerminalEventHub {
     subscribers: Mutex<HashMap<String, Vec<Subscriber>>>,
@@ -98,10 +107,29 @@ impl TerminalEventHub {
     /// order, on the calling thread. Publishing to a session nobody follows is
     /// a no-op.
     pub fn publish(&self, session_id: &str, event: &TerminalEvent) {
+        self.publish_before(session_id, event, SubscriptionMark::ALL);
+    }
+
+    /// The point in subscription order reached so far: every subscription
+    /// made from now on falls after it.
+    ///
+    /// A session id can be reused as soon as its session is closed, while the
+    /// old session is still winding down. Marking the moment it closed lets
+    /// the old session address only the subscribers it had.
+    pub fn mark(&self) -> SubscriptionMark {
+        SubscriptionMark(self.next_token.load(Ordering::SeqCst))
+    }
+
+    /// [`publish`](Self::publish), limited to subscriptions made before `mark`.
+    pub fn publish_before(&self, session_id: &str, event: &TerminalEvent, mark: SubscriptionMark) {
         let callbacks: Vec<Arc<Mutex<Callback>>> = {
             let guard = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
             match guard.get(session_id) {
-                Some(list) => list.iter().map(|s| Arc::clone(&s.callback)).collect(),
+                Some(list) => list
+                    .iter()
+                    .filter(|s| s.token < mark.0)
+                    .map(|s| Arc::clone(&s.callback))
+                    .collect(),
                 None => return,
             }
         };
@@ -114,9 +142,21 @@ impl TerminalEventHub {
 
     /// Remove every subscriber of `session_id` (used once a session's event
     /// stream has ended for good).
+    #[allow(dead_code)] // sessions now drop up to a mark; see `drop_session_before`
     pub fn drop_session(&self, session_id: &str) {
+        self.drop_session_before(session_id, SubscriptionMark::ALL);
+    }
+
+    /// [`drop_session`](Self::drop_session), limited to subscriptions made
+    /// before `mark`; later ones belong to a newer session with the same id.
+    pub fn drop_session_before(&self, session_id: &str, mark: SubscriptionMark) {
         let mut guard = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-        guard.remove(session_id);
+        if let Some(list) = guard.get_mut(session_id) {
+            list.retain(|s| s.token >= mark.0);
+            if list.is_empty() {
+                guard.remove(session_id);
+            }
+        }
     }
 }
 

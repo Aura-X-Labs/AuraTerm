@@ -28,7 +28,7 @@ use std::thread;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::terminal_event_hub::{TerminalEvent, TerminalEventHub};
+use crate::terminal_event_hub::{SubscriptionMark, TerminalEvent, TerminalEventHub};
 
 pub type TerminalError = String;
 
@@ -100,6 +100,9 @@ struct SessionEntry {
     handle: Box<dyn TerminalHandle>,
     last_input_seq: u64,
     last_fence: u64,
+    /// Set when the session is closed: the hub subscriptions it may still
+    /// address while its stream winds down. See [`PtyBroker::close`].
+    closed_at: Arc<Mutex<SubscriptionMark>>,
 }
 
 pub struct PtyBroker {
@@ -137,6 +140,7 @@ impl PtyBroker {
             .take_events()
             .ok_or_else(|| "terminal backend produced no event stream".to_string())?;
 
+        let closed_at = Arc::new(Mutex::new(SubscriptionMark::ALL));
         {
             let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
             sessions.insert(
@@ -145,20 +149,24 @@ impl PtyBroker {
                     handle,
                     last_input_seq: 0,
                     last_fence: 0,
+                    closed_at: Arc::clone(&closed_at),
                 },
             );
         }
 
         let hub = Arc::clone(&self.hub);
         thread::spawn(move || {
+            // Once closed, the id may already belong to a new session: talk
+            // only to the subscribers this one had, and leave the rest alone.
+            let audience = || *closed_at.lock().unwrap_or_else(|e| e.into_inner());
             while let Ok(event) = events.recv() {
                 let is_exit = matches!(event, TerminalEvent::Exit(_));
-                hub.publish(&session_id, &event);
+                hub.publish_before(&session_id, &event, audience());
                 if is_exit {
                     break;
                 }
             }
-            hub.drop_session(&session_id);
+            hub.drop_session_before(&session_id, audience());
         });
 
         Ok(())
@@ -228,7 +236,13 @@ impl PtyBroker {
     pub fn close(&self, session_id: &str, reason: CloseReason) -> Result<(), TerminalError> {
         let entry = {
             let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
-            sessions.remove(session_id)
+            let entry = sessions.remove(session_id);
+            // Marked under the session lock, before the id can be reopened:
+            // anything subscribed from here on is for a newer session.
+            if let Some(entry) = &entry {
+                *entry.closed_at.lock().unwrap_or_else(|e| e.into_inner()) = self.hub.mark();
+            }
+            entry
         };
         if let Some(mut entry) = entry {
             entry.handle.close(reason)?;
@@ -428,6 +442,12 @@ impl ScriptedTerminalAdapter {
         if let Some(sender) = state.senders.get(session_id) {
             let _ = sender.send(TerminalEvent::Output(bytes.to_vec()));
         }
+    }
+
+    /// A second handle on a session's stream, which keeps it open after the
+    /// session is closed: a killed shell's reader takes a moment to see EOF.
+    pub fn hold_stream(&self, session_id: &str) -> mpsc::Sender<TerminalEvent> {
+        self.state.lock().unwrap().senders[session_id].clone()
     }
 
     /// End a session's stream, as if the shell exited on its own.
@@ -725,6 +745,37 @@ mod tests {
             }
         }
         assert!(saw_exit, "expected Exit after close");
+    }
+
+    #[test]
+    fn a_closed_session_winding_down_leaves_its_reused_id_alone() {
+        let (adapter, broker, hub) = scripted_broker();
+        let old_events = subscribe_events(&hub, "s1");
+        broker.open(open_request("s1")).unwrap();
+        let old_stream = adapter.hold_stream("s1");
+        broker.close("s1", CloseReason::LocalRequest).unwrap();
+
+        // The tab restarts under the same id before the old shell's reader
+        // has noticed it was killed.
+        let new_events = subscribe_events(&hub, "s1");
+        broker.open(open_request("s1")).unwrap();
+        old_stream.send(TerminalEvent::Exit("old shell killed".into())).unwrap();
+        drop(old_stream);
+
+        // The old session's subscribers still hear how it ended...
+        assert_eq!(
+            old_events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            TerminalEvent::Exit("old shell killed".to_string())
+        );
+        // ...but the new session neither sees that exit nor loses its
+        // subscription when the old stream is torn down.
+        thread::sleep(Duration::from_millis(100));
+        adapter.emit_output("s1", b"new prompt");
+        assert_eq!(
+            new_events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            TerminalEvent::Output(b"new prompt".to_vec())
+        );
+        assert!(old_events.recv_timeout(Duration::from_millis(100)).is_err());
     }
 
     /// A paste larger than the PTY input buffer, sent while the foreground
