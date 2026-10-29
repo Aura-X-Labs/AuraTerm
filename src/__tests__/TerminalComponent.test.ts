@@ -695,6 +695,41 @@ describe("TerminalComponent", () => {
     wrapper.unmount();
   });
 
+  it("only reapplies terminal options when terminal-relevant settings change", async () => {
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "local-session-settings",
+        isVisible: false,
+        isFocused: false,
+        session: { protocol: "local" } satisfies SessionConfig,
+        settings: { ...DEFAULT_SETTINGS },
+      },
+    });
+    await flushPromises();
+
+    const terminal = mockState.terminals[0];
+    const themeBefore = terminal.options.theme;
+    // A workspace autosave hands every terminal a fresh settings object whose
+    // terminal options are unchanged; that must not re-render hidden tabs.
+    await wrapper.setProps({ settings: { ...DEFAULT_SETTINGS, restoreTabsOnStartup: !DEFAULT_SETTINGS.restoreTabsOnStartup } });
+    await flushPromises();
+    expect(terminal.options.theme).toBe(themeBefore);
+
+    await wrapper.setProps({ settings: { ...DEFAULT_SETTINGS, fontSize: DEFAULT_SETTINGS.fontSize + 2 } });
+    await flushPromises();
+    expect(terminal.options.fontSize).toBe(DEFAULT_SETTINGS.fontSize + 2);
+    expect(terminal.options.theme).toBe(themeBefore);
+
+    await wrapper.setProps({
+      settings: { ...DEFAULT_SETTINGS, theme: { ...DEFAULT_SETTINGS.theme, background: "#123456" } },
+    });
+    await flushPromises();
+    expect(terminal.options.theme).toMatchObject({ background: "#123456" });
+
+    wrapper.unmount();
+  });
+
   describe.each([
     ["assist", "assist-client-state", { protocol: "assist", assistConfig: { code: "BCDF-GHJK-LMNP" } }],
     ["relay", "relay-client-state", {
