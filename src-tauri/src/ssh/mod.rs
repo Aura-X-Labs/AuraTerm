@@ -798,10 +798,22 @@ async fn open_proxy_channel(
     host: String,
     port: u16,
 ) -> Result<russh::Channel<client::Msg>, String> {
-    handle
-        .channel_open_direct_tcpip(host.clone(), port.into(), "127.0.0.1".to_string(), 0)
-        .await
-        .map_err(|error| format!("ProxyJump channel to {host}:{port} failed: {error}"))
+    // The jump host connects to the next hop before confirming the channel; a
+    // next hop that drops SYNs would otherwise leave this waiting on the jump
+    // host's own connect timeout, or forever.
+    let limit = known_hosts::SSH_TCP_CONNECT_TIMEOUT;
+    match tokio::time::timeout(
+        limit,
+        handle.channel_open_direct_tcpip(host.clone(), port.into(), "127.0.0.1".to_string(), 0),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|error| format!("ProxyJump channel to {host}:{port} failed: {error}")),
+        Err(_) => Err(format!(
+            "ProxyJump channel to {host}:{port} failed: no answer within {}",
+            crate::connection_test::describe_duration(limit)
+        )),
+    }
 }
 
 async fn verify_host_fingerprint(
