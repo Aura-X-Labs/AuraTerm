@@ -198,14 +198,17 @@ pub async fn auraxlab_account_login(
         return Err("AuraXLab returned an invalid account login response.".to_string());
     }
 
-    if let Err(error) = cloud_sync::store_account_login(
+    let sync_guard = cloud_sync::exclusive().await;
+    let stored = cloud_sync::store_account_login(
         &app,
         &login.account.subject,
         &login.account.email,
         &login.account.username,
         &login.sync_credential.secret,
         &device_label,
-    ) {
+    );
+    drop(sync_guard);
+    if let Err(error) = stored {
         cloud_sync::revoke_sync_credential(&login.sync_credential.secret).await;
         return Err(error);
     }
@@ -214,12 +217,12 @@ pub async fn auraxlab_account_login(
         match cloud_bridge::redeem_enrollment(&app, &bridge, Some(&login.account.subject)).await {
             Ok(result) if result.status == "ok" => {}
             Ok(result) => {
-                cloud_sync::clear_account_login(&app)?;
+                cloud_sync::clear_account_login_exclusively(&app).await?;
                 cloud_sync::revoke_sync_credential(&login.sync_credential.secret).await;
                 return Err(format!("Cloud Console enrollment is {}.", result.status));
             }
             Err(error) => {
-                cloud_sync::clear_account_login(&app)?;
+                cloud_sync::clear_account_login_exclusively(&app).await?;
                 cloud_sync::revoke_sync_credential(&login.sync_credential.secret).await;
                 return Err(error);
             }
@@ -247,7 +250,8 @@ async fn sign_out_locally(app: &AppHandle, bridge: &cloud_bridge::CloudBridgeSta
     if let Some(token) = revoke {
         cloud_sync::revoke_sync_credential(token).await;
     }
-    let clear_result = cloud_sync::clear_account_login(app);
+    // Waits for a running sync: it would write the old sign-in back.
+    let clear_result = cloud_sync::clear_account_login_exclusively(app).await;
     unbind_result?;
     clear_result
 }

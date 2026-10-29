@@ -75,7 +75,7 @@ import {
 } from "./liveSyncStatus";
 import { accountState, restoreAccount } from "./account";
 import { useLiveAccountFlow } from "./composables/useLiveAccountFlow";
-import { cloudSyncNow, syncNowConfirmingDeletes, describeSyncResult, getSyncConfig, classifySyncError, type SyncConfigView, type SyncResult } from "./cloudSync";
+import { cloudSyncNow, syncNowConfirmingDeletes, describeSyncResult, getSyncConfig, classifySyncError, runExclusiveSync, syncRunning, type SyncConfigView, type SyncResult } from "./cloudSync";
 import { BOOKMARKS_CHANGED_EVENT, createAutoSync, notifyBookmarksChanged } from "./composables/useAutoSync";
 import { useBookmarkStore } from "./composables/useBookmarkStore";
 import { buildExplainPrompt, buildOptimizePrompt, buildSummarizePrompt } from "./aiContext";
@@ -199,7 +199,8 @@ const { showAccount, returnTarget: accountReturnTarget } = accountFlow;
 // Refreshed on startup and whenever the account / sync dialogs close.
 const syncView = shallowRef<SyncConfigView | null>(null);
 const auraxlabSignedIn = computed(() => syncView.value?.auraxlab.tokenSet ?? false);
-const syncNowBusy = ref(false);
+// Shared with the Sync dialog: one sync at a time, whoever started it.
+const syncNowBusy = syncRunning;
 // Opened the sync dialog because a run found a passphrase-era vault.
 const cloudSyncLegacy = ref(false);
 // Unattended sync (design §7.3): signed in and switched on in Sync settings.
@@ -1421,13 +1422,16 @@ function handleSyncNow() {
  * outcome for the Live Sync panel and never pops a dialog.
  */
 async function runSyncNow(auto: boolean) {
-  if (!isMainWindow || syncNowBusy.value) return;
+  if (!isMainWindow) return;
+  await runExclusiveSync(() => runSyncNowExclusively(auto));
+}
+
+async function runSyncNowExclusively(auto: boolean) {
   await refreshSyncView().catch(() => {});
   if (!syncView.value?.auraxlab.tokenSet) {
     if (!auto) showCloudSync.value = true;
     return;
   }
-  syncNowBusy.value = true;
   // The panel shows the whole run, not just the toast at the end.
   syncRuntime.value = { phase: "syncing", message: "", at: Date.now() };
   try {
@@ -1452,8 +1456,6 @@ async function runSyncNow(auto: boolean) {
     } else if (code === "notSignedIn") {
       showCloudSync.value = true;
     }
-  } finally {
-    syncNowBusy.value = false;
   }
 }
 
