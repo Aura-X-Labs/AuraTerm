@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use russh::{client, keys::PrivateKey, Disconnect, MethodKind};
 use tauri::AppHandle;
-use tokio::sync::Mutex;
 
 use super::{forwarding, known_hosts, AgentAuthError, JumpHostConfig, SharedSshHandle};
 use crate::connection_test::{
@@ -381,7 +380,7 @@ async fn probe_chain(
 ) -> Outcome {
     for (index, hop) in hops.iter().enumerate() {
         match probe_hop(trusted, hop, limits, ctx).await {
-            Ok(session) => ctx.handles.push(Arc::new(Mutex::new(session))),
+            Ok(session) => ctx.handles.push(Arc::new(session)),
             Err(outcome) => return outcome.at(hops, index),
         }
     }
@@ -596,8 +595,7 @@ async fn close_session(session: &ProbeSession) {
 /// forwarded channel close before its own connection goes.
 async fn close_chain(handles: Vec<SharedSshHandle>) {
     for handle in handles.into_iter().rev() {
-        let session = handle.lock().await;
-        close_session(&session).await;
+        close_session(&handle).await;
     }
 }
 
