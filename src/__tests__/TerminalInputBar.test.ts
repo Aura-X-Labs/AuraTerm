@@ -253,3 +253,49 @@ describe("TerminalInputBar context menu", () => {
     expect(wrapper.find(".quick-bar-menu").exists()).toBe(false);
   });
 });
+
+describe("TerminalInputBar IME composition", () => {
+  function mountWithHistory() {
+    return mount(TerminalInputBar, {
+      props: { quickButtons: [], inputHistory: ["older command"] },
+      global: { plugins: [i18n] },
+    });
+  }
+
+  it.each([
+    ["ArrowUp", {}],
+    ["ArrowDown", {}],
+    ["PageUp", {}],
+    ["PageDown", {}],
+    ["Enter", { ctrlKey: true }],
+  ])("leaves %s to the input method while composing", async (key, modifiers) => {
+    const wrapper = mountWithHistory();
+    const textarea = wrapper.find<HTMLTextAreaElement>(".terminal-input-textarea");
+    await textarea.setValue("ni");
+    // Chinese IMEs use these keys to pick and page through candidates.
+    const event = new KeyboardEvent("keydown", { key, isComposing: true, cancelable: true, ...modifiers });
+    textarea.element.dispatchEvent(event);
+    await flushPromises();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(textarea.element.value).toBe("ni");
+    expect(wrapper.emitted("send")).toBeUndefined();
+  });
+
+  it("treats WebKit's composition keyCode 229 as composing", async () => {
+    const wrapper = mountWithHistory();
+    const textarea = wrapper.find<HTMLTextAreaElement>(".terminal-input-textarea");
+    const event = new KeyboardEvent("keydown", { key: "PageUp", keyCode: 229, cancelable: true });
+    textarea.element.dispatchEvent(event);
+    await flushPromises();
+    expect(event.defaultPrevented).toBe(false);
+    expect(textarea.element.value).toBe("");
+  });
+
+  it("still navigates history when not composing", async () => {
+    const wrapper = mountWithHistory();
+    const textarea = wrapper.find<HTMLTextAreaElement>(".terminal-input-textarea");
+    await textarea.trigger("keydown", { key: "PageUp" });
+    expect(textarea.element.value).toBe("older command");
+  });
+});
