@@ -661,6 +661,40 @@ describe("TerminalComponent", () => {
     vi.unstubAllGlobals();
   });
 
+  it("debounces and dedupes PTY resizes from window resizes and divider drags", async () => {
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "local-session-resize",
+        isVisible: true,
+        isFocused: true,
+        session: { protocol: "local" } satisfies SessionConfig,
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+
+    const terminal = mockState.terminals[0];
+    // A drag produces one xterm resize per frame, and each window resize
+    // event also asked for a resize of its own.
+    for (let cols = 81; cols <= 90; cols++) {
+      terminal.emitResize(cols, 30);
+      window.dispatchEvent(new Event("resize"));
+    }
+    expect(mockState.resizeSession).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(mockState.resizeSession).toHaveBeenCalledExactlyOnceWith(
+      "local-session-resize", 90, 30, expect.anything(),
+    );
+
+    // A window resize that leaves the grid unchanged sends nothing.
+    window.dispatchEvent(new Event("resize"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(mockState.resizeSession).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+  });
+
   describe.each([
     ["assist", "assist-client-state", { protocol: "assist", assistConfig: { code: "BCDF-GHJK-LMNP" } }],
     ["relay", "relay-client-state", {
