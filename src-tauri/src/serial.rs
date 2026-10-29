@@ -42,6 +42,13 @@ const MODEM_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// conventional "long break" that bootloaders and ROM monitors look for.
 const DEFAULT_BREAK_MILLIS: u32 = 250;
 
+/// How long closing a session waits for its reader thread to let go of the
+/// port. A local UART is opened exclusively, so reopening it before the old
+/// handle is closed fails with "port busy". The reader notices the stop flag
+/// within one read timeout (100 ms); a network reconnect attempt in progress
+/// can take longer, and is not worth blocking the close on.
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
+
 /// Backoff schedule for reconnecting a dropped network session, in seconds.
 /// The last value repeats: a device server can be down for a long while, and a
 /// console that comes back on its own is the entire point.
@@ -51,6 +58,19 @@ struct SerialSession {
     /// Indirected so a reconnect can swap the socket underneath every writer.
     sink: SinkSlot,
     stop_flag: Arc<AtomicBool>,
+    /// Resolves once the reader thread has exited and dropped the port.
+    reader_done: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl SerialSession {
+    /// Stop the reader and wait (bounded) until it has released the port.
+    async fn stop(self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        // Our own handle on the write half has to go too, or the port stays
+        // open however promptly the reader exits.
+        drop(self.sink);
+        let _ = tokio::time::timeout(CLOSE_WAIT, self.reader_done).await;
+    }
 }
 
 /// Everything needed to rebuild a dropped network session.
@@ -67,6 +87,7 @@ struct NetworkTarget {
 pub struct SerialState {
     sessions: Arc<Mutex<HashMap<String, SerialSession>>>,
     hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
+    starts: crate::util::PendingStarts,
 }
 
 impl SerialState {
@@ -74,6 +95,40 @@ impl SerialState {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub,
+            starts: crate::util::PendingStarts::default(),
+        }
+    }
+
+    /// Register a session whose port is open, unless its tab was closed while
+    /// it was opening. A session it replaces (a restart reusing the tab id) is
+    /// stopped.
+    async fn register(
+        &self,
+        ticket: &crate::util::StartTicket,
+        id: String,
+        session: SerialSession,
+    ) -> Result<(), String> {
+        let replaced = {
+            let mut guard = self.sessions.lock().await;
+            // Checked under the map lock: a close that ran before this insert
+            // found nothing to close and cancelled the ticket instead.
+            if ticket.is_cancelled() {
+                return Err(crate::util::CLOSED_WHILE_CONNECTING.to_string());
+            }
+            guard.insert(id, session)
+        };
+        if let Some(old) = replaced {
+            old.stop().await;
+        }
+        Ok(())
+    }
+
+    /// Close a session, or cancel its start if it is still opening.
+    async fn close(&self, id: &str) {
+        self.starts.cancel(id);
+        let session = self.sessions.lock().await.remove(id);
+        if let Some(session) = session {
+            session.stop().await;
         }
     }
 
@@ -197,6 +252,9 @@ pub async fn start_serial_session(
     adopt_server_params: Option<bool>,
     auto_reconnect: Option<bool>,
 ) -> Result<(), String> {
+    // Taken before the (blocking) open so a close that arrives meanwhile is
+    // not lost; see `SerialState::register`.
+    let ticket = state.starts.begin(&id);
     let transport = SerialTransport::parse(transport.as_deref())?;
     let params = SerialParams::from_wire(baud_rate, data_bits, stop_bits, &parity, &flow_control)?;
 
@@ -231,17 +289,22 @@ pub async fn start_serial_session(
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let slot = SinkSlot::new(sink.clone());
+    let (reader_done_tx, reader_done) = tokio::sync::oneshot::channel();
 
-    {
-        let mut guard = state.sessions.lock().await;
-        guard.insert(
+    // On a cancelled start, returning drops `link` and every sink handle,
+    // which closes the port or socket.
+    state
+        .register(
+            &ticket,
             id.clone(),
             SerialSession {
                 sink: slot.clone(),
                 stop_flag: stop_flag.clone(),
+                reader_done,
             },
-        );
-    }
+        )
+        .await?;
+    drop(ticket);
 
     let zmodem_state = zmodem.inner().clone();
     zmodem_state.reset_session(&id);
@@ -254,6 +317,7 @@ pub async fn start_serial_session(
         state.hub.clone(),
         zmodem_state,
         target,
+        reader_done_tx,
     );
 
     // The reader has to be running before the handshake can complete, so the
@@ -360,6 +424,7 @@ fn spawn_reader(
     event_hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
     zmodem_state: crate::zmodem::ZmodemState,
     target: Option<NetworkTarget>,
+    reader_done: tokio::sync::oneshot::Sender<()>,
 ) {
     std::thread::spawn(move || {
         let mut sink = slot.get();
@@ -500,6 +565,13 @@ fn spawn_reader(
                 }
             }
         }
+
+        // Release the port before reporting done, so whoever waits on
+        // `reader_done` can reopen it straight away.
+        drop(link);
+        drop(sink);
+        drop(slot);
+        let _ = reader_done.send(());
     });
 }
 
@@ -790,10 +862,7 @@ pub async fn close_serial_session(
     zmodem: State<'_, crate::zmodem::ZmodemState>,
     id: String,
 ) -> Result<(), String> {
-    let mut guard = state.sessions.lock().await;
-    if let Some(session) = guard.remove(&id) {
-        session.stop_flag.store(true, Ordering::Relaxed);
-    }
+    state.close(&id).await;
     zmodem.reset_session(&id);
     Ok(())
 }
@@ -814,6 +883,100 @@ mod tests {
             params: SerialParams::default(),
             adopt_server_params: false,
         }
+    }
+
+    /// What `spawn_reader` does with a session's handles, minus the Tauri
+    /// plumbing: read until stopped, then release the port and report done.
+    fn open_raw_session(port: u16) -> (SerialSession, Arc<AtomicBool>) {
+        let (mut link, net_sink) = connect_network(
+            "127.0.0.1",
+            port,
+            SerialTransport::RawTcp,
+            SerialParams::default(),
+            false,
+        )
+        .expect("connect");
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let slot = SinkSlot::new(net_sink);
+        let (done_tx, reader_done) = tokio::sync::oneshot::channel();
+        let (stop, reader_slot) = (stop_flag.clone(), slot.clone());
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 64];
+            while !stop.load(Ordering::Relaxed) {
+                let _ = link.read(&mut buffer);
+            }
+            drop(link);
+            drop(reader_slot);
+            let _ = done_tx.send(());
+        });
+        (SerialSession { sink: slot, stop_flag: stop_flag.clone(), reader_done }, stop_flag)
+    }
+
+    /// True when the peer has closed its end, checked without waiting.
+    fn hung_up(stream: &mut std::net::TcpStream) -> bool {
+        use std::io::Read;
+        stream.set_nonblocking(true).expect("nonblocking");
+        let mut byte = [0_u8; 1];
+        matches!(stream.read(&mut byte), Ok(0))
+    }
+
+    #[tokio::test]
+    async fn closing_returns_only_once_the_port_is_released() {
+        // A local UART is opened exclusively: if close returned before the
+        // reader let go, reopening the port right away would fail as busy.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let state = SerialState::default();
+        let (session, _) = open_raw_session(port);
+        let (mut server, _) = listener.accept().expect("accept");
+        let ticket = state.starts.begin("tab-1");
+        state.register(&ticket, "tab-1".into(), session).await.expect("register");
+        drop(ticket);
+
+        state.close("tab-1").await;
+        assert!(hung_up(&mut server), "close returned with the port still open");
+        assert!(!state.contains("tab-1").await);
+    }
+
+    #[tokio::test]
+    async fn a_tab_closed_while_opening_leaves_no_session_behind() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let state = SerialState::default();
+        let ticket = state.starts.begin("tab-1");
+        // The tab closes while the port is still opening...
+        state.close("tab-1").await;
+        let (session, stop) = open_raw_session(port);
+        let (mut server, _) = listener.accept().expect("accept");
+
+        // ...so the open must not register a session nobody owns.
+        let result = state.register(&ticket, "tab-1".into(), session).await;
+        assert_eq!(result, Err(crate::util::CLOSED_WHILE_CONNECTING.to_string()));
+        assert!(!state.contains("tab-1").await);
+        // `start_serial_session` returns here and never starts a reader, so
+        // what it opened is dropped; the stand-in reader just needs stopping.
+        stop.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(hung_up(&mut server));
+    }
+
+    #[tokio::test]
+    async fn restarting_a_tab_stops_the_session_it_replaces() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let state = SerialState::default();
+
+        let (first, first_stop) = open_raw_session(port);
+        let (mut first_server, _) = listener.accept().expect("accept first");
+        state.register(&state.starts.begin("tab-1"), "tab-1".into(), first).await.expect("first");
+        let (second, second_stop) = open_raw_session(port);
+        state.register(&state.starts.begin("tab-1"), "tab-1".into(), second).await.expect("second");
+
+        assert!(first_stop.load(Ordering::Relaxed));
+        assert!(hung_up(&mut first_server));
+        assert!(!second_stop.load(Ordering::Relaxed));
+        state.close("tab-1").await;
+        assert!(second_stop.load(Ordering::Relaxed));
     }
 
     #[test]

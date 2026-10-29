@@ -18,15 +18,27 @@ struct TelnetSession {
     iac: Arc<Mutex<crate::util::TelnetIacFilter>>,
 }
 
+impl TelnetSession {
+    fn stop(&self) {
+        self.reader_abort.abort();
+        self.writer_abort.abort();
+    }
+}
+
 #[derive(Clone)]
 pub struct TelnetState {
     sessions: Arc<Mutex<HashMap<String, TelnetSession>>>,
     hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
+    starts: crate::util::PendingStarts,
 }
 
 impl TelnetState {
     pub fn new(hub: Arc<crate::terminal_event_hub::TerminalEventHub>) -> Self {
-        Self { sessions: Arc::new(Mutex::new(HashMap::new())), hub }
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            hub,
+            starts: crate::util::PendingStarts::default(),
+        }
     }
 
     pub async fn contains(&self, id: &str) -> bool {
@@ -63,9 +75,61 @@ pub async fn start_telnet_session(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let stream = TcpStream::connect((host.as_str(), port))
+    let endpoint = format!("{host}:{port}");
+    let connect = async move {
+        // A server that never answers the SYN would otherwise leave the tab
+        // on "Connecting..." for the OS timeout (minutes).
+        crate::connection_test::tcp_connect(
+            (host.as_str(), port),
+            &endpoint,
+            crate::connection_test::TCP_CONNECT_TIMEOUT,
+        )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|failure| failure.detail)
+    };
+    let hub = state.hub.clone();
+    let zmodem = zmodem.inner().clone();
+    let session_id = id.clone();
+    open_session(&state, id, connect, move |stream| {
+        spawn_session(app, hub, zmodem, session_id, cols, rows, stream)
+    })
+    .await
+}
+
+/// Connect and register a Telnet session.
+///
+/// `connect` yields the socket and `spawn` starts the session's IO on it.
+async fn open_session(
+    state: &TelnetState,
+    id: String,
+    connect: impl std::future::Future<Output = Result<TcpStream, String>>,
+    spawn: impl FnOnce(TcpStream) -> TelnetSession,
+) -> Result<(), String> {
+    let ticket = state.starts.begin(&id);
+    let stream = connect.await?;
+    // Register under the map lock, after checking whether the tab was closed
+    // while connecting: a close that ran before the insert found nothing to
+    // close and cancelled the ticket instead. Dropping `stream` hangs up.
+    let mut sessions = state.sessions.lock().await;
+    if ticket.is_cancelled() {
+        return Err(crate::util::CLOSED_WHILE_CONNECTING.to_string());
+    }
+    // Restarting a tab reuses its id; the old connection must not live on.
+    if let Some(old) = sessions.insert(id, spawn(stream)) {
+        old.stop();
+    }
+    Ok(())
+}
+
+fn spawn_session(
+    app: AppHandle,
+    event_hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
+    zmodem_state: crate::zmodem::ZmodemState,
+    id: String,
+    cols: u16,
+    rows: u16,
+    stream: TcpStream,
+) -> TelnetSession {
     let (mut reader, mut writer) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let iac = Arc::new(Mutex::new(crate::util::TelnetIacFilter::with_window_size(cols, rows)));
@@ -74,8 +138,6 @@ pub async fn start_telnet_session(
     let read_id = id.clone();
     let response_tx = tx.clone();
     let reader_iac = iac.clone();
-    let event_hub = state.hub.clone();
-    let zmodem_state = zmodem.inner().clone();
     zmodem_state.reset_session(&id);
     let reader_task = tokio::spawn(async move {
         let mut buffer = [0_u8; 4096];
@@ -162,18 +224,12 @@ pub async fn start_telnet_session(
         let _ = writer.shutdown().await;
     });
 
-    let mut guard = state.sessions.lock().await;
-    guard.insert(
-        id,
-        TelnetSession {
-            writer: tx,
-            reader_abort: reader_task.abort_handle(),
-            writer_abort: writer_task.abort_handle(),
-            iac,
-        },
-    );
-
-    Ok(())
+    TelnetSession {
+        writer: tx,
+        reader_abort: reader_task.abort_handle(),
+        writer_abort: writer_task.abort_handle(),
+        iac,
+    }
 }
 
 #[tauri::command]
@@ -244,18 +300,24 @@ pub async fn close_telnet_session(
     zmodem: State<'_, crate::zmodem::ZmodemState>,
     id: String,
 ) -> Result<(), String> {
-    let mut guard = state.sessions.lock().await;
-    if let Some(session) = guard.remove(&id) {
-        session.reader_abort.abort();
-        session.writer_abort.abort();
-    }
-    zmodem.reset_session(&id);
+    close_session(&state, zmodem.inner(), &id).await;
     Ok(())
+}
+
+async fn close_session(state: &TelnetState, zmodem: &crate::zmodem::ZmodemState, id: &str) {
+    // Still connecting: nothing is registered yet, so stop the start instead.
+    state.starts.cancel(id);
+    let session = state.sessions.lock().await.remove(id);
+    if let Some(session) = session {
+        session.stop();
+    }
+    zmodem.reset_session(id);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::telnet_test_connection;
+    use super::{close_session, open_session, telnet_test_connection, TelnetSession, TelnetState};
+    use std::sync::Arc;
     use crate::connection_test::{TestCode, TestStatus};
     use std::time::{Duration, Instant};
     use tokio::io::AsyncReadExt;
@@ -307,5 +369,85 @@ mod tests {
             .await
             .expect("an expected outcome is never Err");
         assert_eq!(report.code, TestCode::ResolveFailed);
+    }
+
+    fn telnet_state() -> TelnetState {
+        TelnetState::new(Arc::new(crate::terminal_event_hub::TerminalEventHub::new()))
+    }
+
+    /// Stand-in for the real IO tasks: one task that owns the socket, so
+    /// aborting the session is what hangs it up.
+    fn hold_socket(stream: tokio::net::TcpStream) -> TelnetSession {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let _stream = stream;
+            std::future::pending::<()>().await;
+        });
+        TelnetSession {
+            writer: tx,
+            reader_abort: task.abort_handle(),
+            writer_abort: task.abort_handle(),
+            iac: Arc::new(tokio::sync::Mutex::new(crate::util::TelnetIacFilter::default())),
+        }
+    }
+
+    async fn expect_hang_up(stream: &mut tokio::net::TcpStream) {
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte)).await;
+        assert!(matches!(read, Ok(Ok(0))), "connection left open: {read:?}");
+    }
+
+    #[tokio::test]
+    async fn a_tab_closed_while_connecting_leaves_no_session_behind() {
+        let state = telnet_state();
+        let zmodem = crate::zmodem::ZmodemState::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let release = Arc::new(tokio::sync::Notify::new());
+
+        // The connect completes only after the tab has been closed.
+        let gate = release.clone();
+        let start = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let connect = async move {
+                    gate.notified().await;
+                    tokio::net::TcpStream::connect(("127.0.0.1", port))
+                        .await
+                        .map_err(|e| e.to_string())
+                };
+                open_session(&state, "tab-1".into(), connect, hold_socket).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        close_session(&state, &zmodem, "tab-1").await;
+        release.notify_one();
+
+        let result = start.await.expect("start task");
+        assert_eq!(result, Err(crate::util::CLOSED_WHILE_CONNECTING.to_string()));
+        assert!(!state.contains("tab-1").await);
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        expect_hang_up(&mut stream).await;
+    }
+
+    #[tokio::test]
+    async fn restarting_a_tab_hangs_up_the_connection_it_replaces() {
+        let state = telnet_state();
+        let zmodem = crate::zmodem::ZmodemState::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let connect = || async move {
+            tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| e.to_string())
+        };
+
+        open_session(&state, "tab-1".into(), connect(), hold_socket).await.expect("first start");
+        let (mut first, _) = listener.accept().await.expect("accept first");
+        open_session(&state, "tab-1".into(), connect(), hold_socket).await.expect("second start");
+        expect_hang_up(&mut first).await;
+
+        assert!(state.contains("tab-1").await);
+        let (mut second, _) = listener.accept().await.expect("accept second");
+        close_session(&state, &zmodem, "tab-1").await;
+        expect_hang_up(&mut second).await;
     }
 }

@@ -199,6 +199,71 @@ pub fn emit_pty_exit(app: &AppHandle, id: &str, message: impl Into<String>) {
     );
 }
 
+// ── Starts that are still connecting ─────────────────────────────────────────
+
+/// Error returned by a session start whose tab was closed before it connected.
+pub const CLOSED_WHILE_CONNECTING: &str = "Session closed while connecting";
+
+/// Session starts that have not registered their session yet.
+///
+/// A tab closed while its session is still connecting sends `close` before
+/// there is anything in the session map to close. Without a record of the
+/// pending start, the start would finish afterwards and register a session no
+/// tab owns. `close` cancels the pending start instead, and the start checks
+/// its ticket — under the session-map lock — before registering.
+#[derive(Clone, Default)]
+pub struct PendingStarts {
+    inner: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        >,
+    >,
+}
+
+/// One start in progress. Dropping it (success or failure) forgets the start.
+pub struct StartTicket {
+    starts: PendingStarts,
+    id: String,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PendingStarts {
+    /// Record that `id` is connecting. A newer start for the same id
+    /// supersedes an older one still in flight, which is cancelled.
+    pub fn begin(&self, id: &str) -> StartTicket {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = map.insert(id.to_string(), cancelled.clone()) {
+            previous.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        StartTicket { starts: self.clone(), id: id.to_string(), cancelled }
+    }
+
+    /// Cancel the start in progress for `id`, if any.
+    pub fn cancel(&self, id: &str) {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flag) = map.remove(id) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+impl StartTicket {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for StartTicket {
+    fn drop(&mut self) {
+        let mut map = self.starts.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // Only forget our own entry: a newer start for the same id owns it now.
+        if map.get(&self.id).is_some_and(|flag| std::sync::Arc::ptr_eq(flag, &self.cancelled)) {
+            map.remove(&self.id);
+        }
+    }
+}
+
 // ── Telnet IAC (Interpret As Command) stream filter ───────────────────────────
 
 pub(crate) const IAC: u8 = 255; // Interpret As Command
@@ -570,6 +635,38 @@ fn supports_remote(option: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Utf8StreamDecoder;
+    use super::PendingStarts;
+
+    #[test]
+    fn closing_a_pending_start_cancels_only_that_start() {
+        let starts = PendingStarts::default();
+        let ticket = starts.begin("tab-1");
+        let other = starts.begin("tab-2");
+        starts.cancel("tab-1");
+        assert!(ticket.is_cancelled());
+        assert!(!other.is_cancelled());
+    }
+
+    #[test]
+    fn a_close_after_the_start_finished_does_not_touch_the_next_start() {
+        let starts = PendingStarts::default();
+        drop(starts.begin("tab-1"));
+        // Nothing pending: this close is for the registered session.
+        starts.cancel("tab-1");
+        assert!(!starts.begin("tab-1").is_cancelled());
+    }
+
+    #[test]
+    fn a_newer_start_supersedes_and_outlives_an_older_one() {
+        let starts = PendingStarts::default();
+        let old = starts.begin("tab-1");
+        let new = starts.begin("tab-1");
+        assert!(old.is_cancelled());
+        // The old ticket finishing must not forget the new start.
+        drop(old);
+        starts.cancel("tab-1");
+        assert!(new.is_cancelled());
+    }
     use super::session_event;
     use super::{
         telnet_escape_iac, telnet_escape_outbound, TelnetIacFilter, DO, DONT, IAC, SB, SE,
