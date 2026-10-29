@@ -376,7 +376,8 @@ impl NetSerialSink {
 
     fn require_com_port(&self) -> Result<&StdMutex<TelnetIacFilter>, String> {
         self.codec.as_ref().ok_or_else(|| {
-            "Raw TCP has no control channel: line parameters, BREAK and the modem lines are              whatever the device server is configured with."
+            "Raw TCP has no control channel: line parameters, BREAK and the modem lines are \
+             whatever the device server is configured with."
                 .to_string()
         })
     }
@@ -392,7 +393,8 @@ impl NetSerialSink {
                 .is_some_and(|com_port| com_port.negotiated());
             if !negotiated {
                 return Err(
-                    "The server never accepted COM-PORT-OPTION, so it cannot act on control                      requests."
+                    "The server never accepted COM-PORT-OPTION, so it cannot act on control \
+                     requests."
                         .to_string(),
                 );
             }
@@ -500,7 +502,8 @@ impl SerialSink for NetSerialSink {
                 .ok_or_else(|| "This session has no COM-PORT-OPTION channel".to_string())?;
             if !com_port.negotiated() {
                 return Err(
-                    "The server never accepted COM-PORT-OPTION, so it has no way to apply                      line parameters. Configure the port on the device server instead."
+                    "The server never accepted COM-PORT-OPTION, so it has no way to apply \
+                     line parameters. Configure the port on the device server instead."
                         .to_string(),
                 );
             }
@@ -824,17 +827,20 @@ fn describe_connect_error(host: &str, port: u16, error: &std::io::Error) -> Stri
     use std::io::ErrorKind;
     match error.kind() {
         ErrorKind::ConnectionRefused => format!(
-            "Nothing is listening on {host}:{port}. Check the device server is running, and that              the port is right — RFC 2217 conventionally uses 2217."
+            "Nothing is listening on {host}:{port}. Check the device server is running, and that \
+             the port is right — RFC 2217 conventionally uses 2217."
         ),
         ErrorKind::TimedOut => format!(
-            "Timed out connecting to {host}:{port} after {}s. A firewall is most likely dropping              the connection rather than refusing it.",
+            "Timed out connecting to {host}:{port} after {}s. A firewall is most likely dropping \
+             the connection rather than refusing it.",
             CONNECT_TIMEOUT.as_secs(),
         ),
         ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => {
             format!("No route to {host}. Check the network path to the device server.")
         }
         ErrorKind::PermissionDenied => format!(
-            "Permission denied connecting to {host}:{port}. A local firewall or sandbox policy              is blocking the outbound connection."
+            "Permission denied connecting to {host}:{port}. A local firewall or sandbox policy \
+             is blocking the outbound connection."
         ),
         _ => format!("Cannot connect to {host}:{port}: {error}"),
     }
@@ -854,6 +860,40 @@ mod tests {
     const DONT: u8 = 254;
     const TELNET_BINARY: u8 = 0;
     const COM_PORT: u8 = crate::rfc2217::COM_PORT_OPTION;
+
+    fn assert_reads_as_one_sentence(message: &str) {
+        assert!(!message.contains("  "), "stray whitespace in {message:?}");
+    }
+
+    #[test]
+    fn connect_errors_read_as_prose() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::TimedOut,
+            ErrorKind::HostUnreachable,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+        ] {
+            assert_reads_as_one_sentence(&describe_connect_error(
+                "device",
+                2217,
+                &Error::new(kind, "x"),
+            ));
+        }
+    }
+
+    #[test]
+    fn control_errors_on_a_raw_tcp_session_read_as_prose() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (_link, sink) =
+            connect_network("127.0.0.1", port, SerialTransport::RawTcp, SerialParams::default(), false)
+                .expect("connect");
+        let _server = listener.accept().expect("accept");
+        assert_reads_as_one_sentence(&sink.send_break(10).expect_err("raw TCP has no BREAK"));
+        assert_reads_as_one_sentence(&sink.set_params(SerialParams::default()).expect_err("no params"));
+    }
 
     #[derive(Clone)]
     struct MockBehaviour {
