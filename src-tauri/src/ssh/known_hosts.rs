@@ -497,9 +497,14 @@ pub(super) async fn prompt_for_host_key_override(
     observed_fingerprint: &str,
 ) -> Result<bool, String> {
     let (tx, mut rx) = mpsc::channel::<bool>(1);
-    state
-        .upsert_session(id, |s| s.host_key_prompt_tx = Some(tx))
-        .await;
+    // `with_session_mut`, not upsert: a record closed meanwhile stays closed.
+    if state
+        .with_session_mut(id, |s| s.host_key_prompt_tx = Some(tx))
+        .await
+        .is_none()
+    {
+        return Ok(false);
+    }
 
     let emitted = app.emit(
         &crate::util::session_event("ssh-host-key-mismatch-prompt", id),

@@ -158,6 +158,12 @@ pub struct SshSessionState {
     handle: Option<SharedSshHandle>,
     /// When `Some`, an auto-reconnect loop is active; notifying it stops the loop.
     reconnect_flag: Option<Arc<ReconnectCancellation>>,
+    /// The `start_ssh_pty` call this record belongs to. A connection attempt
+    /// may only register its shell while this is still its own token and not
+    /// cancelled; closing the tab (or restarting the same id) cancels it, so
+    /// an attempt that finishes afterwards tears itself down instead of
+    /// leaving a shell (and a tmux/screen session) behind with no tab.
+    owner: Option<Arc<ReconnectCancellation>>,
     /// When `Some`, auto-reconnect is enabled and this config is used on every retry.
     reconnect_config: Option<ReconnectConfig>,
     /// Per-session remote (`-R`) forward registry, shared with the russh
@@ -181,6 +187,26 @@ impl ReconnectCancellation {
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
+
+    /// Resolves once `cancel` has been called (immediately if it already was).
+    async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Register before checking the flag so a cancel in between is not lost.
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+const CLOSED_WHILE_CONNECTING: &str = "SSH session was closed while connecting";
+
+fn owns(session: &SshSessionState, owner: &Arc<ReconnectCancellation>) -> bool {
+    !owner.is_cancelled() && session.owner.as_ref().is_some_and(|current| Arc::ptr_eq(current, owner))
 }
 
 #[derive(Clone)]
@@ -326,15 +352,40 @@ impl SshState {
             .clone()
     }
 
-    async fn ensure_remote_forwards_owned(self, id: String) -> forwarding::RemoteForwardRegistry {
-        self.ensure_remote_forwards(&id).await
+    /// The record's remote-forward registry, created if missing — but without
+    /// resurrecting a record that was closed meanwhile.
+    async fn existing_remote_forwards(self, id: String) -> forwarding::RemoteForwardRegistry {
+        self.with_session_mut(&id, |s| {
+            s.remote_forwards
+                .get_or_insert_with(forwarding::new_remote_forward_registry)
+                .clone()
+        })
+        .await
+        .unwrap_or_else(forwarding::new_remote_forward_registry)
     }
 
-    async fn upsert_session_owned<F>(self, id: String, f: F)
-    where
-        F: FnOnce(&mut SshSessionState) + Send,
-    {
-        self.upsert_session(&id, f).await;
+    /// Register a finished connection's IO channels and handle, if `owner`
+    /// still owns the record. Checked and written under one write lock, so a
+    /// concurrent close either sees the handle (and kills the remote session
+    /// itself) or makes this return `false`.
+    async fn claim_session(
+        self,
+        id: String,
+        owner: Arc<ReconnectCancellation>,
+        handle: SharedSshHandle,
+        input_tx: mpsc::Sender<Vec<u8>>,
+        resize_tx: mpsc::Sender<(u32, u32)>,
+    ) -> bool {
+        let mut guard = self.sessions.write().await;
+        match guard.get_mut(&id) {
+            Some(s) if owns(s, &owner) => {
+                s.input_tx = Some(input_tx);
+                s.resize_tx = Some(resize_tx);
+                s.handle = Some(handle);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Read-only access to the remote-forward registry, if one exists.
@@ -436,6 +487,9 @@ async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) {
     if let Some(session) = session {
         if let Some(notify) = session.reconnect_flag {
             notify.cancel();
+        }
+        if let Some(owner) = session.owner {
+            owner.cancel();
         }
         // The IO task owns another handle/channel reference. Removing the
         // record alone cannot close it; disconnect also wakes channel.wait().
@@ -656,23 +710,27 @@ pub async fn close_ssh_pty(
     forwarding::stop_session_tunnels(forwarding.inner(), &id).await;
     zmodem.reset_session(&id);
 
+    // Cancel any connection attempt still in flight before looking for a
+    // handle: from here on it cannot register, so it either already did (and
+    // the handle is seen below) or it tears itself down.
+    let (config, handle) = {
+        let guard = state.sessions.write().await;
+        match guard.get(&id) {
+            Some(s) => {
+                if let Some(owner) = &s.owner {
+                    owner.cancel();
+                }
+                (s.reconnect_config.clone(), s.handle.clone())
+            }
+            None => (None, None),
+        }
+    };
+
     // For session-persistence modes (tmux/screen), try to destroy the remote session first.
-    let config = state.reconnect_config(&id).await;
     if let Some(cfg) = config {
-        let kill_cmd = match cfg.reconnect_type {
-            ReconnectType::Manual => None,
-            ReconnectType::Simple => None,
-            ReconnectType::Tmux => Some(format!(
-                "tmux kill-session -t {} 2>/dev/null; exit 0",
-                shell_escape(&cfg.session_name)
-            )),
-            ReconnectType::Screen => Some(format!(
-                "screen -S {} -X quit 2>/dev/null; exit 0",
-                shell_escape(&cfg.session_name)
-            )),
-        };
+        let kill_cmd = multiplexer_kill_command(cfg.reconnect_type, &cfg.session_name);
         if let Some(cmd) = kill_cmd {
-            if let Ok(handle) = get_ssh_handle(state.inner(), &id).await {
+            if let Some(handle) = handle {
                 // Best-effort: open a channel, run the kill command, ignore errors.
                 let _ = async {
                     let channel = handle.channel_open_session().await?;
@@ -692,6 +750,53 @@ pub async fn close_ssh_pty(
     }
     stop_and_cleanup_ssh_session(state.inner(), &id).await;
     Ok(())
+}
+
+/// The command that ends the tmux/screen session a tab was attached to.
+fn multiplexer_kill_command(reconnect_type: ReconnectType, session_name: &str) -> Option<String> {
+    match reconnect_type {
+        ReconnectType::Manual | ReconnectType::Simple => None,
+        ReconnectType::Tmux => Some(format!(
+            "tmux kill-session -t {} 2>/dev/null; exit 0",
+            shell_escape(session_name)
+        )),
+        ReconnectType::Screen => Some(format!(
+            "screen -S {} -X quit 2>/dev/null; exit 0",
+            shell_escape(session_name)
+        )),
+    }
+}
+
+/// Tear down a connection whose tab went away before it could register: end
+/// the tmux/screen session it attached to or created, then the transport.
+async fn abandon_unclaimed_connection(
+    handle: SharedSshHandle,
+    mut channel: russh::Channel<client::Msg>,
+    multiplexer: Option<(ReconnectType, String)>,
+) {
+    if let Some(command) = multiplexer.and_then(|(kind, name)| multiplexer_kill_command(kind, &name)) {
+        // The attach command was just sent; give it a moment to create the
+        // session (its first screen draw says it has) so the kill finds it.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Data { .. }) | Some(ChannelMsg::ExtendedData { .. }) => break,
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_remote_command_capture(handle.clone(), command),
+        )
+        .await;
+    }
+    let _ = channel.close().await;
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "Session closed", "en")
+        .await;
 }
 
 /// Why a connection attempt failed, and whether the reconnect loop should try
@@ -1303,9 +1408,14 @@ async fn prompt_for_existing_reconnect_session(
     }
 
     let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
-    state
-        .upsert_session(&id, |s| s.reconnect_prompt_tx = Some(tx))
-        .await;
+    // `with_session_mut`, not upsert: a record closed meanwhile stays closed.
+    if state
+        .with_session_mut(&id, |s| s.reconnect_prompt_tx = Some(tx))
+        .await
+        .is_none()
+    {
+        return Ok(None);
+    }
 
     let tool = match reconnect_type {
         ReconnectType::Manual => "manual",
@@ -1448,16 +1558,26 @@ pub async fn start_ssh_pty(
     });
     let use_reconnect = !matches!(rt, ReconnectType::Manual);
 
+    // This call's ownership token; closing the tab or starting the id again
+    // cancels it. In reconnect modes it also stops the reconnect loop.
+    let owner = Arc::new(ReconnectCancellation::default());
+
     // Always create a fresh auth-response channel registered under this id.
     let (auth_response_tx, auth_response_rx) = mpsc::channel::<String>(4);
-    state
-        .upsert_session(&id, |s| s.auth_tx = Some(auth_response_tx))
-        .await;
+    {
+        let owner = owner.clone();
+        state
+            .upsert_session(&id, |s| {
+                s.auth_tx = Some(auth_response_tx);
+                s.owner = Some(owner);
+            })
+            .await;
+    }
 
     if use_reconnect {
         // Store reconnect configuration + cancellation notifier in a single
         // write-lock acquisition.
-        let cancel_notify = Arc::new(ReconnectCancellation::default());
+        let cancel_notify = owner.clone();
         let cancel_notify_clone = cancel_notify.clone();
         state
             .upsert_session(&id, |s| {
@@ -1531,10 +1651,11 @@ pub async fn start_ssh_pty(
             None,
             false,
             auth_response_rx,
+            owner.clone(),
         ).await;
 
         match result {
-            Ok(_rx) => Ok(()),
+            Ok(_) => Ok(()),
             Err(err) => {
                 cleanup_ssh_session(state.inner(), &id).await;
                 Err(err.message)
@@ -1635,6 +1756,7 @@ async fn run_reconnect_loop(
             Some(cfg.session_name.clone()),
             !cfg.checked_existing_sessions,
             rx,
+            cancel_notify.clone(),
         ).await;
 
         match result {
@@ -1730,14 +1852,19 @@ fn do_single_ssh_connect(
     reconnect_session_name: Option<String>,
     should_prompt_existing_sessions: bool,
     mut auth_response_rx: mpsc::Receiver<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<mpsc::Receiver<String>, ConnectError>> + Send + 'static>> {
+    owner: Arc<ReconnectCancellation>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SharedSshHandle, ConnectError>> + Send + 'static>> {
     Box::pin(async move {
     let addr = format!("{host}:{port}");
     crate::debug_log!("Connecting to {}...", addr);
 
+    // Everything up to the PTY request only talks to the server (and maybe the
+    // user, for MFA or a session pick), so a close simply abandons it: the
+    // dropped handles end the connection.
+    let prepared = async {
     // Per-session remote-forward registry, reused across reconnects. Empty on a
     // fresh connect; populated once the user starts a remote (`-R`) tunnel.
-    let remote_forwards = state.clone().ensure_remote_forwards_owned(id.clone()).await;
+    let remote_forwards = state.clone().existing_remote_forwards(id.clone()).await;
     let session_handle = authenticate_ssh(
         host.clone(),
         port,
@@ -1792,6 +1919,19 @@ fn do_single_ssh_connect(
             .await;
         }
     }
+    Ok::<_, ConnectError>((session_handle, selected_session_name))
+    };
+    let (session_handle, selected_session_name) = tokio::select! {
+        biased;
+        _ = owner.cancelled() => return Err(ConnectError::terminal(CLOSED_WHILE_CONNECTING)),
+        prepared = prepared => prepared?,
+    };
+    if owner.is_cancelled() {
+        let _ = session_handle
+            .disconnect(russh::Disconnect::ByApplication, "Session closed", "en")
+            .await;
+        return Err(ConnectError::terminal(CLOSED_WHILE_CONNECTING));
+    }
 
     let (channel, used_multiplexer) = open_pty_channel(
         session_handle.clone(),
@@ -1811,16 +1951,20 @@ fn do_single_ssh_connect(
     let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
     // Register all runtime channels/handles for this session in a single
-    // write-lock acquisition.
-    {
-        let session_handle_entry = session_handle.clone();
-        state.clone()
-            .upsert_session_owned(id.clone(), move |s| {
-                s.input_tx = Some(input_tx);
-                s.resize_tx = Some(resize_tx);
-                s.handle = Some(session_handle_entry);
-            })
-            .await;
+    // write-lock acquisition — unless the tab was closed (or the id started
+    // again) while this attempt was connecting.
+    let claimed = state
+        .clone()
+        .claim_session(id.clone(), owner.clone(), session_handle.clone(), input_tx, resize_tx)
+        .await;
+    if !claimed {
+        crate::debug_log!("[ssh-debug] {} closed while connecting; abandoning the new shell", id);
+        let multiplexer = match (used_multiplexer, reconnect_type) {
+            (true, Some(kind)) => Some((kind, selected_session_name.clone())),
+            _ => None,
+        };
+        abandon_unclaimed_connection(session_handle, channel, multiplexer).await;
+        return Err(ConnectError::terminal(CLOSED_WHILE_CONNECTING));
     }
 
     let _ = app.emit(
@@ -1879,7 +2023,7 @@ fn do_single_ssh_connect(
         .await;
     });
 
-    Ok(auth_response_rx)
+    Ok(session_handle)
     })
 }
 
@@ -2565,6 +2709,125 @@ mod tests {
         assert_eq!(next_auth_factor(&[Password], &[PublicKey], true, false), None);
         assert_eq!(next_auth_factor(&[PublicKey], &[Password], false, true), None);
         assert_eq!(next_auth_factor(&[PublicKey, KeyboardInteractive], &[KeyboardInteractive], true, false), Some(PublicKey));
+    }
+
+    /// Accepts any session channel and exec; records each exec command. An
+    /// attach command draws a screen; anything else exits at once.
+    #[derive(Clone, Default)]
+    struct ExecRecorder {
+        commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl russh::server::Handler for ExecRecorder {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            let command = String::from_utf8_lossy(data).into_owned();
+            self.commands.lock().unwrap().push(command.clone());
+            session.channel_success(channel)?;
+            if command.contains("new-session") {
+                session.data(channel, b"[tmux screen]".to_vec())?;
+            } else {
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shell_that_finishes_connecting_after_close_is_torn_down() {
+        use super::*;
+        use std::time::Duration;
+
+        let recorder = ExecRecorder::default();
+        let (address, server) = test_support::spawn_server(recorder.clone()).await;
+
+        // start_ssh_pty registered the tab, then the user closed it while the
+        // connection (tmux mode) was still being set up.
+        let state = SshState::default();
+        let owner = Arc::new(ReconnectCancellation::default());
+        state.upsert_session("tab", |s| s.owner = Some(owner.clone())).await;
+
+        let mut client = test_support::connect(address).await;
+        assert!(client.authenticate_none("test").await.unwrap().success());
+        let handle: SharedSshHandle = Arc::new(client);
+        let channel = handle.channel_open_session().await.unwrap();
+        channel.exec(false, build_tmux_attach_command("at-tab")).await.unwrap();
+
+        stop_and_cleanup_ssh_session(&state, "tab").await;
+
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let claimed = state
+            .clone()
+            .claim_session("tab".to_string(), owner, handle.clone(), input_tx, resize_tx)
+            .await;
+        assert!(!claimed, "a closed tab must not get its shell back");
+        assert!(!state.contains("tab").await, "no record is resurrected");
+
+        abandon_unclaimed_connection(handle, channel, Some((ReconnectType::Tmux, "at-tab".to_string()))).await;
+        let mut server = server;
+        let ended = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
+        if ended.is_err() {
+            server.abort();
+        }
+        assert!(ended.is_ok(), "the abandoned connection must be closed");
+        let commands = recorder.commands.lock().unwrap().clone();
+        assert!(
+            commands.iter().any(|command| command.starts_with("tmux kill-session -t 'at-tab'")),
+            "the tmux session it created must be killed: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_live_owner_claims_its_session() {
+        use super::*;
+
+        let (address, server) = test_support::spawn_server(ExecRecorder::default()).await;
+        let mut client = test_support::connect(address).await;
+        assert!(client.authenticate_none("test").await.unwrap().success());
+        let handle: SharedSshHandle = Arc::new(client);
+
+        let state = SshState::default();
+        let stale = Arc::new(ReconnectCancellation::default());
+        let owner = Arc::new(ReconnectCancellation::default());
+        state.upsert_session("tab", |s| s.owner = Some(owner.clone())).await;
+
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        assert!(
+            !state.clone().claim_session("tab".to_string(), stale, handle.clone(), input_tx.clone(), resize_tx.clone()).await,
+            "an attempt from an earlier start of the same id must not register"
+        );
+        assert!(state.clone().claim_session("tab".to_string(), owner.clone(), handle, input_tx, resize_tx).await);
+        assert!(state.contains("tab").await);
+
+        owner.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), owner.cancelled())
+            .await
+            .expect("cancelled() resolves once cancelled");
+        server.abort();
     }
 
     #[test]
