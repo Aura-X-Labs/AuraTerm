@@ -624,6 +624,43 @@ describe("TerminalComponent", () => {
     vi.unstubAllGlobals();
   });
 
+  it("routes middle-click paste through xterm's paste flow", async () => {
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      clipboard: { writeText: vi.fn(async () => undefined), readText: vi.fn(async () => "echo one\necho two") },
+    });
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "local-session-middle",
+        isVisible: true,
+        isFocused: true,
+        broadcast: true,
+        session: { protocol: "local" } satisfies SessionConfig,
+        settings: { ...DEFAULT_SETTINGS, middleClickPaste: true },
+      },
+    });
+    await flushPromises();
+
+    const terminal = mockState.terminals[0];
+    const paste = vi.spyOn(terminal, "paste");
+    const root = wrapper.element.querySelector(":scope > div") as HTMLElement;
+    root.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await flushPromises();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(paste).toHaveBeenCalledExactlyOnceWith("echo one\necho two");
+    // Delivered once, via onData's batched path, and fanned out to other panes.
+    expect(mockState.writeSessionInput).toHaveBeenCalledTimes(1);
+    expect(mockState.writeSessionInput).toHaveBeenCalledWith(
+      "local-session-middle", "echo one\necho two", expect.anything(),
+    );
+    expect(wrapper.emitted("broadcastInput")).toEqual([["echo one\necho two"]]);
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
   describe.each([
     ["assist", "assist-client-state", { protocol: "assist", assistConfig: { code: "BCDF-GHJK-LMNP" } }],
     ["relay", "relay-client-state", {
