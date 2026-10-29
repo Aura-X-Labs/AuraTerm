@@ -502,26 +502,26 @@ async fn cleanup_ssh_session(state: &SshState, id: &str, owner: &Arc<ReconnectCa
 }
 
 /// Stop reconnect loop for a session and clean up all state, finally dropping
-/// the entire session record.
-async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) {
-    let session = state.sessions.write().await.remove(id);
-    if let Some(session) = session {
-        if let Some(notify) = session.reconnect_flag {
-            notify.cancel();
-        }
-        if let Some(owner) = session.owner {
-            owner.cancel();
-        }
-        // The IO task owns another handle/channel reference. Removing the
-        // record alone cannot close it; disconnect also wakes channel.wait().
-        if let Some(handle) = session.handle {
-            if let Err(error) = handle
-                .disconnect(russh::Disconnect::ByApplication, "Session closed", "en").await
-            {
-                crate::warn_log!("[ssh] {} disconnect failed: {}", id, error);
-            }
+/// the entire session record. Returns the record's remote-forward registry so
+/// a restart of the same tab can carry its `-R` forwards over.
+async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) -> Option<forwarding::RemoteForwardRegistry> {
+    let session = state.sessions.write().await.remove(id)?;
+    if let Some(notify) = session.reconnect_flag {
+        notify.cancel();
+    }
+    if let Some(owner) = session.owner {
+        owner.cancel();
+    }
+    // The IO task owns another handle/channel reference. Removing the
+    // record alone cannot close it; disconnect also wakes channel.wait().
+    if let Some(handle) = session.handle {
+        if let Err(error) = handle
+            .disconnect(russh::Disconnect::ByApplication, "Session closed", "en").await
+        {
+            crate::warn_log!("[ssh] {} disconnect failed: {}", id, error);
         }
     }
+    session.remote_forwards
 }
 
 async fn get_ssh_handle(state: &SshState, id: &str) -> Result<SharedSshHandle, String> {
@@ -1314,24 +1314,25 @@ async fn run_keyboard_interactive(
 
 /// Re-issue `tcpip-forward` requests for every registered remote (`-R`) forward
 /// on a freshly connected handle. Used after a reconnect so server-side
-/// listeners are recreated; best-effort, errors are ignored.
+/// listeners are recreated. Returns a line per forward the server refused.
 async fn reissue_remote_forwards(
     handle: SharedSshHandle,
     registry: forwarding::RemoteForwardRegistry,
-) {
+) -> Vec<String> {
     let binds: Vec<(String, u32)> = match registry.lock() {
         Ok(map) => map
             .iter()
             .map(|(port, target)| (target.bind_address.clone(), *port))
             .collect(),
-        Err(_) => return,
+        Err(_) => return Vec::new(),
     };
-    if binds.is_empty() {
-        return;
-    }
+    let mut failures = Vec::new();
     for (bind_address, bind_port) in binds {
-        let _ = handle.tcpip_forward(bind_address, bind_port).await;
+        if let Err(error) = handle.tcpip_forward(bind_address.clone(), bind_port).await {
+            failures.push(format!("{bind_address}:{bind_port}: {error}"));
+        }
     }
+    failures
 }
 
 /// Check whether a command exists on the remote host.
@@ -1566,8 +1567,11 @@ pub async fn start_ssh_pty(
 ) -> Result<(), String> {
     crate::debug_log!("Starting SSH connection to {}@{}:{}", user, host, port);
 
-    // Stop any previous session for this id.
-    stop_and_cleanup_ssh_session(state.inner(), &id).await;
+    // Stop any previous session for this id. Its remote (`-R`) forwards stay
+    // registered in the tunnel manager across a manual reconnect, so keep
+    // their targets: the new connection re-requests them from the server and
+    // routes the forwarded channels with them.
+    let carried_remote_forwards = stop_and_cleanup_ssh_session(state.inner(), &id).await;
     zmodem.reset_session(&id);
 
     let rt = reconnect_type.unwrap_or_else(|| {
@@ -1591,6 +1595,7 @@ pub async fn start_ssh_pty(
             .upsert_session(&id, |s| {
                 s.auth_tx = Some(auth_response_tx);
                 s.owner = Some(owner);
+                s.remote_forwards = carried_remote_forwards;
             })
             .await;
     }
@@ -1922,7 +1927,15 @@ fn do_single_ssh_connect(
     // server-side listener is lost when the transport drops, so re-issue the
     // `tcpip-forward` request for each registered bind port (no-op on a fresh
     // connect where the registry is empty).
-    reissue_remote_forwards(session_handle.clone(), remote_forwards.clone()).await;
+    for failure in reissue_remote_forwards(session_handle.clone(), remote_forwards.clone()).await {
+        let _ = app.emit(
+            &crate::util::session_event("pty-output", &id),
+            TerminalDataPayload {
+                id: id.clone(),
+                data: format!("\r\n\x1b[33m[Remote forward {failure} could not be restored]\x1b[0m\r\n"),
+            },
+        );
+    }
 
     crate::debug_log!("Requesting PTY and shell...");
     let mut selected_session_name = reconnect_session_name.unwrap_or_else(|| auraterm_reconnect_session_name(&id));
@@ -2892,6 +2905,63 @@ mod tests {
 
         assert!(cleanup_ssh_session(&state, "tab", &new).await);
         assert!(!state.contains("tab").await);
+    }
+
+    #[tokio::test]
+    async fn remote_forwards_survive_a_manual_reconnect() {
+        use super::*;
+        use russh::server;
+
+        #[derive(Clone, Default)]
+        struct Server {
+            forwards: Arc<std::sync::Mutex<Vec<(String, u32)>>>,
+        }
+        impl server::Handler for Server {
+            type Error = russh::Error;
+
+            async fn auth_none(&mut self, _: &str) -> Result<server::Auth, Self::Error> {
+                Ok(server::Auth::Accept)
+            }
+
+            async fn tcpip_forward(
+                &mut self,
+                address: &str,
+                port: &mut u32,
+                _: &mut server::Session,
+            ) -> Result<bool, Self::Error> {
+                self.forwards.lock().unwrap().push((address.to_string(), *port));
+                Ok(true)
+            }
+        }
+
+        // A -R forward is registered on the tab's first connection.
+        let state = SshState::default();
+        let registry = state.ensure_remote_forwards("tab").await;
+        registry.lock().unwrap().insert(
+            8022,
+            forwarding::RemoteForwardTarget {
+                bind_address: "127.0.0.1".to_string(),
+                host: "localhost".to_string(),
+                port: 22,
+            },
+        );
+
+        // Manual reconnect: start_ssh_pty stops the old record first.
+        let carried = stop_and_cleanup_ssh_session(&state, "tab").await.expect("registry carried over");
+        assert!(Arc::ptr_eq(&carried, &registry));
+        state.upsert_session("tab", |s| s.remote_forwards = Some(carried)).await;
+        let reused = state.clone().existing_remote_forwards("tab".to_string()).await;
+        assert_eq!(reused.lock().unwrap().len(), 1, "the new connection still knows the forward");
+
+        // ... and asks the new server to listen again.
+        let server_state = Server::default();
+        let (address, server) = test_support::spawn_server(server_state.clone()).await;
+        let mut client = test_support::connect(address).await;
+        assert!(client.authenticate_none("test").await.unwrap().success());
+        let failures = reissue_remote_forwards(Arc::new(client), reused).await;
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(*server_state.forwards.lock().unwrap(), vec![("127.0.0.1".to_string(), 8022)]);
+        server.abort();
     }
 
     #[test]
