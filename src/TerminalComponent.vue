@@ -602,12 +602,15 @@ function notifySerialConnectionStateChange(state: SerialConnectionState) {
   }
 }
 
+/** Send `text` as typed lines (input bar, line-mode snippets, rerun).
+ *  Each line ends in CR, which is what xterm sends for Enter: a bare LF is
+ *  not Enter to Windows ConPTY or to many serial consoles. */
 function sendData(text: string) {
   if (!ptyId.value) {
     return;
   }
-  const data = text.endsWith("\n") ? text : `${text}\n`;
-  queueTerminalInput(data);
+  const lines = text.replace(/\r?\n/g, "\r");
+  queueTerminalInput(lines.endsWith("\r") ? lines : `${lines}\r`);
 }
 
 // Raw passthrough used by broadcast fan-out: write to this session exactly as

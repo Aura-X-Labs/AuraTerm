@@ -726,6 +726,29 @@ describe("TerminalComponent", () => {
     wrapper.unmount();
   });
 
+  it("sends input-bar and snippet lines with CR, like xterm's Enter key", async () => {
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "serial-session-lines",
+        isVisible: true,
+        isFocused: true,
+        session: { protocol: "local" } satisfies SessionConfig,
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+
+    wrapper.vm.sendData("show version\n");
+    wrapper.vm.sendData("configure terminal\r\nexit");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(mockState.writeSessionInput).toHaveBeenCalledExactlyOnceWith(
+      "serial-session-lines", "show version\rconfigure terminal\rexit\r", expect.anything(),
+    );
+    wrapper.unmount();
+  });
+
   describe.each([
     ["assist", "assist-client-state", { protocol: "assist", assistConfig: { code: "BCDF-GHJK-LMNP" } }],
     ["relay", "relay-client-state", {
