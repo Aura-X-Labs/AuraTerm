@@ -285,10 +285,6 @@ let shellIntegration: ShellIntegration | null = null;
 let stopSessionWatch: (() => void) | null = null;
 let pendingInputBuffer = "";
 let pendingInputTimer: number | null = null;
-// Plain (non-reactive) accumulator backing the on-demand "Save log" action.
-// Nothing renders it, so a ref would only add reactive-setter overhead on every
-// pty-output chunk.
-let logBuffer = "";
 let pendingLogBuffer = "";
 let pendingLogPath: string | null = null;
 let pendingLogTimer: number | null = null;
@@ -299,12 +295,6 @@ const zmodemBusy = ref(false);
 
 const LOG_FLUSH_INTERVAL_MS = 180;
 const LOG_FLUSH_MAX_CHUNK = 4096;
-// Bound the in-memory "Save log" buffer so a long-running / high-volume session
-// cannot grow it without limit. When exceeded we keep the most recent
-// SAVED_LOG_MAX_CHARS characters; the slack lets it grow a little past the cap
-// before trimming, so we don't re-slice a multi-MB string on every chunk.
-const SAVED_LOG_MAX_CHARS = 4_000_000;
-const SAVED_LOG_TRIM_SLACK = 1_000_000;
 
 const {
   writeSessionInput,
@@ -319,7 +309,6 @@ const {
   startZmodemSend,
   cancelZmodem,
   persistUpdatedSshPassword,
-  saveTerminalLog,
   appendToLog,
   answerSshMfa,
   answerSshHostKeyMismatch,
@@ -613,11 +602,6 @@ function notifySerialConnectionStateChange(state: SerialConnectionState) {
   }
 }
 
-async function saveLog(tabTitle: string) {
-  const plain = stripAnsi(logBuffer);
-  return saveTerminalLog(plain, tabTitle);
-}
-
 function sendData(text: string) {
   if (!ptyId.value) {
     return;
@@ -775,7 +759,6 @@ async function reconnectSshSession() {
 }
 
 defineExpose<TerminalHandle>({
-  saveLog,
   sendData,
   writeInput,
   pasteText,
@@ -1117,7 +1100,6 @@ onMounted(() => {
       }
 
       flushPendingLog(true);
-      logBuffer = "";
       outputRuleEngine.reset();
       if (logPathRef.value) {
         const trimmedPath = logPathRef.value.trim();
@@ -1160,11 +1142,6 @@ onMounted(() => {
               activeSessionRef.value,
             );
           }
-        }
-        logBuffer += event.payload.data;
-        if (logBuffer.length > SAVED_LOG_MAX_CHARS + SAVED_LOG_TRIM_SLACK) {
-          // Keep only the most recent window; drop the oldest output.
-          logBuffer = logBuffer.slice(logBuffer.length - SAVED_LOG_MAX_CHARS);
         }
         if (actualLogPath.value) {
           const plain = stripAnsi(event.payload.data);

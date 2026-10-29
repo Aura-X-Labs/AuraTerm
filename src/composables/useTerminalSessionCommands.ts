@@ -257,13 +257,6 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
     }
   }
 
-  function saveTerminalLog(content: string, tabName: string) {
-    return invoke<string>("save_terminal_log", {
-      content,
-      tabName,
-    });
-  }
-
   function appendToLog(path: string, content: string) {
     return invoke("append_to_log", {
       path,
@@ -305,7 +298,6 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
     startZmodemSend,
     cancelZmodem,
     persistUpdatedSshPassword,
-    saveTerminalLog,
     appendToLog,
     answerSshMfa,
     answerSshHostKeyMismatch,

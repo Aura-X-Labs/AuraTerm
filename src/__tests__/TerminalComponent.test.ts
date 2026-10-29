@@ -102,7 +102,6 @@ const mockState = vi.hoisted(() => {
   const resizeSession = vi.fn(async () => undefined);
   const closeSession = vi.fn(async () => undefined);
   const persistUpdatedSshPassword = vi.fn(async (..._args: unknown[]) => undefined);
-  const saveTerminalLog = vi.fn(async () => "");
   const appendToLog = vi.fn(async () => undefined);
   const answerSshMfa = vi.fn(async () => undefined);
   const answerSshHostKeyMismatch = vi.fn(async () => undefined);
@@ -139,7 +138,6 @@ const mockState = vi.hoisted(() => {
     listeners,
     persistUpdatedSshPassword,
     resizeSession,
-    saveTerminalLog,
     startSshSession,
     terminals,
     webLinkHandlers,
@@ -213,7 +211,6 @@ vi.mock("../composables/useTerminalSessionCommands", () => ({
     startSerialSession: vi.fn(async () => undefined),
     startLocalSession: vi.fn(async () => undefined),
     persistUpdatedSshPassword: mockState.persistUpdatedSshPassword,
-    saveTerminalLog: mockState.saveTerminalLog,
     appendToLog: mockState.appendToLog,
     answerSshMfa: mockState.answerSshMfa,
     answerSshHostKeyMismatch: mockState.answerSshHostKeyMismatch,
@@ -234,7 +231,6 @@ describe("TerminalComponent", () => {
     mockState.resizeSession.mockClear();
     mockState.closeSession.mockClear();
     mockState.persistUpdatedSshPassword.mockClear();
-    mockState.saveTerminalLog.mockClear();
     mockState.appendToLog.mockClear();
     mockState.answerSshMfa.mockClear();
     mockState.answerSshHostKeyMismatch.mockClear();
