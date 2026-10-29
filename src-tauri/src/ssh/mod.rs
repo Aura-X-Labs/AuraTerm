@@ -219,6 +219,9 @@ pub struct SshState {
     /// frontend-assigned connection id.
     sessions: Arc<RwLock<HashMap<String, SshSessionState>>>,
     hub: Arc<crate::terminal_event_hub::TerminalEventHub>,
+    /// Running uploads/downloads by caller-supplied transfer id, for
+    /// `ssh_cancel_transfer`.
+    transfers: Arc<std::sync::Mutex<HashMap<String, Arc<ReconnectCancellation>>>>,
 }
 
 #[derive(Clone)]
@@ -264,6 +267,7 @@ impl SshState {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             hub,
+            transfers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 

@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { defaultFilesDir } from "./distribution";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { t } from "./i18n";
 import { confirmDialog } from "./nativeDialogs";
 import { promptText } from "./promptDialog";
@@ -30,9 +32,11 @@ const loading = ref(false);
 const busy = ref(false);
 const errorMessage = ref("");
 const statusMessage = ref("");
-const uploadInputRef = ref<HTMLInputElement | null>(null);
+const fileListRef = ref<HTMLElement | null>(null);
 const transfer = ref<RemoteTransferProgress | null>(null);
-type UploadQueueItem = { id: string; name: string; status: "waiting" | "active" | "completed" | "failed" };
+// The transfer the Cancel button stops; also filters progress events.
+const activeTransferId = ref<string | null>(null);
+type UploadQueueItem = { id: string; name: string; status: "waiting" | "active" | "completed" | "failed" | "cancelled" };
 const uploadQueue = ref<UploadQueueItem[]>([]);
 const draggingFiles = ref(false);
 const editorPath = ref<string | null>(null);
@@ -89,12 +93,20 @@ const transferBarWidth = computed(() => {
   return 12;
 });
 
+const transferActive = computed(() => (
+  transfer.value !== null
+  && activeTransferId.value !== null
+  && (transfer.value.status === "started" || transfer.value.status === "progress")
+));
+
 const transferSummary = computed(() => {
   if (!transfer.value) {
     return "";
   }
 
   switch (transfer.value.status) {
+    case "cancelled":
+      return transfer.value.direction === "upload" ? t("remoteFiles.transferUploadCancelled") : t("remoteFiles.transferDownloadCancelled");
     case "completed":
       return transfer.value.direction === "upload" ? t("remoteFiles.transferUploadCompleted") : t("remoteFiles.transferDownloadCompleted");
     case "failed":
@@ -213,16 +225,39 @@ function joinRemotePath(base: string, name: string) {
   return `${base.replace(/\/+$/, "")}/${cleanName}`;
 }
 
-function markTransferFailed(error: unknown) {
+/** The backend's error text for a transfer stopped by `ssh_cancel_transfer`. */
+const TRANSFER_CANCELLED = "Transfer cancelled";
+
+function isCancelled(error: unknown) {
+  return String(error).includes(TRANSFER_CANCELLED);
+}
+
+function markTransferEnded(error: unknown) {
   if (!transfer.value) {
     return;
   }
 
   transfer.value = {
     ...transfer.value,
-    status: "failed",
+    status: isCancelled(error) ? "cancelled" : "failed",
     message: describeError(error),
   };
+}
+
+async function cancelTransfer() {
+  const transferId = activeTransferId.value;
+  if (!transferId) {
+    return;
+  }
+  try {
+    await invoke("ssh_cancel_transfer", { transferId });
+  } catch (error) {
+    setError(error);
+  }
+}
+
+function baseName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
 function resetTransferState() {
@@ -267,25 +302,28 @@ function openEntry(entry: RemoteFileEntry) {
   }
 }
 
-function triggerUpload() {
-  uploadInputRef.value?.click();
+async function triggerUpload() {
+  // A native picker hands back paths, so the backend streams each file from
+  // disk instead of the webview reading it into memory.
+  let picked: string | string[] | null;
+  try {
+    picked = await openFileDialog({ multiple: true, directory: false });
+  } catch (error) {
+    setError(error);
+    return;
+  }
+  const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
+  await uploadPaths(paths);
 }
 
-async function handleUploadChange(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files ?? []);
-  await uploadFiles(files);
-  input.value = "";
-}
-
-async function uploadFiles(files: File[]) {
-  if (files.length === 0) {
+async function uploadPaths(paths: string[]) {
+  if (paths.length === 0 || busy.value) {
     return;
   }
 
-  const queued: UploadQueueItem[] = files.map((file) => ({
+  const queued: UploadQueueItem[] = paths.map((path) => ({
     id: crypto.randomUUID(),
-    name: file.name,
+    name: baseName(path),
     status: "waiting",
   }));
   uploadQueue.value = [...uploadQueue.value.filter((item) => item.status === "active"), ...queued];
@@ -293,31 +331,33 @@ async function uploadFiles(files: File[]) {
   errorMessage.value = "";
   busy.value = true;
   try {
-    for (let index = 0; index < files.length; index += 1) {
-      const file = files[index];
+    for (let index = 0; index < paths.length; index += 1) {
+      const path = paths[index];
       const queueItem = queued[index];
+      const transferId = crypto.randomUUID();
+      activeTransferId.value = transferId;
       uploadQueue.value = uploadQueue.value.map((item) => (
         item.id === queueItem.id ? { ...item, status: "active" } : item
       ));
       transfer.value = {
         id: props.sessionId,
+        transferId,
         direction: "upload",
         status: "started",
         mode: transferMode.value,
-        fileName: file.name,
-        remotePath: joinRemotePath(currentPath.value || ".", file.name),
-        localPath: file.name,
+        fileName: queueItem.name,
+        remotePath: joinRemotePath(currentPath.value || ".", queueItem.name),
+        localPath: path,
         transferredBytes: 0,
-        totalBytes: file.size,
+        totalBytes: null,
         message: null,
       };
 
-      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
       await invoke("ssh_upload_file", {
         id: props.sessionId,
         remoteDir: currentPath.value || ".",
-        fileName: file.name,
-        data: bytes,
+        localPath: path,
+        transferId,
         mode: transferMode.value,
         resume: transferMode.value === "sftp" && resumeTransfers.value,
       });
@@ -325,22 +365,41 @@ async function uploadFiles(files: File[]) {
         item.id === queueItem.id ? { ...item, status: "completed" } : item
       ));
     }
-    setStatus(t("remoteFiles.uploaded", { count: files.length, path: currentPath.value || "." }));
+    setStatus(t("remoteFiles.uploaded", { count: paths.length, path: currentPath.value || "." }));
     await loadDirectory(currentPath.value);
   } catch (error) {
-    uploadQueue.value = uploadQueue.value.map((item) => (
-      item.status === "active" ? { ...item, status: "failed" } : item
-    ));
-    markTransferFailed(error);
-    setError(error);
+    const cancelled = isCancelled(error);
+    // A cancel stops the rest of the queue too; a failure leaves it unsent.
+    uploadQueue.value = uploadQueue.value.map((item) => {
+      if (!queued.some((entry) => entry.id === item.id)) return item;
+      if (item.status === "active") return { ...item, status: cancelled ? "cancelled" : "failed" };
+      if (item.status === "waiting") return { ...item, status: "cancelled" };
+      return item;
+    });
+    markTransferEnded(error);
+    if (cancelled) {
+      setStatus(t("remoteFiles.transferUploadCancelled"));
+    } else {
+      setError(error);
+    }
+    await loadDirectory(currentPath.value);
   } finally {
+    activeTransferId.value = null;
     busy.value = false;
   }
 }
 
-function handleFileDrop(event: DragEvent) {
-  draggingFiles.value = false;
-  void uploadFiles(Array.from(event.dataTransfer?.files ?? []));
+/** Whether a native drag-and-drop position is over the file list. */
+function isOverFileList(position: { x: number; y: number }) {
+  const element = fileListRef.value;
+  if (!element) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const x = position.x / scale;
+  const y = position.y / scale;
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 async function openRemoteEditor(entry: RemoteFileEntry) {
@@ -415,9 +474,12 @@ async function downloadSelected() {
   statusMessage.value = "";
   errorMessage.value = "";
   busy.value = true;
+  const transferId = crypto.randomUUID();
+  activeTransferId.value = transferId;
   try {
     transfer.value = {
       id: props.sessionId,
+      transferId,
       direction: "download",
       status: "started",
       mode: transferMode.value,
@@ -434,14 +496,20 @@ async function downloadSelected() {
       remotePath: selectedEntry.value.path,
       localDir: downloadDirectory.value || null,
       expectedSize: selectedEntry.value.size,
+      transferId,
       mode: transferMode.value,
       resume: transferMode.value === "sftp" && resumeTransfers.value,
     });
     setStatus(t("remoteFiles.downloaded", { path: localPath }));
   } catch (error) {
-    markTransferFailed(error);
-    setError(error);
+    markTransferEnded(error);
+    if (isCancelled(error)) {
+      setStatus(t("remoteFiles.transferDownloadCancelled"));
+    } else {
+      setError(error);
+    }
   } finally {
+    activeTransferId.value = null;
     busy.value = false;
   }
 }
@@ -515,13 +583,39 @@ onMounted(async () => {
       if (event.payload.id !== props.sessionId) {
         return;
       }
+      if (event.payload.transferId && event.payload.transferId !== activeTransferId.value) {
+        return;
+      }
       transfer.value = {
         ...event.payload,
-        message: null,
+        message: event.payload.message ?? null,
       };
     }));
   } catch (error) {
     console.error("Failed to setup SSH transfer progress listener:", error);
+  }
+
+  try {
+    // Native drops: the window's drag-and-drop handler sees file paths (the
+    // HTML drop event only offers in-memory File objects, if anything).
+    cleanupFns.push(await getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload;
+      if (payload.type === "leave") {
+        draggingFiles.value = false;
+        return;
+      }
+      const inside = !editorPath.value && isOverFileList(payload.position);
+      if (payload.type === "drop") {
+        draggingFiles.value = false;
+        if (inside) {
+          void uploadPaths(payload.paths);
+        }
+        return;
+      }
+      draggingFiles.value = inside && !busy.value;
+    }));
+  } catch (error) {
+    console.error("Failed to setup file drop listener:", error);
   }
 
   void loadDirectory();
@@ -589,7 +683,6 @@ onBeforeUnmount(() => {
         {{ $t('remoteFiles.resumeTransfers') }}
       </label>
 
-      <input ref="uploadInputRef" type="file" multiple hidden @change="handleUploadChange">
     </div>
 
     <div v-if="editorPath" class="remote-file-editor-toolbar">
@@ -615,12 +708,9 @@ onBeforeUnmount(() => {
 
     <div
       v-if="!editorPath"
+      ref="fileListRef"
       class="remote-file-manager-list"
       :class="{ 'dragging-files': draggingFiles }"
-      @dragenter.prevent="draggingFiles = true"
-      @dragover.prevent="draggingFiles = true"
-      @dragleave.prevent="draggingFiles = false"
-      @drop.prevent="handleFileDrop"
     >
       <div v-if="draggingFiles" class="remote-file-manager-drop-hint">{{ $t('remoteFiles.dropHint', { path: currentPath }) }}</div>
       <div class="remote-file-manager-list-head">
@@ -672,7 +762,15 @@ onBeforeUnmount(() => {
             <div class="remote-file-manager-transfer-title">{{ transferSummary }}</div>
             <div class="remote-file-manager-transfer-subtitle">{{ transfer.mode.toUpperCase() }} · {{ transfer.fileName }}</div>
           </div>
-          <div class="remote-file-manager-transfer-percent">{{ transferProgressLabel }}</div>
+          <div class="remote-file-manager-transfer-actions">
+            <div class="remote-file-manager-transfer-percent">{{ transferProgressLabel }}</div>
+            <button
+              v-if="transferActive"
+              type="button"
+              class="remote-file-manager-transfer-cancel"
+              @click="void cancelTransfer()"
+            >{{ $t('remoteFiles.cancelTransfer') }}</button>
+          </div>
         </div>
 
         <div class="remote-file-manager-progress-track">
@@ -698,7 +796,7 @@ onBeforeUnmount(() => {
       <div v-if="uploadQueue.length > 1" class="remote-file-manager-queue">
         <div class="remote-file-manager-queue-title">{{ $t('remoteFiles.uploadQueue') }}</div>
         <div v-for="item in uploadQueue" :key="item.id" class="remote-file-manager-queue-item" :class="item.status">
-          <span>{{ item.name }}</span><span>{{ item.status }}</span>
+          <span>{{ item.name }}</span><span>{{ $t(`remoteFiles.queueStatus.${item.status}`) }}</span>
         </div>
       </div>
 

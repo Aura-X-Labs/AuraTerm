@@ -1088,6 +1088,7 @@ fn main() {
             ssh::ssh_write_remote_text_file,
             ssh::ssh_upload_file,
             ssh::ssh_download_file,
+            ssh::ssh_cancel_transfer,
             ssh::ssh_start_tunnel,
             ssh::ssh_stop_tunnel,
             ssh::ssh_list_tunnels,

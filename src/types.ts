@@ -121,10 +121,12 @@ export interface ActiveTunnelInfo {
 
 export type RemoteTransferMode = "sftp" | "scp";
 export type RemoteTransferDirection = "upload" | "download";
-export type RemoteTransferStatus = "started" | "progress" | "completed" | "failed";
+export type RemoteTransferStatus = "started" | "progress" | "completed" | "failed" | "cancelled";
 
 export interface RemoteTransferProgress {
   id: string;
+  /** Set by the frontend per transfer; used to cancel it and to ignore events from other transfers. */
+  transferId?: string | null;
   direction: RemoteTransferDirection;
   status: RemoteTransferStatus;
   mode: RemoteTransferMode;
