@@ -1482,7 +1482,7 @@ async function toggleRememberMasterPassword(enabled: boolean) {
                 class="settings-btn-secondary settings-btn-danger"
                 type="button"
                 @click="resetTrustedHostKeys"
-                :disabled="resettingHostKeys || trustedHostKeysLoading || trustedHostKeys.length === 0"
+                :disabled="resettingHostKeys || trustedHostKeysLoading || (trustedHostKeys.length === 0 && !trustedHostKeysError)"
               >
                 {{ resettingHostKeys ? $t('settings.security.resetting') : $t('settings.security.resetAll') }}
               </button>

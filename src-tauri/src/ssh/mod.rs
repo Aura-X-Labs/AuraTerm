@@ -874,7 +874,7 @@ async fn verify_host_fingerprint(
     let observed = observed.ok_or_else(|| format!("SSH server {host}:{port} did not present a host key"))?;
     let scope = known_hosts::known_host_scope(&host, port);
     // A trust store that cannot be read stays unreadable on the next attempt.
-    let mut store = known_hosts::load_known_hosts(&app).await.map_err(ConnectError::terminal)?;
+    let store = known_hosts::load_known_hosts(&app).await.map_err(ConnectError::terminal)?;
 
     if let Some(expected) = store.hosts.get(&scope).cloned() {
         if expected == observed {
@@ -899,10 +899,28 @@ async fn verify_host_fingerprint(
             )));
         }
         known_hosts::append_host_key_override_audit_log(&app, &host, port, &expected, &observed).await?;
+        // The user approved exactly this replacement.
+        known_hosts::update_known_hosts(&app, |store| {
+            store.hosts.insert(scope, observed);
+            Ok(())
+        })
+        .await?;
+        return Ok(());
     }
 
-    store.hosts.insert(scope, observed);
-    Ok(known_hosts::save_known_hosts(&app, &store).await?)
+    // First contact: trust on first use, unless another connection recorded
+    // a different key for this host in the meantime.
+    known_hosts::update_known_hosts(&app, |store| match store.hosts.get(&scope) {
+        Some(recorded) if *recorded != observed => Err(format!(
+            "SSH host key for {scope} was just recorded with a different fingerprint; reconnect to review it"
+        )),
+        _ => {
+            store.hosts.insert(scope.clone(), observed);
+            Ok(())
+        }
+    })
+    .await
+    .map_err(ConnectError::terminal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2251,16 +2269,17 @@ pub async fn import_known_hosts(
     app: &AppHandle,
     incoming: HashMap<String, String>,
 ) -> Result<usize, String> {
-    let mut store = known_hosts::load_known_hosts(app).await?;
-    let mut added = 0usize;
-    for (scope, fingerprint) in incoming {
-        if !store.hosts.contains_key(&scope) {
-            store.hosts.insert(scope, fingerprint);
-            added += 1;
+    known_hosts::update_known_hosts(app, |store| {
+        let mut added = 0usize;
+        for (scope, fingerprint) in incoming {
+            if !store.hosts.contains_key(&scope) {
+                store.hosts.insert(scope, fingerprint);
+                added += 1;
+            }
         }
-    }
-    known_hosts::save_known_hosts(app, &store).await?;
-    Ok(added)
+        Ok(added)
+    })
+    .await
 }
 
 #[cfg(test)]
