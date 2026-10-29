@@ -353,6 +353,7 @@ const en = {
       layout: "Layout",
       app: "App",
       bookmark: "Bookmark",
+      serial: "Serial",
     },
     cmd: {
       newLocal: "New Local Shell",

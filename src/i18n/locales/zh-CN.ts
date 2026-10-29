@@ -349,6 +349,7 @@ const zhCN: Messages = {
       layout: "布局",
       app: "应用",
       bookmark: "书签",
+      serial: "串口",
     },
     cmd: {
       newLocal: "新建本地终端",
