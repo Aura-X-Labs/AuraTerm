@@ -39,6 +39,7 @@ import PromptDialogHost from "./PromptDialogHost.vue";
 import ImportPreviewHost from "./ImportPreviewHost.vue";
 import { confirmDialog } from "./nativeDialogs";
 import { aiHasApiKey } from "./ai";
+import { insertAiCommand, sendInputText } from "./terminalInsert";
 import {
   cloudBridgeStatus,
   setCloudBridgeAllowRemoteSend,
@@ -1858,11 +1859,7 @@ function rememberSerialConfig(serialConfig: SerialConfig) {
 function sendToActiveTerminal(text: string, raw = false) {
   const handle = termRefs.get(activeTabId.value);
   if (handle) {
-    if (raw) {
-      handle.pasteText(text);
-    } else {
-      handle.sendData(text);
-    }
+    sendInputText(handle, text, raw);
   }
 }
 
@@ -1976,8 +1973,7 @@ const aiActionUnavailable = ref(false);
 function handleAiInsertCommand(text: string) {
   const handle = termRefs.get(activeTabId.value);
   if (!handle) return;
-  handle.writeInput(text);
-  handle.focus();
+  insertAiCommand(handle, text);
 }
 
 async function handleButtonsChange(buttons: QuickButton[]) {
