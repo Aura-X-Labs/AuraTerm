@@ -37,7 +37,8 @@ use tauri::{AppHandle, Emitter};
 use tokio_tungstenite::tungstenite::Message;
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Upper bound on one INPUT frame's payload; larger writes are dropped.
+/// Upper bound on one INPUT frame's payload (the hosts' `MAX_TX_BYTES`);
+/// larger writes are split across several frames.
 pub const MAX_INPUT_BYTES: usize = 16 * 1024;
 /// Peer frames in a row that may fail to decrypt before the tab gives up
 /// with a visible error. A lone bad frame (a relay hiccup, a stale replay)
@@ -205,6 +206,23 @@ pub fn decode_hex(value: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Split `data` into pieces of at most `max` bytes without cutting a UTF-8
+/// character in half (`max` must be at least 4).
+fn utf8_chunks(data: &str, max: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(max);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (head, tail) = rest.split_at(end);
+        chunks.push(head);
+        rest = tail;
+    }
+    chunks
+}
+
 pub fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -318,25 +336,34 @@ impl RemoteTabs {
     /// Keystrokes from the tab; silently dropped unless the peer granted
     /// control and announced a fence. Every accepted write carries a
     /// strictly increasing `input_seq` so the device side can de-duplicate.
+    /// A write larger than [`MAX_INPUT_BYTES`] (a big paste) goes out as
+    /// several INPUT frames, each split on a character boundary.
     pub async fn write_input(&self, id: &str, data: &str) -> Result<(), String> {
-        if data.is_empty() || data.len() > MAX_INPUT_BYTES {
+        if data.is_empty() {
             return Ok(());
         }
-        let (fence, seq) = {
+        let chunks = utf8_chunks(data, MAX_INPUT_BYTES);
+        // Reserve the whole run of sequence numbers at once so a concurrent
+        // write cannot interleave its numbers with this paste's.
+        let (fence, first_seq) = {
             let mut tabs = self.tabs.lock().map_err(|e| e.to_string())?;
             let tab = tabs.get_mut(id).ok_or_else(|| "remote session is not connected".to_string())?;
             if tab.role != "controller" {
                 return Ok(());
             }
             let Some(fence) = tab.fence else { return Ok(()) };
-            tab.input_seq += 1;
-            (fence, tab.input_seq)
+            let first = tab.input_seq + 1;
+            tab.input_seq += chunks.len() as u64;
+            (fence, first)
         };
-        self.send(
-            id,
-            json!({"kind": "INPUT", "fence": fence, "input_seq": seq, "data_hex": encode_hex(data.as_bytes())}),
-        )
-        .await
+        for (seq, chunk) in (first_seq..).zip(chunks) {
+            self.send(
+                id,
+                json!({"kind": "INPUT", "fence": fence, "input_seq": seq, "data_hex": encode_hex(chunk.as_bytes())}),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub fn emit_state<R: tauri::Runtime>(&self, app: &AppHandle<R>, event: TabStateEvent) {
@@ -765,6 +792,66 @@ mod tests {
             assert_eq!(end.reason, "after_gap");
             assert!(end.deliberate);
         });
+    }
+
+    #[test]
+    fn large_paste_is_split_into_bounded_input_frames() {
+        tauri::async_runtime::block_on(async {
+            let key = [5_u8; 32];
+            let host = PeerCipher::new(key);
+            let grant = host
+                .encrypt(SCOPE, CONNECTION, DIRECTION_HOST, &json!({"kind": "STATE", "state": "active", "role": "controller", "fence": 7}))
+                .unwrap();
+            let (received, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+            let url = fake_relay(vec![grant], received).await;
+            let app = tauri::test::mock_app();
+            let tabs = RemoteTabs::new(&TEST_PROTOCOL);
+            let _end = attach(&tabs, &app, &url, key).await;
+            for _ in 0..100 {
+                if tabs.fence("tab").is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(tabs.fence("tab"), Some(7));
+
+            // ~40 KiB with multi-byte characters straddling every 16 KiB
+            // boundary candidate.
+            let paste: String = "echo 日本語 ✓ 🚀\n".repeat(1500);
+            assert!(paste.len() > 2 * MAX_INPUT_BYTES);
+            tabs.write_input("tab", &paste).await.unwrap();
+
+            let mut rebuilt = Vec::new();
+            let mut last_seq = 0;
+            while rebuilt.len() < paste.len() {
+                let envelope = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+                    .await
+                    .expect("INPUT frame within 5s")
+                    .expect("relay open");
+                let frame = host.decrypt(SCOPE, CONNECTION, DIRECTION_GUEST, &envelope).unwrap();
+                assert_eq!(frame["kind"], "INPUT");
+                assert_eq!(frame["fence"], 7);
+                let seq = frame["input_seq"].as_u64().unwrap();
+                assert!(seq > last_seq);
+                last_seq = seq;
+                let bytes = decode_hex(frame["data_hex"].as_str().unwrap());
+                assert!(!bytes.is_empty() && bytes.len() <= MAX_INPUT_BYTES, "chunk of {} bytes", bytes.len());
+                // Every chunk is valid UTF-8 on its own: no split characters.
+                assert!(std::str::from_utf8(&bytes).is_ok());
+                rebuilt.extend_from_slice(&bytes);
+            }
+            assert_eq!(rebuilt, paste.as_bytes());
+            assert!(last_seq >= 3);
+        });
+    }
+
+    #[test]
+    fn utf8_chunks_respect_char_boundaries() {
+        assert!(utf8_chunks("", 4).is_empty());
+        assert_eq!(utf8_chunks("abcdef", 4), vec!["abcd", "ef"]);
+        // "é" is two bytes; a 3-byte limit must not cut it in half.
+        assert_eq!(utf8_chunks("aéé", 3), vec!["aé", "é"]);
+        assert_eq!(utf8_chunks("🚀🚀", 5), vec!["🚀", "🚀"]);
     }
 
     #[test]
