@@ -425,17 +425,20 @@ async fn cleanup_ssh_session(state: &SshState, id: &str) {
 /// Stop reconnect loop for a session and clean up all state, finally dropping
 /// the entire session record.
 async fn stop_and_cleanup_ssh_session(state: &SshState, id: &str) {
-    // Signal the reconnect loop to stop, then remove the session entirely.
-    let notify = {
-        let mut guard = state.sessions.write().await;
-        let notify = guard
-            .get_mut(id)
-            .and_then(|s| s.reconnect_flag.take());
-        guard.remove(id);
-        notify
-    };
-    if let Some(notify) = notify {
-        notify.cancel();
+    let session = state.sessions.write().await.remove(id);
+    if let Some(session) = session {
+        if let Some(notify) = session.reconnect_flag {
+            notify.cancel();
+        }
+        // The IO task owns another handle/channel reference. Removing the
+        // record alone cannot close it; disconnect also wakes channel.wait().
+        if let Some(handle) = session.handle {
+            if let Err(error) = handle.lock().await
+                .disconnect(russh::Disconnect::ByApplication, "Session closed", "en").await
+            {
+                crate::warn_log!("[ssh] {} disconnect failed: {}", id, error);
+            }
+        }
     }
 }
 
@@ -2036,12 +2039,21 @@ async fn run_channel_io_loop(
         data_bytes_total
     );
 
+    if let Err(error) = channel.close().await {
+        crate::warn_log!("[ssh] {} channel close failed: {}", id, error);
+    }
+    if let Err(error) = handle.lock().await
+        .disconnect(russh::Disconnect::ByApplication, "PTY closed", "en").await
+    {
+        crate::warn_log!("[ssh] {} transport close failed: {}", id, error);
+    }
+
     // Connection dropped — drop transient handles so the reconnect loop detects it,
     // and update the last-error in a single write-lock acquisition.
     let has_reconnect = {
         let mut guard = state.sessions.write().await;
         match guard.get_mut(&id) {
-            Some(s) => {
+            Some(s) if s.handle.as_ref().is_some_and(|current| Arc::ptr_eq(current, &handle)) => {
                 s.input_tx = None;
                 s.resize_tx = None;
                 s.handle = None;
@@ -2052,7 +2064,8 @@ async fn run_channel_io_loop(
                 }
                 s.reconnect_flag.is_some()
             }
-            None => false,
+            // This IO task must not tear down or emit exit for a replacement.
+            _ => return,
         }
     };
     if !has_reconnect {
@@ -2133,6 +2146,80 @@ mod tests {
         is_auth_error, shell_escape, ssh_generate_key_pair, AutoLoginRule, LoginAutomation,
         ReconnectType, AURATERM_RECONNECT_SESSION_PREFIX,
     };
+
+    #[tokio::test]
+    async fn stopping_manual_session_disconnects_idle_transport() {
+        use super::*;
+        use russh::{server, Channel, ChannelId};
+        use std::time::Duration;
+
+        struct Server;
+        impl server::Handler for Server {
+            type Error = russh::Error;
+
+            async fn auth_none(&mut self, _: &str) -> Result<server::Auth, Self::Error> {
+                Ok(server::Auth::Accept)
+            }
+
+            async fn channel_open_session(
+                &mut self,
+                _: Channel<server::Msg>,
+                reply: server::ChannelOpenHandle,
+                _: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                reply.accept().await;
+                Ok(())
+            }
+
+            async fn shell_request(
+                &mut self,
+                channel: ChannelId,
+                session: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                session.channel_success(channel)?;
+                Ok(())
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let key = russh::keys::PrivateKey::random(
+            &mut russh::keys::key::safe_rng(),
+            russh::keys::Algorithm::Ed25519,
+        ).unwrap();
+        let config = Arc::new(server::Config { keys: vec![key], ..Default::default() });
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            server::run_stream(config, stream, Server).await.unwrap().await.unwrap();
+        });
+        let handler = known_hosts::ClientHandler::new(
+            None,
+            Arc::new(std::sync::Mutex::new(None)),
+            forwarding::new_remote_forward_registry(),
+            false,
+        );
+        let mut client = client::connect(Arc::new(client::Config::default()), address, handler).await.unwrap();
+        assert!(client.authenticate_none("test").await.unwrap().success());
+        let channel = client.channel_open_session().await.unwrap();
+        channel.request_shell(true).await.unwrap();
+        let handle = Arc::new(Mutex::new(client));
+        let state = SshState::new(Arc::new(crate::terminal_event_hub::TerminalEventHub::default()));
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        state.upsert_session("manual", |s| {
+            s.handle = Some(handle.clone());
+            s.input_tx = Some(input_tx);
+        }).await;
+
+        stop_and_cleanup_ssh_session(&state, "manual").await;
+        let mut server = server;
+        let ended = tokio::time::timeout(Duration::from_secs(1), &mut server).await;
+        if ended.is_err() {
+            server.abort();
+        }
+        assert!(ended.is_ok(), "closing a Manual tab must end the remote SSH connection");
+        assert!(!state.contains("manual").await);
+        drop(channel);
+    }
 
     #[test]
     fn shell_escape_handles_single_quotes() {
