@@ -303,7 +303,8 @@ pub(crate) async fn attach_once<R: tauri::Runtime>(
     let fingerprint = sas_fingerprint(&cipher.key, SAS_LABEL);
 
     // ── hand the keyed connection to the shared remote-tab plumbing ───────
-    state.tabs.insert(&id, &grant.session_id, &connection_id, cipher, outbound);
+    // Refused when the user closed the tab while this attach was in flight.
+    state.tabs.insert(&id, &grant.session_id, &connection_id, cipher, outbound)?;
     state.tabs.emit_state(
         app,
         TabStateEvent {
@@ -335,6 +336,19 @@ pub(crate) async fn attach_once<R: tauri::Runtime>(
 const RECONNECT_ATTEMPTS: u32 = 5;
 const RECONNECT_BACKOFF_BASE_MS: u64 = 800;
 const RECONNECT_BACKOFF_MAX_MS: u64 = 10_000;
+/// A reconnected tab that stays up this long has recovered: its next drop
+/// starts with a fresh attempt budget instead of inheriting old failures.
+const RECONNECT_STABLE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The attempt count to carry into the next drop after a reconnected tab
+/// stayed up for `stayed_up`.
+fn attempts_after_reconnect(attempts: u32, stayed_up: std::time::Duration) -> u32 {
+    if stayed_up >= RECONNECT_STABLE_AFTER {
+        0
+    } else {
+        attempts
+    }
+}
 
 /// Attach, then keep the tab alive across transport drops.
 ///
@@ -342,7 +356,9 @@ const RECONNECT_BACKOFF_MAX_MS: u64 = 10_000;
 /// at once: the other side meant it. A dropped connection is retried with
 /// backoff while the tab is still open, and only becomes an ending when the
 /// retries run out, so a laptop lid or a flaky network costs a repaint
-/// rather than the session.
+/// rather than the session. A tab the user closed is never reconnected,
+/// and a reconnection that holds for [`RECONNECT_STABLE_AFTER`] restores
+/// the full retry budget for the next drop.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn connect_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -366,7 +382,15 @@ pub(crate) async fn connect_session<R: tauri::Runtime>(
         want_control,
         Some(end_tx),
     )
-    .await?;
+    .await;
+    let joined = match joined {
+        Ok(joined) => joined,
+        Err(error) => {
+            // No watch exists yet, so nothing else could revive the tab.
+            state.tabs.forget_closed(&id);
+            return Err(error);
+        }
+    };
     spawn_reconnect_watch(
         app.clone(),
         http.clone(),
@@ -393,18 +417,26 @@ fn spawn_reconnect_watch<R: tauri::Runtime>(
 ) {
     tauri::async_runtime::spawn(async move {
         let Ok(mut last_end) = end_rx.await else { return };
-        for attempt in 1..=RECONNECT_ATTEMPTS {
+        let mut attempts: u32 = 0;
+        loop {
             if last_end.deliberate {
                 break;
             }
             let state = app.state::<RelayClientState>();
+            // A tab the user closed (close_relay_session) stays closed: its
+            // reader normally reports that as deliberate, but the close can
+            // also land between the drop and this check.
+            if state.tabs.is_closed(&id) {
+                break;
+            }
             // The reader drops the tab from the registry on the way out, so
-            // a tab that is back means someone re-attached; a closed tab
-            // (close_relay_session) must not be resurrected either. Only an
-            // absent tab whose window still exists gets retried, which the
-            // emit below makes visible.
+            // a tab that is back means someone re-attached.
             if state.tabs.contains(&id) {
                 return;
+            }
+            attempts += 1;
+            if attempts > RECONNECT_ATTEMPTS {
+                break;
             }
             state.tabs.emit_state(
                 &app,
@@ -420,9 +452,12 @@ fn spawn_reconnect_watch<R: tauri::Runtime>(
                     reason: Some("reconnecting".into()),
                 },
             );
-            let backoff = (RECONNECT_BACKOFF_BASE_MS * 2_u64.pow(attempt - 1))
+            let backoff = (RECONNECT_BACKOFF_BASE_MS * 2_u64.pow(attempts - 1))
                 .min(RECONNECT_BACKOFF_MAX_MS);
             tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+            if state.tabs.is_closed(&id) {
+                break;
+            }
             let (tx, rx) = tokio::sync::oneshot::channel();
             let attached = attach_once(
                 &app,
@@ -438,10 +473,14 @@ fn spawn_reconnect_watch<R: tauri::Runtime>(
             .await;
             match attached {
                 // Live again: wait for however this next connection ends.
-                Ok(_) => match rx.await {
-                    Ok(end) => last_end = end,
-                    Err(_) => return,
-                },
+                Ok(_) => {
+                    let since = std::time::Instant::now();
+                    match rx.await {
+                        Ok(end) => last_end = end,
+                        Err(_) => return,
+                    }
+                    attempts = attempts_after_reconnect(attempts, since.elapsed());
+                }
                 // The provider may simply be down; keep the reason from the
                 // original drop and try again after a longer backoff.
                 Err(_) => continue,
@@ -623,6 +662,7 @@ mod tests {
     use crate::terminal_event_hub::{SubscriptionToken, TerminalEvent, TerminalEventHub};
     use async_trait::async_trait;
     use futures_util::{SinkExt, StreamExt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -704,44 +744,72 @@ mod tests {
     /// provider side of the handshake (signed E2EE_READY), an active
     /// RELAY_STATE, a snapshot, one OUTPUT chunk and a kick.
     async fn fake_relay_provider(captured_key: Arc<Mutex<Option<String>>>) -> String {
+        fake_relay_provider_with(captured_key, true, false, Arc::new(AtomicUsize::new(0))).await
+    }
+
+    /// Like [`fake_relay_provider`], but admits any number of connections
+    /// (counting them in `accepted`) and, without `kick`, keeps each one
+    /// open after the initial frames until the consumer hangs up — except
+    /// the first one under `hangup_first`, which is dropped like a flaky
+    /// network would.
+    async fn fake_relay_provider_with(
+        captured_key: Arc<Mutex<Option<String>>>,
+        kick: bool,
+        hangup_first: bool,
+        accepted: Arc<AtomicUsize>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         tauri::async_runtime::spawn(async move {
-            let Ok((tcp, _)) = listener.accept().await else { return };
-            let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
-            let (mut sink, mut stream) = ws.split();
-            // AUTH
-            let Some(Ok(Message::Text(text))) = stream.next().await else { return };
-            let auth: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(auth["kind"], "AUTH");
-            assert_eq!(auth["ticket"], "tick-relay");
-            let _ = sink
-                .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": CONNECTION_ID, "session_id": SESSION_ID, "role": "relay_viewer"}).to_string().into()))
-                .await;
-            // Provider handshake: the consumer key arrived via the grant.
-            let peer_public = loop {
-                if let Some(key) = captured_key.lock().unwrap().clone() {
-                    break key;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            };
-            let (cipher, agent_public) = derive_peer_cipher(SESSION_ID, CONNECTION_ID, &peer_public).unwrap();
-            let context = e2ee_context(PROVIDER_DEVICE, SESSION_ID, CONNECTION_ID, &peer_public, &agent_public);
-            let proof = ed25519_sign_b64(&URL_SAFE_NO_PAD.encode(PROVIDER_SEED), &context).unwrap();
-            let _ = sink
-                .send(Message::Text(json!({"kind": "E2EE_READY", "connection_id": CONNECTION_ID, "agent_public_key": agent_public, "proof": proof}).to_string().into()))
-                .await;
-            for frame in [
-                json!({"kind": "RELAY_STATE", "state": "active", "role": "viewer",
-                       "control_policy": "view_only", "host_label": "prod-web-01",
-                       "cols": 100, "rows": 30}),
-                json!({"kind": "TERMINAL_SNAPSHOT", "snapshot_seq": 1, "cols": 100,
-                       "rows": 30, "data_hex": "686f73742420"}),
-                json!({"kind": "OUTPUT", "output_seq": 2, "data_hex": "6c73"}),
-                json!({"kind": "RELAY_CLOSE", "reason": "kicked"}),
-            ] {
-                let envelope = cipher.encrypt(SESSION_ID, CONNECTION_ID, DIRECTION_AGENT, &frame).unwrap();
-                let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else { return };
+                let nth = accepted.fetch_add(1, Ordering::SeqCst) + 1;
+                let captured_key = Arc::clone(&captured_key);
+                tauri::async_runtime::spawn(async move {
+                    let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                    let (mut sink, mut stream) = ws.split();
+                    // AUTH
+                    let Some(Ok(Message::Text(text))) = stream.next().await else { return };
+                    let auth: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(auth["kind"], "AUTH");
+                    assert_eq!(auth["ticket"], "tick-relay");
+                    let _ = sink
+                        .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": CONNECTION_ID, "session_id": SESSION_ID, "role": "relay_viewer"}).to_string().into()))
+                        .await;
+                    // Provider handshake: the consumer key arrived via the grant.
+                    let peer_public = loop {
+                        if let Some(key) = captured_key.lock().unwrap().clone() {
+                            break key;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    };
+                    let (cipher, agent_public) = derive_peer_cipher(SESSION_ID, CONNECTION_ID, &peer_public).unwrap();
+                    let context = e2ee_context(PROVIDER_DEVICE, SESSION_ID, CONNECTION_ID, &peer_public, &agent_public);
+                    let proof = ed25519_sign_b64(&URL_SAFE_NO_PAD.encode(PROVIDER_SEED), &context).unwrap();
+                    let _ = sink
+                        .send(Message::Text(json!({"kind": "E2EE_READY", "connection_id": CONNECTION_ID, "agent_public_key": agent_public, "proof": proof}).to_string().into()))
+                        .await;
+                    for frame in [
+                        json!({"kind": "RELAY_STATE", "state": "active", "role": "viewer",
+                               "control_policy": "view_only", "host_label": "prod-web-01",
+                               "cols": 100, "rows": 30}),
+                        json!({"kind": "TERMINAL_SNAPSHOT", "snapshot_seq": 1, "cols": 100,
+                               "rows": 30, "data_hex": "686f73742420"}),
+                        json!({"kind": "OUTPUT", "output_seq": 2, "data_hex": "6c73"}),
+                        json!({"kind": "RELAY_CLOSE", "reason": "kicked"}),
+                    ] {
+                        if !kick && frame["kind"] == "RELAY_CLOSE" {
+                            break;
+                        }
+                        let envelope = cipher.encrypt(SESSION_ID, CONNECTION_ID, DIRECTION_AGENT, &frame).unwrap();
+                        let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+                    }
+                    if hangup_first && nth == 1 {
+                        return;
+                    }
+                    // Hold the connection until the consumer goes away.
+                    while let Some(Ok(_)) = stream.next().await {}
+                });
             }
         });
         url
@@ -790,6 +858,64 @@ mod tests {
             // The kick ends the tab; the registry empties itself.
             wait_for(|| state.tabs.is_empty(), "RELAY_CLOSE teardown").await;
         });
+    }
+
+    #[test]
+    fn a_closed_tab_is_not_reconnected() {
+        tauri::async_runtime::block_on(async {
+            let captured = Arc::new(Mutex::new(None));
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let relay_url = fake_relay_provider_with(Arc::clone(&captured), false, false, Arc::clone(&accepted)).await;
+            let origin = fake_auraxlab(relay_url, provider_identity_public(), Arc::clone(&captured));
+            let app = tauri::test::mock_app();
+            app.manage(RelayClientState::default());
+            let state = app.state::<RelayClientState>();
+            let device = test_device(&origin);
+            connect_session(
+                app.handle(), &reqwest::Client::new(), state.inner(), &device,
+                "tab-closed".into(), PROVIDER_DEVICE.into(), SESSION_ID.into(), false,
+            )
+            .await
+            .expect("attach succeeds");
+            assert!(state.tabs.contains("tab-closed"));
+            state.tabs.close("tab-closed").unwrap();
+            // Longer than the first reconnect backoff: a revived tab would
+            // have opened a second relay connection by now.
+            tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_BASE_MS + 1200)).await;
+            assert_eq!(accepted.load(Ordering::SeqCst), 1, "closed tab was reconnected");
+            assert!(!state.tabs.contains("tab-closed"));
+            // The watch finished the ending, which settles the closed mark.
+            wait_for(|| !state.tabs.is_closed("tab-closed"), "closed mark cleared").await;
+        });
+    }
+
+    #[test]
+    fn a_dropped_tab_reconnects() {
+        tauri::async_runtime::block_on(async {
+            let captured = Arc::new(Mutex::new(None));
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let relay_url = fake_relay_provider_with(Arc::clone(&captured), false, true, Arc::clone(&accepted)).await;
+            let origin = fake_auraxlab(relay_url, provider_identity_public(), Arc::clone(&captured));
+            let app = tauri::test::mock_app();
+            app.manage(RelayClientState::default());
+            let state = app.state::<RelayClientState>();
+            let device = test_device(&origin);
+            connect_session(
+                app.handle(), &reqwest::Client::new(), state.inner(), &device,
+                "tab-flaky".into(), PROVIDER_DEVICE.into(), SESSION_ID.into(), false,
+            )
+            .await
+            .expect("attach succeeds");
+            wait_for(|| accepted.load(Ordering::SeqCst) == 2, "reconnect after a drop").await;
+            wait_for(|| state.tabs.contains("tab-flaky"), "tab back in the registry").await;
+            state.tabs.close("tab-flaky").unwrap();
+        });
+    }
+
+    #[test]
+    fn a_stable_reconnection_restores_the_retry_budget() {
+        assert_eq!(attempts_after_reconnect(4, Duration::from_secs(1)), 4);
+        assert_eq!(attempts_after_reconnect(4, RECONNECT_STABLE_AFTER), 0);
     }
 
     #[test]

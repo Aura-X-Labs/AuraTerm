@@ -81,7 +81,12 @@ pub async fn assist_join(
     code: String,
     display_name: Option<String>,
 ) -> Result<AssistJoinView, String> {
-    join_session(&app, state.inner(), &auraxlab_origin(), id, code, display_name).await
+    let joined = join_session(&app, state.inner(), &auraxlab_origin(), id.clone(), code, display_name).await;
+    if joined.is_err() {
+        // Nothing will retry this join; a close that raced it is settled.
+        state.inner().tabs.forget_closed(&id);
+    }
+    joined
 }
 
 /// The join flow with an explicit AuraXLab origin (tests point it at an
@@ -174,7 +179,7 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
     let cipher = PeerCipher::new(*key);
 
     // ── hand the keyed connection to the shared remote-tab plumbing ────
-    state.tabs.insert(&id, &assist_id, &connection_id, cipher, outbound);
+    state.tabs.insert(&id, &assist_id, &connection_id, cipher, outbound)?;
     state
         .tabs
         .send(
