@@ -226,6 +226,52 @@ describe("TerminalComponent", () => {
     mockState.answerSshReconnectChoice.mockClear();
   });
 
+  it("pastes inserted multiline text through real xterm bracketed-paste processing", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    const canvas = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const { Terminal } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
+    const realTerminal = new Terminal();
+    const root = document.createElement("div");
+    document.body.append(root);
+    realTerminal.open(root);
+    await new Promise<void>((resolve) => realTerminal.write("\x1b[?2004h", resolve));
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "paste-session",
+        isVisible: true,
+        isFocused: true,
+        broadcast: true,
+        session: { protocol: "ssh", sshConfig: { host: "example.com", port: 22, user: "root" } },
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+    const terminal = mockState.terminals[0];
+    const paste = vi.spyOn(terminal, "paste").mockImplementation((text) => realTerminal.paste(text));
+    realTerminal.onData((data) => terminal.emitData(data));
+    const text = "echo first\necho second";
+    wrapper.vm.pasteText(text);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(paste).toHaveBeenCalledExactlyOnceWith(text);
+    const bracketed = "\x1b[200~echo first\recho second\x1b[201~";
+    expect(mockState.writeSessionInput).toHaveBeenCalledWith(
+      "paste-session", bracketed, expect.anything(),
+    );
+    expect(wrapper.emitted("broadcastInput")).toEqual([[bracketed]]);
+    wrapper.unmount();
+    realTerminal.dispose();
+    root.remove();
+    canvas.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
   describe.each(["OSC 8", "plain URL"])("%s links", (kind) => {
     function mountLinkTerminal() {
       const wrapper = mount(TerminalComponent, {
