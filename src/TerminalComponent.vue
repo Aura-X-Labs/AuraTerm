@@ -578,6 +578,11 @@ function writeInput(data: string) {
   queueTerminalInput(data);
 }
 
+function pasteText(text: string) {
+  if (!ptyId.value) return;
+  terminal?.paste(text);
+}
+
 function fit() {
   if (isRemoteMirror.value) {
     applyRemoteSize();
@@ -715,6 +720,7 @@ defineExpose<TerminalHandle>({
   saveLog,
   sendData,
   writeInput,
+  pasteText,
   fit,
   focus,
   findNext: (text, options) => runSearch("next", text, options),

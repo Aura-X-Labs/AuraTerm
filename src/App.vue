@@ -1844,7 +1844,7 @@ function sendToActiveTerminal(text: string, raw = false) {
   const handle = termRefs.get(activeTabId.value);
   if (handle) {
     if (raw) {
-      handle.writeInput(text);
+      handle.pasteText(text);
     } else {
       handle.sendData(text);
     }

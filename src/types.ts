@@ -385,6 +385,8 @@ export interface TerminalHandle {
   /** Write raw input to this session's pty, bypassing the newline append of
    *  sendData. Used to fan out broadcast (MultiExec) keystrokes to target panes. */
   writeInput: (data: string) => void;
+  /** Use xterm paste processing, including bracketed paste when enabled. */
+  pasteText: (text: string) => void;
   fit: () => void;
   focus: () => void;
   findNext: (text: string, options?: TerminalSearchOptions) => boolean;
