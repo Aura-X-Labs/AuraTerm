@@ -808,6 +808,12 @@ onMounted(() => {
     if (event.ctrlKey && event.key === "c" && settingsRef.value.ctrlCCopy) {
       const selection = terminal?.getSelection();
       if (selection) {
+        // Copy, then drop the selection: otherwise every later Ctrl+C would be
+        // swallowed here too and the shell would never see SIGINT again.
+        void navigator.clipboard.writeText(selection).catch((error) => {
+          console.error("clipboard write (ctrl+c) failed", error);
+        });
+        terminal?.clearSelection();
         return false;
       }
     }

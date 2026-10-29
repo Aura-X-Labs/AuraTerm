@@ -62,6 +62,14 @@ const mockState = vi.hoisted(() => {
       return this.selection;
     }
 
+    hasSelection() {
+      return this.selection.length > 0;
+    }
+
+    clearSelection() {
+      this.selection = "";
+    }
+
     paste(text: string) {
       this.dataHandler?.(text);
     }
@@ -585,6 +593,35 @@ describe("TerminalComponent", () => {
     expect(terminal.written.join("")).toContain("\x1b[38;2;0;255;0mREADY 7\x1b[0m");
     expect(mockState.writeSessionInput).toHaveBeenCalledWith("ssh-session-rule", "continue 7\n", session);
     wrapper.unmount();
+  });
+
+  it("clears the selection after Ctrl+C copies it so the next Ctrl+C interrupts", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText, readText: vi.fn(async () => "") } });
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "local-session-copy",
+        isVisible: true,
+        isFocused: true,
+        session: { protocol: "local" } satisfies SessionConfig,
+        settings: { ...DEFAULT_SETTINGS, ctrlCCopy: true },
+      },
+    });
+    await flushPromises();
+
+    const terminal = mockState.terminals[0];
+    const handler = terminal.customKeyHandler!;
+    terminal.selection = "selected text";
+    // First Ctrl+C copies the selection and is swallowed.
+    expect(handler(new KeyboardEvent("keydown", { key: "c", ctrlKey: true }))).toBe(false);
+    expect(writeText).toHaveBeenCalledWith("selected text");
+    expect(terminal.getSelection()).toBe("");
+    // With the selection gone, the next Ctrl+C reaches the shell as SIGINT.
+    expect(handler(new KeyboardEvent("keydown", { key: "c", ctrlKey: true }))).toBe(true);
+
+    wrapper.unmount();
+    vi.unstubAllGlobals();
   });
 
   describe.each([
