@@ -370,9 +370,16 @@ async fn connect_within(
 /// `russh::client::connect` resolves, and the helper the connection test uses.
 pub(super) async fn open_tcp(host: &str, port: u16, limit: Duration) -> Result<TcpStream, String> {
     let addr = format!("{host}:{port}");
-    crate::connection_test::tcp_connect(addr.clone(), &addr, limit)
+    let stream = crate::connection_test::tcp_connect(addr.clone(), &addr, limit)
         .await
-        .map_err(|failure| format!("Connection error: {}", failure.detail))
+        .map_err(|failure| format!("Connection error: {}", failure.detail))?;
+    // Interactive traffic is mostly single keystrokes and their echoes; with
+    // Nagle on, each one waits for the previous segment's ACK (and on some
+    // stacks for delayed ACK), which shows up as typing lag on high-RTT links.
+    if let Err(error) = stream.set_nodelay(true) {
+        crate::warn_log!("[ssh] {addr}: failed to set TCP_NODELAY: {error}");
+    }
+    Ok(stream)
 }
 
 pub(super) async fn connect_stream_with_expected_fingerprint<R>(
@@ -516,6 +523,14 @@ mod tests {
         assert!(error.contains("handshake"), "{error}");
         assert!(observed.is_none());
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_disables_nagle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stream = open_tcp("127.0.0.1", port, Duration::from_secs(2)).await.unwrap();
+        assert!(stream.nodelay().unwrap());
     }
 
     #[tokio::test]
