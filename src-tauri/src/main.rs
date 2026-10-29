@@ -191,7 +191,7 @@ fn attach_tauri_ui_adapter(
     broker: &Arc<PtyBroker>,
     zmodem: &zmodem::ZmodemState,
     id: &str,
-) {
+) -> terminal_event_hub::SubscriptionToken {
     let app_handle = app.clone();
     let pty_id = id.to_string();
     let zmodem_state = zmodem.clone();
@@ -216,7 +216,7 @@ fn attach_tauri_ui_adapter(
             util::emit_pty_exit(&app_handle, &pty_id, message.clone());
         }
         TerminalEvent::Disconnected(_) | TerminalEvent::Reconnected => {}
-    });
+    })
 }
 
 // Opening a PTY (fork/exec; ConPTY setup on Windows) is async so Tauri runs it
@@ -241,7 +241,7 @@ async fn start_pty(
     let shell_path = resolve_local_shell_path(&app);
     zmodem.reset_session(&id);
     // Subscribe before opening so the first prompt bytes cannot be missed.
-    attach_tauri_ui_adapter(&app, &state.broker, zmodem.inner(), &id);
+    let subscription = attach_tauri_ui_adapter(&app, &state.broker, zmodem.inner(), &id);
 
     let request = OpenTerminalRequest {
         session_id: id.clone(),
@@ -250,7 +250,9 @@ async fn start_pty(
         cwd,
     };
     if let Err(error) = state.broker.open(request) {
-        state.broker.hub().drop_session(&id);
+        // Only our own subscription: when the id is still open, the others
+        // belong to that live session.
+        state.broker.hub().unsubscribe(&subscription);
         return Err(error);
     }
 
