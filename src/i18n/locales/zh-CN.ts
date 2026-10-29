@@ -429,6 +429,7 @@ const zhCN: Messages = {
     pullReplace: "拉取（覆盖）",
     push: "推送",
     syncNow: "立即同步",
+    alreadyRunning: "已有同步正在进行，请在完成后重试。",
     settingsSaved: "同步设置已保存。",
     confirmReplace: "用云端副本替换全部本地书签？此操作无法撤销。",
     confirmDeletes: "这次同步要删除的书签较多，已先暂缓：\n· 本机将删除 {remote} 个（其他设备已删除）\n· 云端将删除 {local} 个（本机已删除）\n\n其余改动已经同步。现在执行这些删除吗？选择「取消」会保留这些书签。",

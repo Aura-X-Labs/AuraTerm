@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ref } from "vue";
 import { t } from "./i18n";
 
 /**
@@ -116,6 +117,24 @@ export function setSyncConfig(input: SyncSettingsInput): Promise<SyncConfigView>
 
 export function acknowledgeLegacyProviderNotice(): Promise<void> {
   return invoke("acknowledge_legacy_provider_notice");
+}
+
+/**
+ * Set while a sync runs anywhere in this window — the Sync dialog, the menu's
+ * Sync Now and auto-sync all share it, so only one of them runs at a time
+ * (the backend serialises them as well).
+ */
+export const syncRunning = ref(false);
+
+/** Run `job` as the one sync in flight; resolves to `undefined` when another one already is. */
+export async function runExclusiveSync<T>(job: () => Promise<T>): Promise<T | undefined> {
+  if (syncRunning.value) return undefined;
+  syncRunning.value = true;
+  try {
+    return await job();
+  } finally {
+    syncRunning.value = false;
+  }
 }
 
 export function cloudSyncPush(): Promise<SyncResult> {

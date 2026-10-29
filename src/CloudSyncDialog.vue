@@ -12,6 +12,8 @@ import {
   cloudSyncMigrateLegacy,
   classifySyncError,
   inputFromView,
+  runExclusiveSync,
+  syncRunning,
   type SyncConfigView,
   type SyncResult,
 } from "./cloudSync";
@@ -26,6 +28,8 @@ const emit = defineEmits<{ close: []; openAccount: []; synced: [result: SyncResu
 
 const view = ref<SyncConfigView | null>(null);
 const busy = ref(false);
+// Also blocked while a sync started elsewhere (menu, auto-sync) is running.
+const blocked = computed(() => busy.value || syncRunning.value);
 const message = ref("");
 const isError = ref(false);
 
@@ -116,9 +120,17 @@ async function saveConfig(): Promise<boolean> {
 }
 
 async function runAction(action: () => Promise<SyncResult>) {
+  if (syncRunning.value) {
+    flash(t("cloudSync.alreadyRunning"), true);
+    return;
+  }
   if (!(await saveConfig())) return;
   await withBusy(async () => {
-    const result = await action();
+    const result = await runExclusiveSync(action);
+    if (!result) {
+      flash(t("cloudSync.alreadyRunning"), true);
+      return;
+    }
     hydrate(await getSyncConfig());
     flash(describeSyncResult(result), Boolean(result.credentialsSkipped || result.conflicts.length || result.deletesHeld));
     migrationNeeded.value = false;
@@ -178,7 +190,7 @@ async function dismissNotice() {
         <!-- Removed providers (one-time notice) -->
         <section v-if="view?.legacyProviderNotice" class="sync-section sync-notice" data-testid="legacy-provider-notice">
           <p class="sync-hint">{{ $t('cloudSync.legacyProviderNotice') }}</p>
-          <button class="sync-btn" type="button" :disabled="busy" @click="dismissNotice">{{ $t('cloudSync.dismiss') }}</button>
+          <button class="sync-btn" type="button" :disabled="blocked" @click="dismissNotice">{{ $t('cloudSync.dismiss') }}</button>
         </section>
 
         <!-- Account -->
@@ -211,8 +223,8 @@ async function dismissNotice() {
               :placeholder="$t('cloudSync.migrationPassphrase')"
               @keyup.enter="migrate(false)"
             />
-            <button class="sync-btn primary" type="button" :disabled="busy" @click="migrate(false)">{{ $t('cloudSync.migrate') }}</button>
-            <button class="sync-btn" type="button" :disabled="busy" @click="migrate(true)">{{ $t('cloudSync.migrateOverwrite') }}</button>
+            <button class="sync-btn primary" type="button" :disabled="blocked" @click="migrate(false)">{{ $t('cloudSync.migrate') }}</button>
+            <button class="sync-btn" type="button" :disabled="blocked" @click="migrate(true)">{{ $t('cloudSync.migrateOverwrite') }}</button>
           </div>
         </section>
 
@@ -248,13 +260,13 @@ async function dismissNotice() {
       </div>
 
       <div class="sync-footer">
-        <button class="sync-btn" type="button" :disabled="busy" @click="saveConfig">{{ $t('common.save') }}</button>
-        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="testConnection">{{ $t('cloudSync.test') }}</button>
+        <button class="sync-btn" type="button" :disabled="blocked" @click="saveConfig">{{ $t('common.save') }}</button>
+        <button class="sync-btn" type="button" :disabled="blocked || !signedIn" @click="testConnection">{{ $t('cloudSync.test') }}</button>
         <span class="sync-spacer" />
-        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="doPull(false)">{{ $t('cloudSync.pullMerge') }}</button>
-        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="doPull(true)">{{ $t('cloudSync.pullReplace') }}</button>
-        <button class="sync-btn" type="button" :disabled="busy || !signedIn" @click="doPush">{{ $t('cloudSync.push') }}</button>
-        <button class="sync-btn primary" type="button" :disabled="busy || !signedIn" @click="doSyncNow">{{ $t('cloudSync.syncNow') }}</button>
+        <button class="sync-btn" type="button" :disabled="blocked || !signedIn" @click="doPull(false)">{{ $t('cloudSync.pullMerge') }}</button>
+        <button class="sync-btn" type="button" :disabled="blocked || !signedIn" @click="doPull(true)">{{ $t('cloudSync.pullReplace') }}</button>
+        <button class="sync-btn" type="button" :disabled="blocked || !signedIn" @click="doPush">{{ $t('cloudSync.push') }}</button>
+        <button class="sync-btn primary" type="button" :disabled="blocked || !signedIn" @click="doSyncNow">{{ $t('cloudSync.syncNow') }}</button>
       </div>
     </div>
   </div>

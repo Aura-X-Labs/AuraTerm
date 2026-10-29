@@ -55,6 +55,7 @@ pub async fn cloud_sync_migrate_legacy(
     overwrite: bool,
     master_state: State<'_, MasterPasswordState>,
 ) -> Result<SyncResult, String> {
+    let _sync = cloud_sync::exclusive().await;
     let mut config: SyncConfig = cloud_sync::load_config(&app)?;
     cloud_sync::ensure_signed_in(&config).map_err(|_| ERR_NOT_SIGNED_IN.to_string())?;
     let store = cloud_sync::AppStore::new(&app, &master_state);

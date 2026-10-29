@@ -1382,6 +1382,17 @@ async fn pull_remote_copy(config: &SyncConfig) -> Result<Option<RemoteCopy>, Str
 // Tauri commands
 // ============================================================================
 
+/// One sync at a time. A sync reads the local state and the config, talks to
+/// the server for a while, then writes them all back; two of them interleaved
+/// (the Sync dialog and auto-sync, or a sync and a sign-out) would each write
+/// back what they read, undoing the other. Every flow that rewrites the sync
+/// config or the synced files holds this for its whole run, and loads the
+/// config only once it holds it.
+pub(crate) async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
+
 #[tauri::command]
 pub fn get_sync_config(app: AppHandle, master_state: State<'_, MasterPasswordState>) -> Result<SyncConfigView, String> {
     let config = load_config(&app)?;
@@ -1413,6 +1424,7 @@ pub fn acknowledge_legacy_provider_notice(app: AppHandle) -> Result<(), String> 
 
 #[tauri::command]
 pub async fn cloud_sync_push(app: AppHandle, master_state: State<'_, MasterPasswordState>) -> Result<SyncResult, String> {
+    let _sync = exclusive().await;
     let mut config = load_config(&app)?;
     ensure_signed_in(&config)?;
     push_only(&AppStore::new(&app, &master_state), &mut config).await
@@ -1420,6 +1432,7 @@ pub async fn cloud_sync_push(app: AppHandle, master_state: State<'_, MasterPassw
 
 #[tauri::command]
 pub async fn cloud_sync_pull(app: AppHandle, replace: bool, master_state: State<'_, MasterPasswordState>) -> Result<SyncResult, String> {
+    let _sync = exclusive().await;
     let mut config = load_config(&app)?;
     ensure_signed_in(&config)?;
     pull_only(&AppStore::new(&app, &master_state), &mut config, replace).await
@@ -1427,6 +1440,7 @@ pub async fn cloud_sync_pull(app: AppHandle, replace: bool, master_state: State<
 
 #[tauri::command]
 pub async fn cloud_sync_now(app: AppHandle, confirm_deletes: Option<bool>, master_state: State<'_, MasterPasswordState>) -> Result<SyncResult, String> {
+    let _sync = exclusive().await;
     let mut config = load_config(&app)?;
     ensure_signed_in(&config)?;
     sync_now(&AppStore::new(&app, &master_state), &mut config, confirm_deletes.unwrap_or(false)).await
@@ -1747,6 +1761,12 @@ pub(crate) fn clear_account_login(app: &AppHandle) -> Result<(), String> {
     forget_remote(&mut config);
     forget_base(app);
     save_config(app, &config)
+}
+
+/// [`clear_account_login`] once no sync is running.
+pub(crate) async fn clear_account_login_exclusively(app: &AppHandle) -> Result<(), String> {
+    let _sync = exclusive().await;
+    clear_account_login(app)
 }
 
 pub(crate) async fn revoke_sync_credential(token: &str) {
@@ -2075,6 +2095,16 @@ pub(crate) mod tests {
         config.provider = "auraxlab".into();
         assert!(!migrate_removed_providers(&mut config));
         assert!(!config.legacy_provider_notice);
+    }
+
+    #[tokio::test]
+    async fn only_one_sync_flow_runs_at_a_time() {
+        let held = exclusive().await;
+        let waiter = tokio::spawn(async { drop(exclusive().await) });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "a second sync waits for the first");
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5), waiter).await.expect("runs once the first is done").unwrap();
     }
 
     #[test]

@@ -181,3 +181,25 @@ describe("describeSyncResult (the result in the user's language)", () => {
     );
   });
 });
+
+import { runExclusiveSync, syncRunning } from "../cloudSync";
+
+describe("runExclusiveSync", () => {
+  it("runs one sync at a time and frees the slot afterwards, even on failure", async () => {
+    let release!: () => void;
+    const first = runExclusiveSync(() => new Promise<string>((resolve) => { release = () => resolve("first"); }));
+    expect(syncRunning.value).toBe(true);
+
+    const second = vi.fn(async () => "second");
+    await expect(runExclusiveSync(second)).resolves.toBeUndefined();
+    expect(second).not.toHaveBeenCalled();
+
+    release();
+    await expect(first).resolves.toBe("first");
+    expect(syncRunning.value).toBe(false);
+
+    await expect(runExclusiveSync(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    expect(syncRunning.value).toBe(false);
+    await expect(runExclusiveSync(second)).resolves.toBe("second");
+  });
+});
