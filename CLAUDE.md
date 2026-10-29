@@ -150,9 +150,9 @@ AuraTerm follows the standard Tauri architecture: a **Rust backend** that manage
 |-------|-----------|
 | Frontend framework | Vue 3 (Composition API, `<script setup>`) |
 | Frontend language | TypeScript 5 |
-| Terminal renderer | Xterm.js 5.x (`@xterm/xterm`) with WebGL addon |
-| Xterm addons | `addon-fit`, `addon-search`, `addon-unicode11`, `addon-webgl` |
-| Build tool | Vite 7 + `@vitejs/plugin-vue` |
+| Terminal renderer | Xterm.js 6.x (`@xterm/xterm` 6.0) with WebGL addon |
+| Xterm addons | `addon-fit` 0.11, `addon-search` 0.16, `addon-unicode11` 0.9, `addon-web-links` 0.12, `addon-webgl` 0.19 |
+| Build tool | Vite 8 + `@vitejs/plugin-vue` |
 | Desktop runtime | Tauri v2 |
 | Backend language | Rust (edition 2021) |
 | SSH library | `russh` 0.62 (keys via `russh::keys`) + `russh-sftp` |
@@ -183,7 +183,7 @@ All commit messages **must be in English** and follow imperative mood format:
 - **Window minimize/maximize/close** are handled via Rust Tauri commands (custom titlebar, `decorations: false`)
 - **UI theme** is derived via `settings.uiThemeMode` and `deriveUiTheme(theme, uiThemeMode)` — three modes: `follow-terminal`, `light`, `dark`
 - **Screen/tmux reconnect**: keep TERM selection dynamic; do not assume a specific terminfo entry exists on the remote
-- **Xterm addon versions**: search is tied to Xterm 5.x — exercise caution when upgrading addons
+- **Xterm addon versions**: the addons are versioned in lockstep with `@xterm/xterm` (6.x pairs with `addon-search` 0.16) — upgrade them together. `TerminalComponent.vue` creates the search addon with `highlightLimit: 0` to stop it decorating every match, which froze macOS WebKit on large buffers; re-check search on macOS after any xterm/addon upgrade
 - **Never use `window.confirm` / `window.alert` / `window.prompt`** — they are silent no-ops in the macOS WebView (wry implements no WKUIDelegate JS-dialog handlers; `confirm` always returns `false`). Use `confirmDialog`/`alertDialog` from `src/nativeDialogs.ts` (tauri-plugin-dialog) and `promptText` from `src/promptDialog.ts` (in-app modal hosted by `PromptDialogHost.vue` in App.vue)
 - **Version bumping**: only update `package.json` version; the sync script propagates it everywhere else. Run `npm run sync:version` (or just use `npm run tauri …` which runs it automatically)
 

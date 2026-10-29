@@ -816,9 +816,10 @@ onMounted(() => {
   });
 
   fitAddon = new FitAddon();
-  // highlightLimit:0 means _highlightAllMatches() exits immediately (0 >= 0 → break).
-  // This eliminates the O(n_matches) buffer scan + decoration-object creation that
-  // froze WebKit while still allowing the active match highlight.
+  // highlightLimit:0 stops _highlightAllMatches() before it collects a single
+  // result (addon-search 0.16: one find, then 0 >= 0 → break), so it never builds
+  // a decoration per match — the O(n_matches) work that froze WebKit — while the
+  // active match is still highlighted.
   searchAddon = new SearchAddon({ highlightLimit: 0 });
   terminalRef.value = terminal;
   searchAddonRef.value = searchAddon;
