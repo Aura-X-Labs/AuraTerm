@@ -208,13 +208,25 @@ pub async fn recv_text(stream: &mut WsStream) -> Result<serde_json::Value, Strin
     }
 }
 
-pub fn decode_hex(value: &str) -> Vec<u8> {
-    if value.len() % 2 != 0 {
-        return Vec::new();
+/// Decode a peer-supplied hex string. Works on raw bytes, so any non-hex
+/// input — including multi-byte UTF-8 — is an error rather than a panic
+/// from slicing inside a character.
+pub fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    fn nibble(byte: u8) -> Result<u8, String> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err("invalid hex digit".into()),
+        }
     }
-    (0..value.len())
-        .step_by(2)
-        .filter_map(|i| u8::from_str_radix(&value[i..i + 2], 16).ok())
+    let bytes = value.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return Err("odd hex length".into());
+    }
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Ok((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }
 
@@ -647,7 +659,9 @@ fn spawn_reader_task<R: tauri::Runtime>(
                             reason: None,
                         });
                     }
-                    let bytes = decode_hex(inner.get("data_hex").and_then(|v| v.as_str()).unwrap_or(""));
+                    // A malformed payload is dropped, as before, but no
+                    // longer able to take the reader down with a panic.
+                    let bytes = decode_hex(inner.get("data_hex").and_then(|v| v.as_str()).unwrap_or("")).unwrap_or_default();
                     emit_output(&app, &id, &mut decoder, &bytes);
                 }
                 FrameClass::Resize | FrameClass::SessionSwitched => {
@@ -760,8 +774,20 @@ mod tests {
     #[test]
     fn hex_helpers_round_trip() {
         assert_eq!(encode_hex(b"ls\n"), "6c730a");
-        assert_eq!(decode_hex("6c730a"), b"ls\n");
-        assert!(decode_hex("abc").is_empty());
+        assert_eq!(decode_hex("6c730a").unwrap(), b"ls\n");
+        assert_eq!(decode_hex("6C730A").unwrap(), b"ls\n");
+        assert!(decode_hex("").unwrap().is_empty());
+        assert!(decode_hex("abc").is_err());
+        assert!(decode_hex("zz").is_err());
+    }
+
+    #[test]
+    fn hex_decoding_rejects_multibyte_input_without_panicking() {
+        // Even byte length, but the slice boundary falls inside "é".
+        assert!(decode_hex("aé0").is_err());
+        assert!(decode_hex("é").is_err());
+        assert!(decode_hex("41日本").is_err());
+        assert!(decode_hex("+1").is_err());
     }
 
     // ── reader loop against an in-process fake relay ──────────────────────
@@ -897,7 +923,7 @@ mod tests {
                 let seq = frame["input_seq"].as_u64().unwrap();
                 assert!(seq > last_seq);
                 last_seq = seq;
-                let bytes = decode_hex(frame["data_hex"].as_str().unwrap());
+                let bytes = decode_hex(frame["data_hex"].as_str().unwrap()).unwrap();
                 assert!(!bytes.is_empty() && bytes.len() <= MAX_INPUT_BYTES, "chunk of {} bytes", bytes.len());
                 // Every chunk is valid UTF-8 on its own: no split characters.
                 assert!(std::str::from_utf8(&bytes).is_ok());
