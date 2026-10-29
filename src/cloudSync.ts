@@ -20,7 +20,7 @@ export type SyncProvider = "" | "auraxlab";
 export type CredentialsMode = "masterPassword" | "localKey";
 
 /** Why the credentials part of a sync did not run (`cloud_sync::skip`). */
-export type CredentialsSkipReason = "localKeyMode" | "masterLocked" | "mismatch" | "corrupt";
+export type CredentialsSkipReason = "localKeyMode" | "masterLocked" | "mismatch" | "corrupt" | "newerFormat";
 
 export interface AuraxlabView {
   username: string;

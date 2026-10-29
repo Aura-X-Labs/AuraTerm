@@ -479,6 +479,7 @@ const zhCN: Messages = {
       masterLocked: "凭据已跳过：主密码已锁定",
       mismatch: "凭据已跳过：与上传设备的主密码不一致",
       corrupt: "凭据已跳过：数据不可读",
+      newerFormat: "凭据已跳过：由更新版本的 AuraTerm 保存，请升级后同步",
     },
     // AuraXLab 登录 / 注册（AuraxlabAuthForm、AccountDialog）。
     loginHint: "登录你在官方 AuraXLab 同步服务上的账户。",
@@ -619,6 +620,7 @@ const zhCN: Messages = {
       masterLocked: "凭据待解锁主密码",
       mismatch: "凭据未同步（主密码不一致）",
       corrupt: "凭据未同步（数据不可读）",
+      newerFormat: "凭据未同步（请升级 AuraTerm）",
     },
     syncNow: "立即同步",
     syncSettings: "同步设置…",

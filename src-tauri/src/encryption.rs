@@ -358,10 +358,57 @@ fn derive_key(password: &str, salt: &[u8], version: u32) -> Result<Zeroizing<[u8
 ///
 /// 不再经过 PHC 文本串 + SHA-256，密钥只依赖 Argon2 的原始输出，不与序列化格式耦合。
 fn derive_key_v2(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
+    derive_argon2id(password, salt, KdfParams::LEGACY)
+}
+
+/// Argon2id cost parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KdfParams {
+    /// Memory in KiB.
+    m_kib: u32,
+    t: u32,
+    p: u32,
+}
+
+impl KdfParams {
+    /// 16 MiB / t=3 / p=1: the local credential file (v2), backups, and every
+    /// envelope written before the parameters travelled in the header.
+    const LEGACY: Self = Self { m_kib: 16 * 1024, t: 3, p: 1 };
+    /// For envelopes that sit on a server and can be attacked offline:
+    /// 64 MiB / t=3 / p=1 (RFC 9106's second recommended setting, single lane).
+    const STRONG: Self = Self { m_kib: 64 * 1024, t: 3, p: 1 };
+    /// The most a stored header may ask for. A share bundle comes from someone
+    /// else, so its parameters must not be able to make this device allocate
+    /// or spin without bound.
+    const MAX_M_KIB: u32 = 256 * 1024;
+    const MAX_T: u32 = 10;
+    const MAX_P: u32 = 4;
+
+    const ENCODED_LEN: usize = 12;
+
+    fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0u8; Self::ENCODED_LEN];
+        out[0..4].copy_from_slice(&self.m_kib.to_le_bytes());
+        out[4..8].copy_from_slice(&self.t.to_le_bytes());
+        out[8..12].copy_from_slice(&self.p.to_le_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let word = |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+        let params = Self { m_kib: word(0), t: word(4), p: word(8) };
+        if params.m_kib > Self::MAX_M_KIB || params.t == 0 || params.t > Self::MAX_T || params.p == 0 || params.p > Self::MAX_P {
+            return Err("Unsupported key-derivation parameters".to_string());
+        }
+        Ok(params)
+    }
+}
+
+fn derive_argon2id(password: &str, salt: &[u8], params: KdfParams) -> Result<Zeroizing<[u8; 32]>, String> {
     let params = ParamsBuilder::new()
-        .m_cost(16 * 1024) // 16 MB
-        .t_cost(3)
-        .p_cost(1)
+        .m_cost(params.m_kib)
+        .t_cost(params.t)
+        .p_cost(params.p)
         .build()
         .map_err(|e| format!("Argon2 params builder failed: {}", e))?;
 
@@ -701,7 +748,6 @@ const SYNC_BLOB_PREFIX: usize = 8 + 1 + SALT_SIZE; // magic + version + salt
 /// interchangeable — the magic is what makes "decrypt this as the other kind"
 /// fail loudly instead of silently.
 const SHARE_MAGIC: &[u8; 8] = b"AURASHAR";
-const SHARE_BLOB_VERSION: u8 = 1;
 
 /// Synced saved credentials (`cloud_sync.rs`, design
 /// `docs/plans/sync-passphrase-removal-design.md` §5.2). Tier-2 data inside
@@ -711,16 +757,36 @@ const SHARE_BLOB_VERSION: u8 = 1;
 /// (practically impossible) salt collision with the local `credentials.enc`
 /// or a legacy `AURASYNC` blob yields a different key.
 const CRED_MAGIC: &[u8; 8] = b"AURACRED";
-const CRED_BLOB_VERSION: u8 = 1;
 const CRED_HKDF_INFO: &[u8] = b"AuraTerm sync credentials v1";
+
+/// Envelope layout version 1: `magic || 1 || salt || nonce+ct+tag`, key from
+/// [`KdfParams::LEGACY`].
+const ENVELOPE_V1: u8 = 1;
+/// Envelope layout version 2: `magic || 2 || m_kib || t || p || salt ||
+/// nonce+ct+tag` (u32 LE each). The Argon2id parameters travel in the header,
+/// so they can be raised later without another format change, and every
+/// envelope is opened with the parameters it was sealed with.
+const ENVELOPE_V2: u8 = 2;
+/// Newest envelope layout this build can open.
+pub const ENVELOPE_MAX_VERSION: u8 = ENVELOPE_V2;
+
+/// Layout new share bundles are written in. A bundle is opened by whoever got
+/// the code — possibly on an older build, which then asks to upgrade.
+const SHARE_WRITE_VERSION: u8 = ENVELOPE_V2;
+/// Layout new credentials envelopes are written in. Still v1: builds up to
+/// 0.4.0 read any envelope they cannot open as foreign and replace it with
+/// their own, and the next merge on the newer device would then delete the
+/// credentials only it had. Writing v2 waits for a release after this one,
+/// which already opens v2 and carries a newer envelope over untouched.
+const CRED_WRITE_VERSION: u8 = ENVELOPE_V1;
 
 /// Wire label for the credentials envelope inside the `rest-v2` payload.
 pub const CRED_ENVELOPE_FORMAT: &str = "AURACRED/1";
 
 /// Envelope key: Argon2id(passphrase, salt), optionally expanded through
 /// HKDF-SHA256 with a domain label so two envelope kinds can never share a key.
-fn envelope_key(passphrase: &str, salt: &[u8], info: Option<&[u8]>) -> Result<Zeroizing<[u8; 32]>, String> {
-    let ikm = derive_key_v2(passphrase, salt)?;
+fn envelope_key(passphrase: &str, salt: &[u8], params: KdfParams, info: Option<&[u8]>) -> Result<Zeroizing<[u8; 32]>, String> {
+    let ikm = derive_argon2id(passphrase, salt, params)?;
     let Some(info) = info else {
         return Ok(ikm);
     };
@@ -732,13 +798,10 @@ fn envelope_key(passphrase: &str, salt: &[u8], info: Option<&[u8]>) -> Result<Ze
 }
 
 /// The shared envelope behind [`encrypt_sync_blob`], [`encrypt_share_blob`]
-/// and [`encrypt_credentials_envelope`].
-///
-/// Format: magic(8) || version(1) || salt(32) || nonce(12)+ciphertext+tag.
-/// Key = Argon2id(passphrase, salt) via the v2 KDF (16 MiB / t=3 / p=1),
-/// optionally HKDF-expanded with `info`. The salt is random per blob and
-/// travels in the header, so a recipient needs nothing but the passphrase to
-/// open it.
+/// and [`encrypt_credentials_envelope`], in layout `version` (v1: legacy
+/// parameters, implied; v2: [`KdfParams::STRONG`], stored in the header).
+/// The salt is random per blob and travels in the header, so a recipient
+/// needs nothing but the passphrase to open it.
 fn encrypt_envelope(
     plaintext: &[u8],
     passphrase: &str,
@@ -746,43 +809,64 @@ fn encrypt_envelope(
     version: u8,
     info: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    let (params, encoded) = match version {
+        ENVELOPE_V1 => (KdfParams::LEGACY, None),
+        ENVELOPE_V2 => (KdfParams::STRONG, Some(KdfParams::STRONG.encode())),
+        other => return Err(format!("Cannot write envelope version {other}")),
+    };
     let mut rng = rand::thread_rng();
     let salt: Vec<u8> = (0..SALT_SIZE).map(|_| rng.gen()).collect();
-    let key = envelope_key(passphrase, &salt, info)?;
+    let key = envelope_key(passphrase, &salt, params, info)?;
     let encrypted = encrypt_data(plaintext, &key)?;
 
-    let mut out = Vec::with_capacity(8 + 1 + SALT_SIZE + encrypted.len());
+    let mut out = Vec::with_capacity(8 + 1 + KdfParams::ENCODED_LEN + SALT_SIZE + encrypted.len());
     out.extend_from_slice(magic);
     out.push(version);
+    if let Some(encoded) = encoded {
+        out.extend_from_slice(&encoded);
+    }
     out.extend_from_slice(&salt);
     out.extend_from_slice(&encrypted);
     Ok(out)
 }
 
+/// Open an envelope of any layout up to `max_version`, with the parameters it
+/// was sealed with.
 fn decrypt_envelope(
     blob: &[u8],
     passphrase: &str,
     magic: &[u8; 8],
-    version: u8,
+    max_version: u8,
     info: Option<&[u8]>,
     kind: &str,
 ) -> Result<Vec<u8>, String> {
-    let prefix = 8 + 1 + SALT_SIZE;
-    if blob.len() < prefix {
-        return Err(format!("{kind} is too short or corrupt"));
+    let too_short = || format!("{kind} is too short or corrupt");
+    if blob.len() < 9 {
+        return Err(too_short());
     }
     if &blob[0..8] != magic {
         return Err(format!("Not an AuraTerm {kind} (bad magic header)"));
     }
-    if blob[8] != version {
-        return Err(format!(
-            "Unsupported {kind} version: {} (upgrade AuraTerm)",
-            blob[8]
-        ));
+    let version = blob[8];
+    let (params, rest) = match version {
+        ENVELOPE_V1 => (KdfParams::LEGACY, &blob[9..]),
+        ENVELOPE_V2 if version <= max_version => {
+            let header = blob.get(9..9 + KdfParams::ENCODED_LEN).ok_or_else(too_short)?;
+            (KdfParams::decode(header)?, &blob[9 + KdfParams::ENCODED_LEN..])
+        }
+        other => return Err(format!("Unsupported {kind} version: {other} (upgrade AuraTerm)")),
+    };
+    if rest.len() < SALT_SIZE {
+        return Err(too_short());
     }
-    let salt = &blob[9..9 + SALT_SIZE];
-    let key = envelope_key(passphrase, salt, info)?;
-    decrypt_data(&blob[prefix..], &key)
+    let (salt, ciphertext) = rest.split_at(SALT_SIZE);
+    let key = envelope_key(passphrase, salt, params, info)?;
+    decrypt_data(ciphertext, &key)
+}
+
+/// The layout version of a credentials envelope, when it is one.
+pub fn credentials_envelope_version(blob: &[u8]) -> Option<u8> {
+    (blob.len() > 8 && &blob[0..8] == CRED_MAGIC).then(|| blob[8])
 }
 
 /// Encrypt the synced credential list under the master password.
@@ -790,14 +874,14 @@ pub fn encrypt_credentials_envelope(plaintext: &[u8], master_password: &str) -> 
     if master_password.is_empty() {
         return Err("Master password must not be empty".to_string());
     }
-    encrypt_envelope(plaintext, master_password, CRED_MAGIC, CRED_BLOB_VERSION, Some(CRED_HKDF_INFO))
+    encrypt_envelope(plaintext, master_password, CRED_MAGIC, CRED_WRITE_VERSION, Some(CRED_HKDF_INFO))
 }
 
 /// Decrypt a credentials envelope. A master password that differs from the
 /// uploading device's is the overwhelmingly likely cause of a failure, and the
 /// message says so; format problems keep their specific text.
 pub fn decrypt_credentials_envelope(blob: &[u8], master_password: &str) -> Result<Vec<u8>, String> {
-    decrypt_envelope(blob, master_password, CRED_MAGIC, CRED_BLOB_VERSION, Some(CRED_HKDF_INFO), "credentials envelope")
+    decrypt_envelope(blob, master_password, CRED_MAGIC, ENVELOPE_MAX_VERSION, Some(CRED_HKDF_INFO), "credentials envelope")
         .map_err(|error| {
             if error.contains("magic") || error.contains("version") || error.contains("short") {
                 error
@@ -818,12 +902,12 @@ pub fn encrypt_share_blob(plaintext: &[u8], secret: &str) -> Result<Vec<u8>, Str
     if secret.is_empty() {
         return Err("Share secret must not be empty".to_string());
     }
-    encrypt_envelope(plaintext, secret, SHARE_MAGIC, SHARE_BLOB_VERSION, None)
+    encrypt_envelope(plaintext, secret, SHARE_MAGIC, SHARE_WRITE_VERSION, None)
 }
 
 /// Decrypt a share bundle. A wrong code, or any tampering, is one opaque error.
 pub fn decrypt_share_blob(blob: &[u8], secret: &str) -> Result<Vec<u8>, String> {
-    decrypt_envelope(blob, secret, SHARE_MAGIC, SHARE_BLOB_VERSION, None, "share bundle")
+    decrypt_envelope(blob, secret, SHARE_MAGIC, ENVELOPE_MAX_VERSION, None, "share bundle")
         .map_err(|error| {
             if error.contains("magic") || error.contains("version") || error.contains("short") {
                 error
@@ -844,7 +928,7 @@ pub fn encrypt_sync_blob(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, 
     if passphrase.is_empty() {
         return Err("Sync passphrase must not be empty".to_string());
     }
-    encrypt_envelope(plaintext, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION, None)
+    encrypt_envelope(plaintext, passphrase, SYNC_MAGIC, ENVELOPE_V1, None)
 }
 
 /// Decrypt a legacy `e2e-v1` sync blob using the old sync passphrase. Only
@@ -863,7 +947,7 @@ pub fn decrypt_sync_blob(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, Strin
             blob[8]
         ));
     }
-    decrypt_envelope(blob, passphrase, SYNC_MAGIC, SYNC_BLOB_VERSION, None, "sync blob")
+    decrypt_envelope(blob, passphrase, SYNC_MAGIC, ENVELOPE_V1, None, "sync blob")
         .map_err(|_| "Incorrect sync passphrase, or the synced data is corrupt".to_string())
 }
 
@@ -1453,6 +1537,78 @@ mod tests {
         let mut forged = sync.clone();
         forged[0..8].copy_from_slice(b"AURACRED");
         assert!(decrypt_credentials_envelope(&forged, "pw").is_err());
+    }
+
+    // ========== 信封 v2（参数随头部存储） ==========
+
+    /// An AURACRED envelope as builds up to 0.4.0 wrote it, assembled by hand
+    /// (Argon2id 16 MiB/t=3/p=1 → HKDF → AES-GCM) rather than through
+    /// `encrypt_envelope`, so a change to the shared code cannot quietly move
+    /// both sides of the check.
+    fn handmade_v1_credentials_envelope(plaintext: &[u8], password: &str) -> Vec<u8> {
+        let salt = [0x42u8; SALT_SIZE];
+        let params = argon2::Params::new(16 * 1024, 3, 1, Some(32)).unwrap();
+        let mut ikm = [0u8; 32];
+        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+            .hash_password_into(password.as_bytes(), &salt, &mut ikm)
+            .unwrap();
+        let mut key = [0u8; 32];
+        hkdf::Hkdf::<Sha256>::new(None, &ikm).expand(b"AuraTerm sync credentials v1", &mut key).unwrap();
+        let mut blob = b"AURACRED".to_vec();
+        blob.push(1);
+        blob.extend_from_slice(&salt);
+        blob.extend_from_slice(&encrypt_data(plaintext, &key).unwrap());
+        blob
+    }
+
+    #[test]
+    fn existing_v1_credentials_envelopes_still_open() {
+        let blob = handmade_v1_credentials_envelope(b"[]", "master");
+        assert_eq!(credentials_envelope_version(&blob), Some(1));
+        assert_eq!(decrypt_credentials_envelope(&blob, "master").unwrap(), b"[]");
+        assert!(decrypt_credentials_envelope(&blob, "other").unwrap_err().contains("different master password"));
+    }
+
+    #[test]
+    fn new_share_bundles_use_stronger_parameters_stored_in_the_header() {
+        let blob = encrypt_share_blob(b"bundle", "SECRETCODE12").unwrap();
+        assert_eq!(blob[8], ENVELOPE_V2);
+        assert_eq!(KdfParams::decode(&blob[9..21]).unwrap(), KdfParams::STRONG);
+        assert!(KdfParams::STRONG.m_kib > KdfParams::LEGACY.m_kib);
+        assert_eq!(decrypt_share_blob(&blob, "SECRETCODE12").unwrap(), b"bundle");
+        assert!(decrypt_share_blob(&blob, "WRONGCODE123").is_err());
+
+        // A bundle shared by an older build still opens.
+        let old = encrypt_envelope(b"bundle", "SECRETCODE12", SHARE_MAGIC, ENVELOPE_V1, None).unwrap();
+        assert_eq!(old.len(), blob.len() - KdfParams::ENCODED_LEN);
+        assert_eq!(decrypt_share_blob(&old, "SECRETCODE12").unwrap(), b"bundle");
+    }
+
+    #[test]
+    fn v2_credentials_envelopes_open_and_newer_ones_are_recognised() {
+        let v2 = encrypt_envelope(b"[]", "master", CRED_MAGIC, ENVELOPE_V2, Some(CRED_HKDF_INFO)).unwrap();
+        assert_eq!(credentials_envelope_version(&v2), Some(2));
+        assert_eq!(decrypt_credentials_envelope(&v2, "master").unwrap(), b"[]");
+        // Still written as v1 until the builds that would clobber v2 are gone.
+        assert_eq!(credentials_envelope_version(&encrypt_credentials_envelope(b"[]", "master").unwrap()), Some(1));
+
+        let mut newer = v2.clone();
+        newer[8] = ENVELOPE_MAX_VERSION + 1;
+        let err = decrypt_credentials_envelope(&newer, "master").unwrap_err();
+        assert!(err.contains("upgrade AuraTerm"), "got: {err}");
+    }
+
+    #[test]
+    fn stored_parameters_are_bounded() {
+        let mut blob = encrypt_envelope(b"x", "pw", SHARE_MAGIC, ENVELOPE_V2, None).unwrap();
+        // 4 GiB of memory: refused before Argon2 allocates anything.
+        blob[9..13].copy_from_slice(&(4u32 * 1024 * 1024).to_le_bytes());
+        assert!(decrypt_share_blob(&blob, "pw").is_err());
+        assert!(KdfParams::decode(&KdfParams { m_kib: 1024, t: 0, p: 1 }.encode()).is_err());
+        assert!(KdfParams::decode(&KdfParams { m_kib: 1024, t: 99, p: 1 }.encode()).is_err());
+        assert!(KdfParams::decode(&KdfParams { m_kib: 1024, t: 1, p: 64 }.encode()).is_err());
+        // Truncated header.
+        assert!(decrypt_share_blob(&blob[..15], "pw").is_err());
     }
 
     // ========== 本地密钥模式 (v3) ==========
