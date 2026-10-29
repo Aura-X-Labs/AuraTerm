@@ -541,20 +541,42 @@ async fn run_chat(
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Whether a caller-chosen request id is acceptable: a UUID-like token that
+/// cannot collide with an event name or another request still running.
+fn valid_request_id(request_id: &str) -> bool {
+    (1..=64).contains(&request_id.len())
+        && request_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 /// Start a streaming chat request. Returns the request id immediately; the
 /// reply arrives as `ai-stream` events carrying that id.
+///
+/// The caller should choose the id (`request_id`): the request can fail and
+/// emit its error event before this command's reply reaches the frontend, and
+/// only a caller that already knows the id can tell that event is its own.
 #[tauri::command]
 pub fn ai_chat_start(
     app: AppHandle,
     state: State<'_, AiState>,
     messages: Vec<AiMessage>,
     system: Option<String>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     if messages.is_empty() {
         return Err("Messages must not be empty".to_string());
     }
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = match request_id {
+        Some(id) if valid_request_id(&id) => id,
+        Some(_) => return Err("Invalid request id".to_string()),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
     let active = state.active.clone();
+    // Held across the spawn: a request that finishes at once must not remove
+    // its entry before it has been inserted, leaving a stale one behind.
+    let mut active_guard = state.active.lock().map_err(|e| e.to_string())?;
+    if active_guard.contains_key(&request_id) {
+        return Err("Request id is already in use".to_string());
+    }
     let task_app = app.clone();
     let task_request_id = request_id.clone();
 
@@ -574,9 +596,7 @@ pub fn ai_chat_start(
         }
     });
 
-    if let Ok(mut active) = state.active.lock() {
-        active.insert(request_id.clone(), handle);
-    }
+    active_guard.insert(request_id.clone(), handle);
     Ok(request_id)
 }
 
@@ -659,6 +679,15 @@ pub async fn ai_test_connection(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_chosen_request_ids_are_uuid_like_tokens() {
+        assert!(valid_request_id(&uuid::Uuid::new_v4().to_string()));
+        assert!(!valid_request_id(""));
+        assert!(!valid_request_id(&"a".repeat(65)));
+        assert!(!valid_request_id("ai-stream:other"));
+        assert!(!valid_request_id("id with spaces"));
+    }
 
     #[test]
     fn anthropic_delta_and_usage_parse() {
