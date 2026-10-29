@@ -886,12 +886,13 @@ onMounted(() => {
     event.preventDefault();
     event.stopPropagation();
     void navigator.clipboard.readText().then((text) => {
-      if (!text || !ptyId.value) {
+      if (!text || !ptyId.value || !terminal) {
         return;
       }
-      void writeSessionInput(ptyId.value, text, activeSessionRef.value).catch((error) => {
-        console.error("middle paste failed", error);
-      });
+      // Same path as Ctrl+V: xterm applies bracketed paste and newline
+      // conversion, and onData keeps it ordered behind batched keystrokes and
+      // fans it out to broadcast panes.
+      terminal.paste(text);
     }).catch((error) => {
       console.error("clipboard read (middle click) failed", error);
     });
