@@ -1263,6 +1263,17 @@ fn try_agent_identities<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::AuthResult, AgentAuthError>> + Send + 'a>> {
     Box::pin(async move {
     let stream = connect_local_agent_stream().await.map_err(AgentAuthError::Unavailable)?;
+    offer_agent_identities(session, user, stream).await
+    })
+}
+
+/// [`try_agent_identities`] against an already connected agent.
+fn offer_agent_identities<'a>(
+    session: &'a mut client::Handle<known_hosts::ClientHandler>,
+    user: &'a str,
+    stream: LocalAgentStream,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::AuthResult, AgentAuthError>> + Send + 'a>> {
+    Box::pin(async move {
     let mut agent = AgentClient::connect(stream);
     let identities = agent.request_identities().await
         .map_err(|error| AgentAuthError::Unavailable(format!("Failed to list SSH agent identities: {error}")))?;
@@ -1276,18 +1287,21 @@ fn try_agent_identities<'a>(
     let mut remaining = russh::MethodSet::empty();
     let mut partial = false;
     for identity in identities {
-        let key = match identity {
-            AgentIdentity::PublicKey { key, .. } => key,
-            AgentIdentity::Certificate { certificate, .. } => {
-                russh::keys::PublicKey::new(certificate.public_key().clone(), "")
-            }
-        };
-        // `authenticate_publickey_with` is generic over a `Signer` whose
-        // signing future is RPITIT (`impl Future + Send`). Awaiting it directly
-        // inside this boxed `Send` future trips a rustc higher-ranked-lifetime
+        // `authenticate_*_with` is generic over a `Signer` whose signing
+        // future is RPITIT (`impl Future + Send`). Awaiting it directly inside
+        // this boxed `Send` future trips a rustc higher-ranked-lifetime
         // limitation, so we box the call to erase the opaque type first.
         let auth: std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::AuthResult, russh::AgentAuthError>> + Send>> =
-            Box::pin(session.authenticate_publickey_with(user.to_string(), key, rsa_hash, &mut agent));
+            match identity {
+                AgentIdentity::PublicKey { key, .. } => {
+                    Box::pin(session.authenticate_publickey_with(user.to_string(), key, rsa_hash, &mut agent))
+                }
+                // Offer a certificate as a certificate: servers that trust the
+                // CA (TrustedUserCAKeys) usually do not list the bare key.
+                AgentIdentity::Certificate { certificate, .. } => {
+                    Box::pin(session.authenticate_certificate_with(user.to_string(), certificate, rsa_hash, &mut agent))
+                }
+            };
         match auth.await {
             Ok(client::AuthResult::Success) => return Ok(client::AuthResult::Success),
             Ok(client::AuthResult::Failure { remaining_methods, partial_success }) => {
@@ -3025,6 +3039,78 @@ mod tests {
         assert!(state.clone().claim_session("tab".to_string(), owner, handle, input_tx, resize_tx, (80, 24)).await);
         assert_eq!(resize_rx.try_recv().ok(), Some((132, 43)));
         server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_certificates_are_offered_as_certificates() {
+        use super::*;
+        use russh::server;
+        use std::process::{Command, Stdio};
+
+        /// Trusts certificates (as with TrustedUserCAKeys) but no bare keys.
+        struct Server;
+        impl server::Handler for Server {
+            type Error = russh::Error;
+
+            async fn auth_openssh_certificate(
+                &mut self,
+                _: &str,
+                _: &russh::keys::Certificate,
+            ) -> Result<server::Auth, Self::Error> {
+                Ok(server::Auth::Accept)
+            }
+        }
+
+        let tool = |name: &str| Command::new(name).arg("-?").stderr(Stdio::null()).stdout(Stdio::null()).status().is_ok();
+        if !(tool("ssh-keygen") && tool("ssh-agent") && tool("ssh-add")) {
+            eprintln!("skipped: OpenSSH client tools not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("auraterm-agent-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keygen = |args: &[&str]| {
+            assert!(Command::new("ssh-keygen").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
+        };
+        let ca = dir.join("ca");
+        let user_key = dir.join("id");
+        keygen(&["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()]);
+        keygen(&["-q", "-t", "ed25519", "-N", "", "-f", user_key.to_str().unwrap()]);
+        keygen(&["-q", "-s", ca.to_str().unwrap(), "-I", "test", "-n", "alice", &format!("{}.pub", user_key.display())]);
+
+        let socket = dir.join("agent.sock");
+        let mut agent = Command::new("ssh-agent")
+            .args(["-D", "-a", socket.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // Loads id and id-cert.pub: the agent then lists the key and the cert.
+        let added = Command::new("ssh-add")
+            .arg(user_key.to_str().unwrap())
+            .env("SSH_AUTH_SOCK", &socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(added.success());
+
+        let (address, server) = test_support::spawn_server(Server).await;
+        let mut session = test_support::connect(address).await;
+        let stream: LocalAgentStream = Box::new(tokio::net::UnixStream::connect(&socket).await.unwrap());
+        let result = offer_agent_identities(&mut session, "alice", stream).await;
+
+        let _ = agent.kill();
+        let _ = agent.wait();
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(result, Ok(client::AuthResult::Success)), "{:?}", result.err().map(|error| error.into_message()));
     }
 
     #[test]
