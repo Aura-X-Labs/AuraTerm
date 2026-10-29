@@ -166,6 +166,10 @@ pub struct SshSessionState {
     owner: Option<Arc<ReconnectCancellation>>,
     /// When `Some`, auto-reconnect is enabled and this config is used on every retry.
     reconnect_config: Option<ReconnectConfig>,
+    /// The terminal size the tab last asked for, kept even while no PTY is
+    /// connected so a reconnect (or a connect still in progress) opens or
+    /// resizes the remote PTY to it instead of the size at start.
+    pty_size: Option<(u32, u32)>,
     /// Per-session remote (`-R`) forward registry, shared with the russh
     /// `ClientHandler`. Created lazily and reused across reconnects so the
     /// handler always sees the same map.
@@ -287,11 +291,6 @@ impl SshState {
         self.snapshot(id, |s| s.input_tx.clone()).await
     }
 
-    /// Clone the cheap `mpsc::Sender<(u32, u32)>` for window resize, if any.
-    async fn resize_sender(&self, id: &str) -> Option<mpsc::Sender<(u32, u32)>> {
-        self.snapshot(id, |s| s.resize_tx.clone()).await
-    }
-
     /// Clone the MFA response sender, if any.
     async fn auth_sender(&self, id: &str) -> Option<mpsc::Sender<String>> {
         self.snapshot(id, |s| s.auth_tx.clone()).await
@@ -388,10 +387,16 @@ impl SshState {
         handle: SharedSshHandle,
         input_tx: mpsc::Sender<Vec<u8>>,
         resize_tx: mpsc::Sender<(u32, u32)>,
+        opened_size: (u32, u32),
     ) -> bool {
         let mut guard = self.sessions.write().await;
         match guard.get_mut(&id) {
             Some(s) if owns(s, &owner) => {
+                // The tab may have been resized while this attempt connected;
+                // queue that size for the IO loop to apply first.
+                if let Some(size) = s.pty_size.filter(|size| *size != opened_size) {
+                    let _ = resize_tx.try_send(size);
+                }
                 s.input_tx = Some(input_tx);
                 s.resize_tx = Some(resize_tx);
                 s.handle = Some(handle);
@@ -399,6 +404,20 @@ impl SshState {
             }
             _ => false,
         }
+    }
+
+    /// Remember the tab's size, connected or not, and return the live PTY's
+    /// resize sender if there is one.
+    async fn record_pty_size(&self, id: &str, cols: u32, rows: u32) -> Option<Option<mpsc::Sender<(u32, u32)>>> {
+        self.with_session_mut(id, |s| {
+            s.pty_size = Some((cols, rows));
+            if let Some(config) = s.reconnect_config.as_mut() {
+                config.cols = cols;
+                config.rows = rows;
+            }
+            s.resize_tx.clone()
+        })
+        .await
     }
 
     /// Read-only access to the remote-forward registry, if one exists.
@@ -711,12 +730,15 @@ pub async fn resize_ssh_pty(
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
-    // Clone the sender under a read lock so `.send()` happens lock-free.
+    // Record the size even while disconnected or still connecting — it is
+    // applied when the PTY (re)opens — and send to a live PTY lock-free.
     let tx = state
-        .resize_sender(&id)
+        .record_pty_size(&id, cols, rows)
         .await
         .ok_or_else(|| "Connection not found".to_string())?;
-    let _ = tx.send((cols, rows)).await;
+    if let Some(tx) = tx {
+        let _ = tx.send((cols, rows)).await;
+    }
     Ok(())
 }
 
@@ -2003,7 +2025,7 @@ fn do_single_ssh_connect(
     // again) while this attempt was connecting.
     let claimed = state
         .clone()
-        .claim_session(id.clone(), owner.clone(), session_handle.clone(), input_tx, resize_tx)
+        .claim_session(id.clone(), owner.clone(), session_handle.clone(), input_tx, resize_tx, (cols, rows))
         .await;
     if !claimed {
         crate::debug_log!("[ssh-debug] {} closed while connecting; abandoning the new shell", id);
@@ -2829,7 +2851,7 @@ mod tests {
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         let claimed = state
             .clone()
-            .claim_session("tab".to_string(), owner, handle.clone(), input_tx, resize_tx)
+            .claim_session("tab".to_string(), owner, handle.clone(), input_tx, resize_tx, (80, 24))
             .await;
         assert!(!claimed, "a closed tab must not get its shell back");
         assert!(!state.contains("tab").await, "no record is resurrected");
@@ -2865,10 +2887,10 @@ mod tests {
         let (input_tx, _input_rx) = mpsc::channel(1);
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         assert!(
-            !state.clone().claim_session("tab".to_string(), stale, handle.clone(), input_tx.clone(), resize_tx.clone()).await,
+            !state.clone().claim_session("tab".to_string(), stale, handle.clone(), input_tx.clone(), resize_tx.clone(), (80, 24)).await,
             "an attempt from an earlier start of the same id must not register"
         );
-        assert!(state.clone().claim_session("tab".to_string(), owner.clone(), handle, input_tx, resize_tx).await);
+        assert!(state.clone().claim_session("tab".to_string(), owner.clone(), handle, input_tx, resize_tx, (80, 24)).await);
         assert!(state.contains("tab").await);
 
         owner.cancel();
@@ -2961,6 +2983,43 @@ mod tests {
         let failures = reissue_remote_forwards(Arc::new(client), reused).await;
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(*server_state.forwards.lock().unwrap(), vec![("127.0.0.1".to_string(), 8022)]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_resize_while_disconnected_reaches_the_next_pty() {
+        use super::*;
+
+        let (address, server) = test_support::spawn_server(ExecRecorder::default()).await;
+        let mut client = test_support::connect(address).await;
+        assert!(client.authenticate_none("test").await.unwrap().success());
+        let handle: SharedSshHandle = Arc::new(client);
+
+        let state = SshState::default();
+        let owner = Arc::new(ReconnectCancellation::default());
+        state
+            .upsert_session("tab", |s| {
+                s.owner = Some(owner.clone());
+                s.reconnect_config = Some(ReconnectConfig {
+                    host: "h".into(), port: 22, user: "u".into(), password: None, private_key: None,
+                    passphrase: None, auth_type: None, agent_forwarding: false, jump_hosts: vec![],
+                    auto_login_rules: vec![], post_connect_commands: vec![], reconnect_type: ReconnectType::Simple,
+                    session_name: "at-tab".into(), checked_existing_sessions: false, cols: 80, rows: 24,
+                    last_error: None,
+                });
+            })
+            .await;
+
+        // No PTY yet (between reconnect attempts): the size is kept, not dropped.
+        assert!(matches!(state.record_pty_size("tab", 132, 43).await, Some(None)));
+        let config = state.reconnect_config("tab").await.unwrap();
+        assert_eq!((config.cols, config.rows), (132, 43), "the next attempt opens at the new size");
+
+        // An attempt that opened its PTY at the old size gets it applied.
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (resize_tx, mut resize_rx) = mpsc::channel(4);
+        assert!(state.clone().claim_session("tab".to_string(), owner, handle, input_tx, resize_tx, (80, 24)).await);
+        assert_eq!(resize_rx.try_recv().ok(), Some((132, 43)));
         server.abort();
     }
 
