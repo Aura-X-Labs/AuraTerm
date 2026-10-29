@@ -1551,58 +1551,306 @@ fn imported_connection(name: String, group: String, protocol: &str, host: String
     }
 }
 
-fn parse_openssh_config(content: &str, base_group: &str) -> (Vec<SavedConnection>, Vec<String>) {
-    let mut entries = Vec::new();
-    let mut warnings = Vec::new();
-    let mut global = HashMap::<String, String>::new();
-    let mut aliases = Vec::<String>::new();
-    let mut options = HashMap::<String, String>::new();
+/// One `Host` section (or the options before the first one, which apply to
+/// every host) of an OpenSSH client config, in file order.
+struct OpenSshConfigBlock {
+    /// `None` for the leading global section.
+    patterns: Option<Vec<String>>,
+    options: Vec<(String, String)>,
+}
 
-    let flush = |aliases: &mut Vec<String>, options: &mut HashMap<String, String>, entries: &mut Vec<SavedConnection>, warnings: &mut Vec<String>| {
-        for alias in aliases.drain(..) {
-            if alias.contains('*') || alias.contains('?') || alias.starts_with('!') {
-                warnings.push(format!("Skipped wildcard Host entry: {alias}"));
-                continue;
-            }
-            let host = options.get("hostname").cloned().unwrap_or_else(|| alias.clone());
-            let port = options.get("port").and_then(|value| value.parse::<u16>().ok()).unwrap_or(22);
-            let user = options.get("user").cloned().unwrap_or_default();
-            let normalized_alias = normalize_group_path(&alias);
-            let (name, group) = match normalized_alias.rsplit_once('/') {
-                Some((folder, name)) => (name.to_string(), format!("{base_group}/{folder}")),
-                None => (alias.clone(), base_group.to_string()),
-            };
-            let mut connection = imported_connection(name, group, "ssh", host, port, user);
-            connection.agent_forwarding = options.get("forwardagent").is_some_and(|value| value.eq_ignore_ascii_case("yes"));
-            if let Some(proxy) = options.get("proxyjump").and_then(|value| value.split(',').next()) {
-                if let Some(jump) = parse_jump_host(proxy, &connection.user) {
-                    connection.jump_hosts.push(jump);
+impl OpenSshConfigBlock {
+    fn applies_to(&self, alias: &str) -> bool {
+        let Some(patterns) = &self.patterns else { return true };
+        let mut matched = false;
+        for pattern in patterns {
+            if let Some(negated) = pattern.strip_prefix('!') {
+                if openssh_pattern_matches(negated, alias) {
+                    return false;
                 }
+            } else if openssh_pattern_matches(pattern, alias) {
+                matched = true;
             }
-            entries.push(connection);
         }
-        options.clear();
-    };
+        matched
+    }
+}
 
-    for raw_line in content.lines() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = split_config_line(line) else { continue };
-        let key = key.to_ascii_lowercase();
-        if key == "host" {
-            flush(&mut aliases, &mut options, &mut entries, &mut warnings);
-            aliases = value.split_whitespace().map(str::to_string).collect();
-            options = global.clone();
-        } else if aliases.is_empty() {
-            global.entry(key).or_insert(value.to_string());
-        } else {
-            options.entry(key).or_insert(value.to_string());
+/// OpenSSH `Host` pattern: `*` and `?` wildcards, case-insensitive.
+fn openssh_pattern_matches(pattern: &str, value: &str) -> bool {
+    fn matches(pattern: &[char], value: &[char]) -> bool {
+        match pattern.split_first() {
+            None => value.is_empty(),
+            Some(('*', rest)) => (0..=value.len()).any(|skip| matches(rest, &value[skip..])),
+            Some(('?', rest)) => !value.is_empty() && matches(rest, &value[1..]),
+            Some((expected, rest)) => value
+                .split_first()
+                .is_some_and(|(actual, tail)| actual == expected && matches(rest, tail)),
         }
     }
-    flush(&mut aliases, &mut options, &mut entries, &mut warnings);
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let value: Vec<char> = value.to_lowercase().chars().collect();
+    matches(&pattern, &value)
+}
+
+fn is_openssh_pattern(alias: &str) -> bool {
+    alias.contains('*') || alias.contains('?') || alias.starts_with('!')
+}
+
+/// How the import reads an `IdentityFile`: its contents, or `None` when it
+/// cannot (or should not) be read.
+type IdentityReader<'a> = &'a dyn Fn(&std::path::Path) -> Option<String>;
+
+/// Private keys are small; anything larger is not one.
+const MAX_IMPORTED_IDENTITY_BYTES: u64 = 64 * 1024;
+
+fn read_identity_file(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut content = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(MAX_IMPORTED_IDENTITY_BYTES + 1)
+        .read_to_string(&mut content)
+        .ok()?;
+    (content.len() as u64 <= MAX_IMPORTED_IDENTITY_BYTES).then_some(content)
+}
+
+fn user_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+struct OpenSshConfig {
+    blocks: Vec<OpenSshConfigBlock>,
+}
+
+impl OpenSshConfig {
+    fn parse(content: &str, warnings: &mut Vec<String>) -> Self {
+        let mut blocks = vec![OpenSshConfigBlock { patterns: None, options: Vec::new() }];
+        // Options under `Match` cannot be evaluated here; drop them rather
+        // than apply them to every host.
+        let mut skipping_match = false;
+        for raw_line in content.lines() {
+            let line = raw_line.split('#').next().unwrap_or_default().trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = split_config_line(line) else { continue };
+            let key = key.to_ascii_lowercase();
+            match key.as_str() {
+                "host" => {
+                    skipping_match = false;
+                    blocks.push(OpenSshConfigBlock {
+                        patterns: Some(value.split_whitespace().map(str::to_string).collect()),
+                        options: Vec::new(),
+                    });
+                }
+                "match" => {
+                    skipping_match = true;
+                    warnings.push(format!("Skipped Match block: Match {value}"));
+                }
+                "include" => warnings.push(format!("Include files were not imported: {value}")),
+                _ if skipping_match => {}
+                _ => blocks.last_mut().expect("global block").options.push((key, value.to_string())),
+            }
+        }
+        Self { blocks }
+    }
+
+    /// Concrete aliases from `Host` lines, first appearance first.
+    fn aliases(&self, warnings: &mut Vec<String>) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut aliases = Vec::new();
+        for patterns in self.blocks.iter().filter_map(|block| block.patterns.as_ref()) {
+            for alias in patterns {
+                if is_openssh_pattern(alias) {
+                    // `Host *` & co. still apply to the concrete hosts below.
+                    if alias != "*" {
+                        warnings.push(format!("Skipped wildcard Host entry: {alias}"));
+                    }
+                } else if seen.insert(alias.to_lowercase()) {
+                    aliases.push(alias.clone());
+                }
+            }
+        }
+        aliases
+    }
+
+    /// The options in effect for `alias`, as ssh computes them: every
+    /// matching section in file order, the first value of each key winning
+    /// (so `Host *` at the end supplies defaults).
+    fn options_for(&self, alias: &str) -> HashMap<String, String> {
+        let mut options = HashMap::new();
+        for block in self.blocks.iter().filter(|block| block.applies_to(alias)) {
+            for (key, value) in &block.options {
+                options.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        options
+    }
+}
+
+fn parse_openssh_config(content: &str, base_group: &str) -> (Vec<SavedConnection>, Vec<String>) {
+    parse_openssh_config_with(content, base_group, user_home_dir().as_deref(), &read_identity_file)
+}
+
+fn parse_openssh_config_with(
+    content: &str,
+    base_group: &str,
+    home: Option<&std::path::Path>,
+    read_identity: IdentityReader<'_>,
+) -> (Vec<SavedConnection>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let config = OpenSshConfig::parse(content, &mut warnings);
+    let mut entries = Vec::new();
+
+    for alias in config.aliases(&mut warnings) {
+        let options = config.options_for(&alias);
+        let host = options.get("hostname").cloned().unwrap_or_else(|| alias.clone());
+        let port = options.get("port").and_then(|value| value.parse::<u16>().ok()).unwrap_or(22);
+        let user = options.get("user").cloned().unwrap_or_default();
+        let normalized_alias = normalize_group_path(&alias);
+        let (name, group) = match normalized_alias.rsplit_once('/') {
+            Some((folder, name)) => (name.to_string(), format!("{base_group}/{folder}")),
+            None => (alias.clone(), base_group.to_string()),
+        };
+        let mut connection = imported_connection(name, group, "ssh", host, port, user);
+        connection.agent_forwarding = options.get("forwardagent").is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+        if let Some((private_key, note)) = import_identity(&alias, &options, home, read_identity) {
+            connection.auth_type = "key".to_string();
+            connection.private_key = Some(private_key);
+            warnings.extend(note);
+        } else if let Some(note) = identity_warning(&alias, &options) {
+            warnings.push(note);
+        }
+        if let Some(proxy) = options.get("proxyjump") {
+            let mut visiting = vec![alias.to_lowercase()];
+            match resolve_proxy_jump(&config, proxy, &connection.user, home, read_identity, &mut visiting, &mut warnings) {
+                Some(hops) => connection.jump_hosts = hops,
+                None => warnings.push(format!("ProxyJump for {alias} was not imported: {proxy}")),
+            }
+        }
+        entries.push(connection);
+    }
     (entries, warnings)
+}
+
+/// Turn a ProxyJump list into jump hosts, in connection order. Each hop that
+/// names a configured alias gets that alias's HostName, Port, User and
+/// IdentityFile — and its own ProxyJump, which comes before it, as ssh does.
+/// `None` when the chain cannot be represented.
+#[allow(clippy::too_many_arguments)]
+fn resolve_proxy_jump(
+    config: &OpenSshConfig,
+    value: &str,
+    default_user: &str,
+    home: Option<&std::path::Path>,
+    read_identity: IdentityReader<'_>,
+    visiting: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Option<Vec<SavedJumpHost>> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    if value.contains('%') || visiting.len() > 8 {
+        return None;
+    }
+    let mut hops = Vec::new();
+    for hop in value.split(',').map(str::trim).filter(|hop| !hop.is_empty()) {
+        let hop = hop.strip_prefix("ssh://").unwrap_or(hop);
+        let (explicit_user, address) = match hop.rsplit_once('@') {
+            Some((user, address)) => (Some(user), address),
+            None => (None, hop),
+        };
+        let (name, explicit_port) = match address.rsplit_once(':') {
+            Some((name, port)) if !name.contains(':') => (name, Some(port.parse::<u16>().ok()?)),
+            _ => (address, None),
+        };
+        if name.trim().is_empty() {
+            return None;
+        }
+        let options = config.options_for(name);
+        let key = name.to_lowercase();
+        if visiting.contains(&key) {
+            return None;
+        }
+        if let Some(inner) = options.get("proxyjump") {
+            visiting.push(key);
+            let earlier = resolve_proxy_jump(config, inner, default_user, home, read_identity, visiting, warnings)?;
+            visiting.pop();
+            hops.extend(earlier);
+        }
+        let user = explicit_user
+            .map(str::to_string)
+            .or_else(|| options.get("user").cloned())
+            .unwrap_or_else(|| default_user.to_string());
+        let mut jump = SavedJumpHost {
+            id: uuid::Uuid::new_v4().to_string(),
+            host: options.get("hostname").cloned().unwrap_or_else(|| name.to_string()),
+            port: explicit_port
+                .or_else(|| options.get("port").and_then(|port| port.parse().ok()))
+                .unwrap_or(22),
+            user,
+            auth_type: "agent".to_string(),
+            password: None,
+            private_key: None,
+            passphrase: None,
+        };
+        if let Some((private_key, note)) = import_identity(name, &options, home, read_identity) {
+            jump.auth_type = "key".to_string();
+            jump.private_key = Some(private_key);
+            warnings.extend(note);
+        }
+        hops.push(jump);
+    }
+    Some(hops)
+}
+
+/// Resolve `~` and `%d` (home) in an IdentityFile; other tokens are not
+/// supported. Relative paths are taken from the home directory.
+fn identity_path(value: &str, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let value = value.trim().trim_matches('"');
+    let home = home?;
+    let expanded = if value == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = value.strip_prefix("~/").or_else(|| value.strip_prefix("%d/")) {
+        home.join(rest)
+    } else if value.contains('%') || value.starts_with('~') {
+        return None;
+    } else {
+        home.join(value)
+    };
+    Some(expanded)
+}
+
+/// Read the first IdentityFile for `alias`. Only a key that opens without a
+/// passphrase is imported: for an encrypted one the bookmark keeps agent
+/// authentication, which is what worked for it before.
+fn import_identity(
+    alias: &str,
+    options: &HashMap<String, String>,
+    home: Option<&std::path::Path>,
+    read_identity: IdentityReader<'_>,
+) -> Option<(String, Option<String>)> {
+    let value = options.get("identityfile")?;
+    if value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let path = identity_path(value, home)?;
+    let content = read_identity(&path)?;
+    russh::keys::decode_secret_key(&content, None).ok()?;
+    Some((content, Some(format!("Imported the private key {value} for {alias}"))))
+}
+
+/// Why an IdentityFile was left out, for the import report.
+fn identity_warning(alias: &str, options: &HashMap<String, String>) -> Option<String> {
+    let value = options.get("identityfile")?;
+    (!value.eq_ignore_ascii_case("none")).then(|| {
+        format!(
+            "IdentityFile {value} for {alias} was not imported (unreadable, passphrase-protected or unsupported path); it uses the SSH agent instead"
+        )
+    })
 }
 
 fn split_config_line(line: &str) -> Option<(&str, &str)> {
@@ -1611,26 +1859,6 @@ fn split_config_line(line: &str) -> Option<(&str, &str)> {
     }
     let index = line.find(char::is_whitespace)?;
     Some((line[..index].trim(), line[index..].trim().trim_matches('"')))
-}
-
-fn parse_jump_host(value: &str, default_user: &str) -> Option<SavedJumpHost> {
-    if value.eq_ignore_ascii_case("none") || value.contains('%') {
-        return None;
-    }
-    let (user, address) = value.rsplit_once('@').map_or((default_user, value), |(user, address)| (user, address));
-    let (host, port) = address.rsplit_once(':')
-        .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)))
-        .unwrap_or((address, 22));
-    (!host.trim().is_empty()).then(|| SavedJumpHost {
-        id: uuid::Uuid::new_v4().to_string(),
-        host: host.to_string(),
-        port,
-        user: user.to_string(),
-        auth_type: "agent".to_string(),
-        password: None,
-        private_key: None,
-        passphrase: None,
-    })
 }
 
 fn parse_putty_registry(content: &str, base_group: &str) -> (Vec<SavedConnection>, Vec<String>) {
@@ -1716,7 +1944,99 @@ fn decode_putty_name(value: &str) -> String {
 
 #[cfg(test)]
 mod import_tests {
-    use super::{parse_openssh_config, parse_putty_registry};
+    use super::{parse_openssh_config, parse_openssh_config_with, parse_putty_registry};
+    use std::path::Path;
+
+    #[test]
+    fn host_star_supplies_defaults_without_overriding_specific_hosts() {
+        let config = r#"
+            Host web
+              User deploy
+            Host db
+              Port 2200
+            Host *
+              User fallback
+              Port 2022
+              ForwardAgent yes
+        "#;
+        let (entries, warnings) = parse_openssh_config(config, "Imported/OpenSSH");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let web = entries.iter().find(|entry| entry.name == "web").unwrap();
+        assert_eq!((web.user.as_str(), web.port, web.agent_forwarding), ("deploy", 2022, true));
+        let db = entries.iter().find(|entry| entry.name == "db").unwrap();
+        assert_eq!((db.user.as_str(), db.port), ("fallback", 2200));
+    }
+
+    #[test]
+    fn proxy_jump_resolves_every_hop_through_its_own_config() {
+        let config = r#"
+            Host bastion
+              HostName bastion.example.com
+              User jump
+              Port 2222
+            Host inner
+              HostName 10.0.0.2
+              ProxyJump bastion
+            Host app
+              HostName 10.0.1.5
+              User app
+              ProxyJump inner,ops@edge:2200
+            Host loop
+              ProxyJump loop
+        "#;
+        let (entries, warnings) = parse_openssh_config(config, "Imported/OpenSSH");
+        let app = entries.iter().find(|entry| entry.name == "app").unwrap();
+        let hops: Vec<(&str, u16, &str)> = app
+            .jump_hosts
+            .iter()
+            .map(|hop| (hop.host.as_str(), hop.port, hop.user.as_str()))
+            .collect();
+        assert_eq!(
+            hops,
+            vec![
+                ("bastion.example.com", 2222, "jump"),
+                ("10.0.0.2", 22, "app"),
+                ("edge", 2200, "ops"),
+            ]
+        );
+        let looped = entries.iter().find(|entry| entry.name == "loop").unwrap();
+        assert!(looped.jump_hosts.is_empty());
+        assert!(warnings.iter().any(|warning| warning.contains("ProxyJump for loop")), "{warnings:?}");
+    }
+
+    #[test]
+    fn identity_files_are_imported_when_they_open_without_a_passphrase() {
+        let plain = crate::ssh::ssh_generate_key_pair(None, None).unwrap().private_key;
+        let locked = crate::ssh::ssh_generate_key_pair(Some("pw".to_string()), None).unwrap().private_key;
+        let home = Path::new("/home/alice");
+        let reader = |path: &Path| -> Option<String> {
+            match path.to_str()? {
+                "/home/alice/.ssh/id_plain" => Some(plain.clone()),
+                "/home/alice/.ssh/id_locked" => Some(locked.clone()),
+                _ => None,
+            }
+        };
+        let config = r#"
+            Host plain
+              IdentityFile ~/.ssh/id_plain
+            Host locked
+              IdentityFile %d/.ssh/id_locked
+            Host missing
+              IdentityFile ~/.ssh/nope
+            Host via
+              ProxyJump plain
+        "#;
+        let (entries, warnings) = parse_openssh_config_with(config, "g", Some(home), &reader);
+        let by_name = |name: &str| entries.iter().find(|entry| entry.name == name).unwrap();
+        assert_eq!(by_name("plain").auth_type, "key");
+        assert_eq!(by_name("plain").private_key.as_deref(), Some(plain.as_str()));
+        assert_eq!(by_name("locked").auth_type, "agent");
+        assert!(by_name("locked").private_key.is_none());
+        assert_eq!(by_name("missing").auth_type, "agent");
+        assert_eq!(by_name("via").jump_hosts[0].auth_type, "key");
+        assert!(warnings.iter().any(|warning| warning.contains("id_locked")), "{warnings:?}");
+        assert!(warnings.iter().any(|warning| warning.contains("nope")), "{warnings:?}");
+    }
 
     #[test]
     fn imports_concrete_openssh_hosts_and_nested_aliases() {
