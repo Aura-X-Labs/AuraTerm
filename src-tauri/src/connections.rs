@@ -363,6 +363,13 @@ pub(crate) fn load_connections(app: &AppHandle) -> Result<Vec<SavedConnection>, 
     Ok(connections)
 }
 
+/// Whether `connections.json` exists. Every change to the bookmarks rewrites
+/// it, so an empty file says the user deleted them all; no file at all means
+/// it was lost (or never written).
+pub(crate) fn connections_file_exists(app: &AppHandle) -> Result<bool, String> {
+    Ok(connections_path(app)?.exists())
+}
+
 pub(crate) fn write_connections(app: &AppHandle, connections: &[SavedConnection]) -> Result<(), String> {
     let path = connections_path(app)?;
     if let Some(parent) = path.parent() {
