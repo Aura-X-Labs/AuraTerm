@@ -184,7 +184,15 @@ const aiKeyBusy = ref(false);
 const aiTesting = ref(false);
 const aiTestResult = ref<{ ok: boolean; message: string } | null>(null);
 
-void aiHasApiKey().then((has) => { aiHasKey.value = has; }).catch(() => {});
+// A key is bound to the provider + base URL it was entered for, so the
+// indicator follows the endpoint shown in the form.
+const aiKeyTarget = computed(() => ({
+  provider: settings.value.aiConfig.provider,
+  baseUrl: settings.value.aiConfig.baseUrl ?? null,
+}));
+watch(aiKeyTarget, (target) => {
+  void aiHasApiKey(target).then((has) => { aiHasKey.value = has; }).catch(() => {});
+}, { immediate: true, deep: true });
 
 function updateAi<K extends keyof AiConfig>(key: K, value: AiConfig[K]) {
   update("aiConfig", { ...settings.value.aiConfig, [key]: value });
@@ -210,7 +218,7 @@ async function saveAiKey() {
   aiKeyBusy.value = true;
   aiTestResult.value = null;
   try {
-    await aiSetApiKey(key);
+    await aiSetApiKey(key, aiKeyTarget.value);
     aiKeyInput.value = "";
     aiHasKey.value = true;
   } catch (error) {

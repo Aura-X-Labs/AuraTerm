@@ -129,7 +129,9 @@ const SYNCED_SETTINGS_KEYS: &[&str] = &[
     "zmodemDownloadPath",
     "restoreTabsOnStartup",
     // AI assistant config only — the API key lives outside settings.json
-    // (encrypted under the device-local key) and never syncs.
+    // (encrypted under the device-local key), never syncs, and is bound to
+    // the endpoint it was entered for (`ai.rs`), so a synced provider change
+    // asks for that provider's key instead of sending this one there.
     "aiConfig",
 ];
 
@@ -595,6 +597,7 @@ fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<bool, String
         return Ok(false);
     };
     let current = settings::get_settings(app.clone())?;
+    let ai_before = current.ai_config.clone();
     let mut value = serde_json::to_value(current).map_err(|e| e.to_string())?;
     let mut changed = false;
     if let Value::Object(map) = &mut value {
@@ -610,6 +613,10 @@ fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<bool, String
     if !changed {
         return Ok(false);
     }
+    // An AI key stored by an older build is not bound to an endpoint yet: bind
+    // it to the one it has been used with, before the synced aiConfig points
+    // somewhere else.
+    crate::ai::bind_legacy_api_key(app, &ai_before);
     let merged: settings::Settings = serde_json::from_value(value).map_err(|e| e.to_string())?;
     settings::save_settings(app.clone(), merged)?;
     // The windows still hold the settings they loaded; until they adopt these,

@@ -712,6 +712,8 @@ onMounted(async () => {
     // Persisting from the main window closes the window where a save that
     // was already in flight landed after the sync's write.
     if (isMainWindow) persistSettingsSilently(next);
+    // A synced provider change can leave the stored AI key unusable here.
+    void refreshAiKeyState();
   }));
   cleanupFns.push(await listen("cloud-bridge-peers-changed", () => {
     void refreshCloudBridgeStatus().catch(() => {});
