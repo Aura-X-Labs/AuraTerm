@@ -635,6 +635,9 @@ fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<bool, String
 /// in-memory device, so two "devices" can sync through one mock vault.
 pub(crate) trait SyncStore {
     fn bookmarks(&self) -> Result<Vec<SavedConnection>, String>;
+    /// Whether the bookmark list exists at all — empty because the user
+    /// deleted every bookmark, rather than missing because the file was lost.
+    fn bookmark_file_exists(&self) -> Result<bool, String>;
     fn write_bookmarks(&self, items: &[SavedConnection]) -> Result<(), String>;
     fn settings_subset(&self) -> Result<Value, String>;
     /// Returns whether any synced key actually changed.
@@ -668,6 +671,10 @@ impl<'a> AppStore<'a> {
 impl SyncStore for AppStore<'_> {
     fn bookmarks(&self) -> Result<Vec<SavedConnection>, String> {
         connections::load_connections(self.app)
+    }
+
+    fn bookmark_file_exists(&self) -> Result<bool, String> {
+        connections::connections_file_exists(self.app)
     }
 
     fn write_bookmarks(&self, items: &[SavedConnection]) -> Result<(), String> {
@@ -1011,9 +1018,13 @@ fn reconcile_bookmarks(
     result: &mut SyncResult,
 ) -> Result<BookmarkChanges, String> {
     let local = store.bookmarks()?;
-    // An empty list where the base had entries is a lost `connections.json`,
+    // No bookmark file where the base had entries is a lost `connections.json`,
     // not a wish to delete everything: merge without a base, which restores.
-    let lost = |before: &[SavedConnection]| local.is_empty() && !before.is_empty();
+    // An existing file that lists nothing is the user's own doing: those
+    // deletes sync like any other (the mass-delete guard still holds back a
+    // large batch until a manual run confirms it).
+    let lost_file = local.is_empty() && !store.bookmark_file_exists()?;
+    let lost = |before: &[SavedConnection]| lost_file && !before.is_empty();
     let base = base.filter(|before| !lost(before));
 
     let mut held = Held::default();
@@ -2435,6 +2446,8 @@ pub(crate) mod tests {
     /// An in-memory device: what [`AppStore`] keeps in the config directory.
     pub(crate) struct FakeDevice {
         bookmarks: Mutex<Vec<SavedConnection>>,
+        /// `false`: the bookmark file is missing (never written, or lost).
+        bookmark_file: Mutex<bool>,
         settings: Mutex<serde_json::Map<String, Value>>,
         known_hosts: Mutex<HashMap<String, String>>,
         credentials: Mutex<Vec<StoredCredential>>,
@@ -2450,6 +2463,7 @@ pub(crate) mod tests {
         pub(crate) fn new(base: &str, label: &str) -> Self {
             Self {
                 bookmarks: Mutex::new(Vec::new()),
+                bookmark_file: Mutex::new(false),
                 settings: Mutex::new(serde_json::Map::new()),
                 known_hosts: Mutex::new(HashMap::new()),
                 credentials: Mutex::new(Vec::new()),
@@ -2477,7 +2491,14 @@ pub(crate) mod tests {
             *self.envelope_key.lock().unwrap() = Ok(MASTER.to_string());
         }
 
+        /// `connections.json` is gone, e.g. deleted by hand or not restored.
+        fn lose_bookmark_file(&self) {
+            self.bookmarks.lock().unwrap().clear();
+            *self.bookmark_file.lock().unwrap() = false;
+        }
+
         fn save_bookmark(&self, item: SavedConnection) {
+            *self.bookmark_file.lock().unwrap() = true;
             let mut items = self.bookmarks.lock().unwrap();
             match items.iter().position(|c| c.id == item.id) {
                 Some(pos) => items[pos] = item,
@@ -2486,6 +2507,7 @@ pub(crate) mod tests {
         }
 
         fn delete_bookmark(&self, id: &str) {
+            *self.bookmark_file.lock().unwrap() = true;
             self.bookmarks.lock().unwrap().retain(|c| c.id != id);
         }
 
@@ -2535,7 +2557,12 @@ pub(crate) mod tests {
             Ok(self.bookmarks.lock().unwrap().clone())
         }
 
+        fn bookmark_file_exists(&self) -> Result<bool, String> {
+            Ok(*self.bookmark_file.lock().unwrap())
+        }
+
         fn write_bookmarks(&self, items: &[SavedConnection]) -> Result<(), String> {
+            *self.bookmark_file.lock().unwrap() = true;
             *self.bookmarks.lock().unwrap() = items.to_vec();
             Ok(())
         }
@@ -3131,12 +3158,28 @@ pub(crate) mod tests {
         let (vault, base) = new_vault();
         let (mut desktop, _laptop) = two_synced_devices(&base, &[("a", "one"), ("b", "two")]).await;
 
-        desktop.write_bookmarks(&[]).unwrap();
+        desktop.lose_bookmark_file();
         let result = desktop.sync().await;
 
         assert_eq!(desktop.bookmark_names(), ["one", "two"]);
         assert_eq!(result.bookmarks_added, 2);
         assert_eq!(vault_bookmark_names(&vault), ["one", "two"]);
+    }
+
+    #[tokio::test]
+    async fn sync_carries_out_deleting_every_bookmark() {
+        let (vault, base) = new_vault();
+        let (mut desktop, mut laptop) = two_synced_devices(&base, &[("a", "one"), ("b", "two")]).await;
+
+        desktop.delete_bookmark("a");
+        desktop.delete_bookmark("b");
+        let result = desktop.sync().await;
+
+        assert!(desktop.bookmark_names().is_empty(), "not restored from the cloud copy");
+        assert_eq!(result.bookmarks_added, 0);
+        assert!(vault_bookmark_names(&vault).is_empty());
+        laptop.sync().await;
+        assert!(laptop.bookmark_names().is_empty());
     }
 
     #[tokio::test]
