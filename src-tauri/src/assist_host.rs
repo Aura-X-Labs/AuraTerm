@@ -30,6 +30,10 @@ const APPROVAL_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_CONTROL_SECS: u64 = 30 * 60;
 const MAX_FAILED_ATTEMPTS: u32 = 3;
 const HOUSEKEEPING_SECS: u64 = 2;
+/// How long a guest may sit between PAKE_A and PAKE_CONFIRM. A guest that
+/// knows the code confirms as soon as PAKE_B arrives; one that never does
+/// would otherwise hold a guest slot (handshakes count toward the limits).
+const PAKE_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +84,12 @@ impl Guest {
     }
 }
 
+/// A guest between PAKE_A and PAKE_CONFIRM.
+pub(crate) struct PendingPake {
+    keys: Spake2Keys,
+    started_at: SystemTime,
+}
+
 pub(crate) struct AssistHost {
     pub(crate) assist_id: String,
     route_code: String,
@@ -94,7 +104,10 @@ pub(crate) struct AssistHost {
     policy: AssistPolicy,
     follow_active_tab: bool,
     guests: HashMap<String, Guest>,
-    pending_pake: HashMap<String, Spake2Keys>,
+    /// Handshakes in flight. They count toward `single_use`/`max_guests`
+    /// so guests racing through PAKE at the same time cannot overfill the
+    /// session.
+    pending_pake: HashMap<String, PendingPake>,
     failed_attempts: u32,
     fence: u64,
     join_expires_at: SystemTime,
@@ -843,6 +856,25 @@ pub(crate) async fn handle_frame<R: tauri::Runtime>(
     }
 }
 
+/// Whether one more guest may start a handshake. Admitted guests (pending
+/// approval included) and other handshakes still in flight all count, so
+/// concurrent joins cannot slip past `single_use` or `max_guests`.
+/// `connection_id` itself is excluded: a resent PAKE_A replaces its own
+/// pending handshake rather than taking a second slot.
+fn has_room_for(assist: &AssistHost, connection_id: &str) -> bool {
+    let occupied = assist.guests.len()
+        + assist
+            .pending_pake
+            .keys()
+            .filter(|pending| pending.as_str() != connection_id)
+            .count();
+    if assist.policy.single_use {
+        occupied == 0
+    } else {
+        occupied < assist.policy.max_guests
+    }
+}
+
 async fn handle_pake_a<R: tauri::Runtime>(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner>>, app: &AppHandle<R>, assist_id: &str, connection_id: &str, frame: &serde_json::Value) {
     let failed = json!({"kind": "PAKE_FAILED", "connection_id": connection_id});
     let version = frame.get("protocol_version").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -852,9 +884,7 @@ async fn handle_pake_a<R: tauri::Runtime>(client: &reqwest::Client, inner: &Arc<
         let Some(assist) = guard.assist.as_mut() else { return };
         if assist.locked || version != u64::from(PROTOCOL_VERSION) || !(now_secs() < system_time_seconds(Some(assist.join_expires_at)).unwrap_or(0) || !assist.guests.is_empty()) {
             None
-        } else if assist.policy.single_use && !assist.guests.is_empty() {
-            None
-        } else if assist.guests.len() >= assist.policy.max_guests {
+        } else if !has_room_for(assist, connection_id) {
             None
         } else {
             let host = assist::host_pake(&assist.w, assist_id, connection_id).ok();
@@ -864,7 +894,10 @@ async fn handle_pake_a<R: tauri::Runtime>(client: &reqwest::Client, inner: &Arc<
                     match host.finish(&pa) {
                         Ok(keys) => {
                             let confirm = URL_SAFE_NO_PAD.encode(keys.own_confirmation());
-                            assist.pending_pake.insert(connection_id.to_string(), keys);
+                            assist.pending_pake.insert(
+                                connection_id.to_string(),
+                                PendingPake { keys, started_at: SystemTime::now() },
+                            );
                             Some(json!({"kind": "PAKE_B", "connection_id": connection_id,
                                 "pb": URL_SAFE_NO_PAD.encode(share), "confirm_b": confirm}))
                         }
@@ -903,7 +936,7 @@ async fn handle_pake_confirm<R: tauri::Runtime>(client: &reqwest::Client, inner:
             .map(|a| guard.terminal_size(&a.local_session_id))
             .unwrap_or((80, 24));
         let Some(assist) = guard.assist.as_mut() else { return };
-        let Some(keys) = assist.pending_pake.remove(connection_id) else { return };
+        let Some(PendingPake { keys, .. }) = assist.pending_pake.remove(connection_id) else { return };
         let ok = confirm.as_deref().is_some_and(|c| keys.verify_peer_confirmation(c));
         if !ok {
             assist.failed_attempts += 1;
@@ -1171,6 +1204,39 @@ async fn handle_guest_close<R: tauri::Runtime>(client: &reqwest::Client, inner: 
     }
 }
 
+/// Drop handshakes that never confirmed within [`PAKE_TIMEOUT_SECS`] so they
+/// stop holding a guest slot. Counted like an abandoned handshake: the
+/// usual reason a guest never confirms is that its check of our
+/// confirmation failed, i.e. it guessed the code wrong.
+async fn expire_stalled_handshakes<R: tauri::Runtime>(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner>>, app: &AppHandle<R>, assist_id: &str) {
+    let expired: Vec<String> = {
+        let Ok(mut guard) = inner.lock() else { return };
+        let Some(assist) = guard.assist.as_mut().filter(|a| a.assist_id == assist_id) else { return };
+        let deadline = Duration::from_secs(PAKE_TIMEOUT_SECS);
+        let now = SystemTime::now();
+        let expired: Vec<String> = assist
+            .pending_pake
+            .iter()
+            .filter(|(_, pending)| now.duration_since(pending.started_at).is_ok_and(|age| age > deadline))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for connection_id in &expired {
+            assist.pending_pake.remove(connection_id);
+            assist.failed_attempts += 1;
+        }
+        expired
+    };
+    if expired.is_empty() {
+        return;
+    }
+    for connection_id in expired {
+        let _ = send_frame(client, inner, assist_id, json!({"kind": "PAKE_FAILED", "connection_id": connection_id})).await;
+        report_event(client.clone(), Arc::clone(inner), assist_id.to_string(), "pake_failed", connection_id, json!({}));
+    }
+    check_lock(client, inner, app, assist_id).await;
+    let _ = app.emit("assist-changed", ());
+}
+
 // ── background tasks ────────────────────────────────────────────────────────
 
 /// Fan the RX ring out to every admitted guest, like the Cloud Console
@@ -1257,6 +1323,7 @@ fn spawn_housekeeping<R: tauri::Runtime>(client: reqwest::Client, inner: Arc<Mut
             for connection_id in expired_pending {
                 let _ = deny_guest(&client, &inner, &app, &connection_id, "approval_timeout").await;
             }
+            expire_stalled_handshakes(&client, &inner, &app, &assist_id).await;
             for connection_id in expired_control {
                 let _ = set_role(&client, &inner, &app, &connection_id, GuestState::Viewer, false).await;
             }
@@ -1609,6 +1676,111 @@ mod tests {
             let denied = h.next_plain("guest-2", &cipher).await;
             assert_eq!(denied["state"], "denied");
             assert!(h.state.inner.lock().unwrap().assist.as_ref().unwrap().guests.is_empty());
+        });
+    }
+
+    impl Harness {
+        fn set_capacity(&self, single_use: bool, max_guests: usize) {
+            let mut guard = self.state.inner.lock().unwrap();
+            let policy = &mut guard.assist.as_mut().unwrap().policy;
+            policy.single_use = single_use;
+            policy.max_guests = max_guests;
+        }
+
+        /// First half of a join: PAKE_A only. Returns the guest's PAKE state
+        /// when the host answered with PAKE_B, None on PAKE_FAILED.
+        async fn start_join(&mut self, connection_id: &str) -> Option<(crate::pake::Spake2Keys, Vec<u8>)> {
+            let w = assist::derive_w(&self.secret, ASSIST_ID);
+            let guest = assist::guest_pake(&w, ASSIST_ID, connection_id).unwrap();
+            self.feed(json!({"kind": "PAKE_A", "session_id": ASSIST_ID,
+                "connection_id": connection_id, "protocol_version": 1,
+                "pa": Self::b64(guest.share())})).await;
+            let reply = self.next_frame().await;
+            let frame = &reply["frame"];
+            assert_eq!(frame["connection_id"], connection_id);
+            if frame["kind"] == "PAKE_FAILED" {
+                return None;
+            }
+            let pb = URL_SAFE_NO_PAD.decode(frame["pb"].as_str().unwrap()).unwrap();
+            let keys = guest.finish(&pb).unwrap();
+            let confirm_b = URL_SAFE_NO_PAD.decode(frame["confirm_b"].as_str().unwrap()).unwrap();
+            Some((keys, confirm_b))
+        }
+
+        async fn finish_join(&mut self, connection_id: &str, keys: &crate::pake::Spake2Keys) {
+            self.feed(json!({"kind": "PAKE_CONFIRM", "session_id": ASSIST_ID,
+                "connection_id": connection_id,
+                "confirm_a": Self::b64(keys.own_confirmation())})).await;
+        }
+
+        /// Discard frames already queued for guests (state, snapshot…).
+        async fn drain(&mut self) {
+            while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(100), self.outbound.recv()).await {}
+        }
+
+        fn guest_count(&self) -> usize {
+            self.state.inner.lock().unwrap().assist.as_ref().unwrap().guests.len()
+        }
+    }
+
+    #[test]
+    fn single_use_counts_guests_still_in_the_handshake() {
+        tauri::async_runtime::block_on(async {
+            let mut h = harness(ControlPolicy::OnRequest, false);
+            h.set_capacity(true, 1);
+            // Two guests race: both send PAKE_A before either confirms.
+            let (first, _) = h.start_join("racer-1").await.expect("first guest gets PAKE_B");
+            assert!(h.start_join("racer-2").await.is_none(), "single-use share admitted a second handshake");
+            h.finish_join("racer-1", &first).await;
+            assert_eq!(h.guest_count(), 1);
+        });
+    }
+
+    #[test]
+    fn max_guests_counts_guests_still_in_the_handshake() {
+        tauri::async_runtime::block_on(async {
+            let mut h = harness(ControlPolicy::OnRequest, false);
+            h.set_capacity(false, 2);
+            let (a, _) = h.start_join("g-a").await.unwrap();
+            let (b, _) = h.start_join("g-b").await.unwrap();
+            assert!(h.start_join("g-c").await.is_none(), "third concurrent handshake exceeded max_guests");
+            h.finish_join("g-a", &a).await;
+            h.finish_join("g-b", &b).await;
+            assert_eq!(h.guest_count(), 2);
+            h.drain().await;
+            // A slot freed by a guest leaving is available again.
+            h.feed(json!({"kind": "E2EE_CLOSE", "session_id": ASSIST_ID, "connection_id": "g-a"})).await;
+            assert!(h.start_join("g-d").await.is_some());
+        });
+    }
+
+    #[test]
+    fn a_stalled_handshake_does_not_hold_a_slot_forever() {
+        tauri::async_runtime::block_on(async {
+            let mut h = harness(ControlPolicy::OnRequest, false);
+            h.set_capacity(true, 1);
+            assert!(h.start_join("staller").await.is_some());
+            // Age the handshake past its deadline and run housekeeping.
+            {
+                let mut guard = h.state.inner.lock().unwrap();
+                let pending = guard.assist.as_mut().unwrap().pending_pake.get_mut("staller").unwrap();
+                pending.started_at -= Duration::from_secs(PAKE_TIMEOUT_SECS + 1);
+            }
+            let handle = h.app.handle().clone();
+            expire_stalled_handshakes(&h.state.client, &h.state.inner, &handle, ASSIST_ID).await;
+            let failed = h.next_frame().await;
+            assert_eq!(failed["frame"]["kind"], "PAKE_FAILED");
+            assert_eq!(failed["frame"]["connection_id"], "staller");
+            {
+                let guard = h.state.inner.lock().unwrap();
+                let assist = guard.assist.as_ref().unwrap();
+                assert!(assist.pending_pake.is_empty());
+                // Like an abandoned handshake, it counts as a failed guess.
+                assert_eq!(assist.failed_attempts, 1);
+            }
+            let (keys, _) = h.start_join("next").await.expect("slot is free again");
+            h.finish_join("next", &keys).await;
+            assert_eq!(h.guest_count(), 1);
         });
     }
 
