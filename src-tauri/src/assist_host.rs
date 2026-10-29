@@ -15,6 +15,7 @@ use crate::cloud_bridge::{
 };
 use crate::e2ee::{PeerCipher, DIRECTION_GUEST, DIRECTION_HOST};
 use crate::pake::Spake2Keys;
+use crate::remote_tab::decode_hex;
 use crate::shared_session::{SessionProtocol, SharedSessionPort};
 use crate::terminal_event_hub::{SubscriptionToken, TerminalEvent};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -1222,16 +1223,6 @@ async fn handle_guest_envelope<R: tauri::Runtime>(
     }
 }
 
-fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
-        return Err("odd hex length".into());
-    }
-    (0..value.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
-}
-
 async fn handle_guest_close<R: tauri::Runtime>(client: &reqwest::Client, inner: &Arc<Mutex<BridgeInner>>, app: &AppHandle<R>, assist_id: &str, connection_id: &str) {
     let (removed, abandoned) = {
         let Ok(mut guard) = inner.lock() else { return };
@@ -1845,6 +1836,8 @@ mod tests {
         assert_eq!(decode_hex("410d0a").unwrap(), b"A\r\n");
         assert!(decode_hex("41f").is_err());
         assert!(decode_hex("zz").is_err());
+        // Guest-controlled input: multi-byte text must not panic the host.
+        assert!(decode_hex("aé0").is_err());
     }
 
     #[test]
