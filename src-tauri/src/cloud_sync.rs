@@ -1074,6 +1074,9 @@ async fn reconcile(
     confirm_deletes: bool,
     result: &mut SyncResult,
 ) -> Result<Reconciled, String> {
+    let mut known = bookmark_ids(&store.bookmarks()?);
+    known.extend(bookmark_ids(&theirs.bookmarks));
+    known.extend(bookmark_ids(base.map(|b| b.bookmarks.as_slice()).unwrap_or_default()));
     let bookmarks = reconcile_bookmarks(store, &theirs.bookmarks, base.map(|b| b.bookmarks.as_slice()), confirm_deletes, result)?;
 
     if let (true, Some(remote)) = (config.include_settings, &theirs.settings) {
@@ -1090,18 +1093,50 @@ async fn reconcile(
     }
 
     let credentials = reconcile_credentials(store, config, theirs.credentials.as_ref(), base.and_then(|b| b.credentials.as_ref()), &bookmarks, result)?;
+    prune_orphan_credentials(store, &known)?;
     result.pulled = true;
     Ok(Reconciled { bookmarks, credentials })
+}
+
+/// Ids of `items`, for [`prune_orphan_credentials`].
+fn bookmark_ids<'a>(items: impl IntoIterator<Item = &'a SavedConnection>) -> std::collections::HashSet<String> {
+    items.into_iter().map(|c| c.id.clone()).collect()
+}
+
+/// Drop the saved credentials of bookmarks this merge saw (`known`: the local
+/// list before it, the cloud copy, the base) that no longer exist here. A sync
+/// that removes bookmarks only took their credentials along when this device
+/// takes part in the credentials envelope; with credential sync off, no
+/// master password, or a pull that replaced the list, they stayed behind for
+/// good. Limited to `known` so a bookmark saved while the sync ran (its
+/// credential is written just before its entry) is never mistaken for one.
+/// A store that cannot be read right now (master password locked,
+/// undecryptable) is left exactly as it is.
+fn prune_orphan_credentials(store: &impl SyncStore, known: &std::collections::HashSet<String>) -> Result<(), String> {
+    let Ok(credentials) = store.credentials() else {
+        return Ok(());
+    };
+    let here = bookmark_ids(&store.bookmarks()?);
+    let orphan = |c: &StoredCredential| known.contains(&c.connection_id) && !here.contains(&c.connection_id);
+    if !credentials.iter().any(orphan) {
+        return Ok(());
+    }
+    store.write_credentials(credentials.into_iter().filter(|c| !orphan(c)).collect())
 }
 
 /// Merge a downloaded payload into local state.
 async fn apply_payload(store: &impl SyncStore, config: &SyncConfig, payload: SyncPayload, replace: bool) -> Result<SyncResult, String> {
     let mut result = SyncResult::default();
+    let mut known = bookmark_ids(&store.bookmarks()?);
+    known.extend(bookmark_ids(&payload.bookmarks));
     apply_tier1(store, config, payload.bookmarks, payload.settings.as_ref(), payload.known_hosts, replace, &mut result).await?;
     if config.include_credentials {
         if let Some(envelope) = &payload.credentials {
             apply_credentials_envelope(store, envelope, &mut result)?;
         }
+    }
+    if replace {
+        prune_orphan_credentials(store, &known)?;
     }
     Ok(result)
 }
@@ -2509,6 +2544,8 @@ pub(crate) mod tests {
         fn delete_bookmark(&self, id: &str) {
             *self.bookmark_file.lock().unwrap() = true;
             self.bookmarks.lock().unwrap().retain(|c| c.id != id);
+            // Like `delete_connection`: the credential goes with it.
+            self.credentials.lock().unwrap().retain(|c| c.connection_id != id);
         }
 
         fn bookmark_names(&self) -> Vec<String> {
@@ -2991,6 +3028,60 @@ pub(crate) mod tests {
         assert_eq!(result.bookmarks_removed, 1);
         assert_eq!(laptop.password("b"), None, "the deleted bookmark takes its credential along");
         assert_eq!(vault_bookmark_names(&vault), ["keep"]);
+    }
+
+    #[tokio::test]
+    async fn a_bookmark_removed_by_sync_takes_its_credential_along_without_credential_sync() {
+        let (_vault, base) = new_vault();
+        let (mut desktop, mut laptop) = two_synced_devices(&base, &[("a", "keep"), ("b", "drop")]).await;
+        // No master password here: the local store is readable, but this
+        // device takes no part in the credentials envelope.
+        laptop.lock(skip::LOCAL_KEY_MODE);
+        laptop.save_password("a", "pw-a");
+        laptop.save_password("b", "pw-b");
+        // Saved just now; its bookmark entry is being written as the sync runs.
+        laptop.save_password("fresh", "pw-fresh");
+
+        desktop.delete_bookmark("b");
+        desktop.sync().await;
+        laptop.sync().await;
+
+        assert_eq!(laptop.bookmark_names(), ["keep"]);
+        assert_eq!(laptop.password("b"), None, "no orphaned credential");
+        assert_eq!(laptop.password("a").as_deref(), Some("pw-a"));
+        assert_eq!(laptop.password("fresh").as_deref(), Some("pw-fresh"), "only bookmarks the merge saw are cleaned up");
+    }
+
+    #[tokio::test]
+    async fn pull_replace_drops_the_credentials_of_bookmarks_it_removes() {
+        let (_vault, base) = new_vault();
+        let (_desktop, laptop) = two_synced_devices(&base, &[("a", "keep")]).await;
+        laptop.save_bookmark(bookmark("local", "only-here"));
+        laptop.save_password("local", "pw-local");
+        laptop.save_password("a", "pw-a");
+
+        let mut config = laptop.config.clone();
+        pull_only(&laptop, &mut config, true).await.unwrap();
+
+        assert_eq!(laptop.bookmark_names(), ["keep"]);
+        assert_eq!(laptop.password("local"), None);
+        assert_eq!(laptop.password("a").as_deref(), Some("pw-a"));
+    }
+
+    #[tokio::test]
+    async fn a_locked_store_is_left_alone_by_the_cleanup() {
+        let (_vault, base) = new_vault();
+        let (mut desktop, mut laptop) = two_synced_devices(&base, &[("a", "keep"), ("b", "drop")]).await;
+        laptop.save_password("b", "pw-b");
+        laptop.credentials_read_error = true;
+        laptop.config.include_credentials = false;
+
+        desktop.delete_bookmark("b");
+        desktop.sync().await;
+        laptop.sync().await;
+
+        assert_eq!(laptop.bookmark_names(), ["keep"]);
+        assert_eq!(laptop.credentials.lock().unwrap().len(), 1, "an unreadable store is never rewritten");
     }
 
     #[tokio::test]

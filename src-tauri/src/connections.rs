@@ -474,19 +474,33 @@ pub fn delete_connection(
     id: String,
     master_state: State<'_, MasterPasswordState>,
 ) -> Result<(), String> {
-    let secret = encryption::resolve_secret(&app, &master_state)?;
+    delete_connections_and_credentials(&app, &master_state, &HashSet::from([id.as_str()]))?;
+    Ok(())
+}
 
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)?;
+/// Remove bookmarks and their credentials. The credential store keeps only
+/// entries whose bookmark remains, which also clears credentials orphaned
+/// earlier (a sync that removed bookmarks while this device took no part in
+/// credential sync, an interrupted save). Returns how many bookmarks went.
+fn delete_connections_and_credentials(
+    app: &AppHandle,
+    master_state: &MasterPasswordState,
+    doomed: &HashSet<&str>,
+) -> Result<usize, String> {
+    let secret = encryption::resolve_secret(app, master_state)?;
+    let mut credential_store = encryption::load_encrypted_credentials(app, &secret)?;
+
+    let mut connections = load_connections(app)?;
+    let before = connections.len();
+    connections.retain(|connection| !doomed.contains(connection.id.as_str()));
+    let remaining: HashSet<&str> = connections.iter().map(|connection| connection.id.as_str()).collect();
+
     credential_store
         .credentials
-        .retain(|c| c.connection_id != id);
-    encryption::save_encrypted_credentials(&app, &credential_store, &secret)?;
-
-    // 从连接列表中移除
-    let mut connections = load_connections(&app)?;
-    connections.retain(|c| c.id != id);
-    write_connections(&app, &connections)?;
-    Ok(())
+        .retain(|credential| remaining.contains(credential.connection_id.as_str()));
+    encryption::save_encrypted_credentials(app, &credential_store, &secret)?;
+    write_connections(app, &connections)?;
+    Ok(before - connections.len())
 }
 
 /// 更新连接的 last_used 时间戳（每次建立连接时调用）
@@ -560,20 +574,7 @@ pub fn delete_connections(
         return Ok(0);
     }
     let doomed: HashSet<&str> = ids.iter().map(String::as_str).collect();
-
-    let secret = encryption::resolve_secret(&app, &master_state)?;
-    let mut credential_store = encryption::load_encrypted_credentials(&app, &secret)?;
-    credential_store
-        .credentials
-        .retain(|credential| !doomed.contains(credential.connection_id.as_str()));
-    encryption::save_encrypted_credentials(&app, &credential_store, &secret)?;
-
-    let mut connections = load_connections(&app)?;
-    let before = connections.len();
-    connections.retain(|connection| !doomed.contains(connection.id.as_str()));
-    let removed = before - connections.len();
-    write_connections(&app, &connections)?;
-    Ok(removed)
+    delete_connections_and_credentials(&app, &master_state, &doomed)
 }
 
 /// 批量移动分组。只改元数据、完全不触碰凭据库——因此主密码锁定时同样安全，
