@@ -20,8 +20,8 @@
 //!   - `ssh_cancel_transfer`
 
 use russh::client;
-use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::OpenFlags;
+use russh_sftp::client::{RawSftpSession, SftpSession};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
 use tokio::fs;
@@ -757,19 +757,177 @@ pub async fn ssh_write_remote_text_file(
     }
 
     let sftp = open_sftp_session(state.inner(), &id).await?;
+    let state = state.inner().clone();
+    let result = write_remote_file_atomically(
+        &sftp,
+        || async move { open_raw_sftp_session(&state, &id).await },
+        &path,
+        content.as_bytes(),
+    )
+    .await;
+    let _ = sftp.close().await;
+    result
+}
+
+/// SFTP extension that renames over an existing file atomically (POSIX
+/// `rename(2)`); plain SFTPv3 RENAME refuses to replace an existing file.
+const POSIX_RENAME: &str = "posix-rename@openssh.com";
+
+/// A second, low-level SFTP session for extension requests the high-level
+/// client does not expose.
+async fn open_raw_sftp_session(state: &SshState, id: &str) -> Result<RawSftpSession, String> {
+    let channel = open_ssh_channel(state, id).await?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|error| format!("Failed to start SFTP subsystem: {error}"))?;
+    Ok(RawSftpSession::new(channel.into_stream()))
+}
+
+/// Replace `path` with `content` so that the file is never seen truncated or
+/// half-written: write a temp file beside it, give it the original's mode
+/// (and owner, where allowed), then rename it over the original.
+///
+/// Symlinks are followed first, so the link stays a link. Where the atomic
+/// route would change the file — the directory is not writable, the owner
+/// cannot be kept, or the server cannot rename over a file — it falls back
+/// to writing in place, as before.
+async fn write_remote_file_atomically<F, Fut>(
+    sftp: &SftpSession,
+    open_raw: F,
+    path: &str,
+    content: &[u8],
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<RawSftpSession, String>>,
+{
+    let target = sftp.canonicalize(path.to_string()).await.unwrap_or_else(|_| path.to_string());
+    let existing = sftp.metadata(target.clone()).await.ok();
+    let directory = remote_parent_path(&target).unwrap_or_else(|| ".".to_string());
+    let name = target.rsplit('/').next().unwrap_or("file");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let temp = join_remote_path(&directory, &format!(".{name}.auraterm-{}.tmp", &suffix[..12]));
+
+    match write_temp_copy(sftp, &temp, existing.as_ref(), content).await {
+        Ok(true) => {}
+        // Could not create a faithful copy beside the file: keep the old,
+        // non-atomic behaviour rather than failing the save.
+        Ok(false) | Err(_) => {
+            let _ = sftp.remove_file(temp.clone()).await;
+            return write_remote_file_in_place(sftp, &target, content).await;
+        }
+    }
+
+    let renamed = match posix_rename(open_raw().await, &temp, &target).await {
+        Ok(true) => Ok(()),
+        // No atomic replace on this server.
+        Ok(false) => {
+            let _ = sftp.remove_file(temp.clone()).await;
+            return write_remote_file_in_place(sftp, &target, content).await;
+        }
+        Err(error) => Err(error),
+    };
+    if renamed.is_err() {
+        let _ = sftp.remove_file(temp).await;
+    }
+    renamed
+}
+
+/// Create `temp` exclusively and fill it. `Ok(false)` when it cannot carry
+/// the original's owner, so replacing the original would hand it to us.
+async fn write_temp_copy(
+    sftp: &SftpSession,
+    temp: &str,
+    existing: Option<&russh_sftp::client::fs::Metadata>,
+    content: &[u8],
+) -> Result<bool, String> {
+    let mut attributes = FileAttributes::empty();
+    // Start private; the original's mode is applied once the content is in.
+    attributes.permissions = Some(0o600);
+    let mut file = sftp
+        .open_with_flags_and_attributes(
+            temp.to_string(),
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+            attributes,
+        )
+        .await
+        .map_err(|error| format!("Failed to create temporary file: {error}"))?;
+    file.write_all(content)
+        .await
+        .map_err(|error| format!("Failed to write remote file: {error}"))?;
+    // Best effort: only servers with fsync@openssh.com support it.
+    let _ = file.sync_all().await;
+    file.shutdown()
+        .await
+        .map_err(|error| format!("Failed to finalize remote file: {error}"))?;
+
+    let Some(existing) = existing else { return Ok(true) };
+    if let Some(mode) = existing.permissions {
+        let mut attributes = FileAttributes::empty();
+        attributes.permissions = Some(mode & 0o7777);
+        sftp.set_metadata(temp.to_string(), attributes)
+            .await
+            .map_err(|error| format!("Failed to copy file permissions: {error}"))?;
+    }
+    if let (Some(uid), Some(gid)) = (existing.uid, existing.gid) {
+        let written = sftp
+            .metadata(temp.to_string())
+            .await
+            .map_err(|error| format!("Failed to inspect temporary file: {error}"))?;
+        if written.uid != Some(uid) || written.gid != Some(gid) {
+            let mut attributes = FileAttributes::empty();
+            attributes.uid = Some(uid);
+            attributes.gid = Some(gid);
+            if sftp.set_metadata(temp.to_string(), attributes).await.is_err() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// `Ok(false)` when the server does not offer the extension.
+async fn posix_rename(
+    raw: Result<RawSftpSession, String>,
+    from: &str,
+    to: &str,
+) -> Result<bool, String> {
+    let raw = raw?;
+    let version = raw
+        .init()
+        .await
+        .map_err(|error| format!("Failed to initialize SFTP session: {error}"))?;
+    if version.extensions.get(POSIX_RENAME).map(String::as_str) != Some("1") {
+        return Ok(false);
+    }
+    let mut data = Vec::with_capacity(8 + from.len() + to.len());
+    for value in [from, to] {
+        data.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        data.extend_from_slice(value.as_bytes());
+    }
+    // Dropping `raw` afterwards ends its session and channel.
+    match raw.extended(POSIX_RENAME, data).await {
+        Ok(Packet::Status(status)) if status.status_code == StatusCode::Ok => Ok(true),
+        Ok(Packet::Status(status)) => Err(format!("Failed to replace remote file: {}", status.error_message)),
+        Ok(_) => Err("Failed to replace remote file: unexpected SFTP reply".to_string()),
+        Err(error) => Err(format!("Failed to replace remote file: {error}")),
+    }
+}
+
+async fn write_remote_file_in_place(sftp: &SftpSession, path: &str, content: &[u8]) -> Result<(), String> {
     let mut remote_file = sftp
-        .create(path)
+        .create(path.to_string())
         .await
         .map_err(|error| format!("Failed to open remote file for writing: {error}"))?;
     remote_file
-        .write_all(content.as_bytes())
+        .write_all(content)
         .await
         .map_err(|error| format!("Failed to write remote file: {error}"))?;
     remote_file
         .shutdown()
         .await
         .map_err(|error| format!("Failed to finalize remote file: {error}"))?;
-    let _ = sftp.close().await;
     Ok(())
 }
 
@@ -1068,6 +1226,75 @@ async fn download_remote_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An SFTP stream served by the local OpenSSH `sftp-server`, if installed.
+    #[cfg(unix)]
+    fn local_sftp_stream() -> Option<tokio::net::UnixStream> {
+        use std::os::fd::OwnedFd;
+        use std::process::{Command, Stdio};
+
+        let server = [
+            "/usr/lib/openssh/sftp-server",
+            "/usr/libexec/sftp-server",
+            "/usr/libexec/openssh/sftp-server",
+            "/usr/lib/ssh/sftp-server",
+        ]
+        .into_iter()
+        .find(|path| Path::new(path).exists())?;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().ok()?;
+        let theirs_out = theirs.try_clone().ok()?;
+        // It exits on EOF once our end is dropped.
+        Command::new(server)
+            .stdin(Stdio::from(OwnedFd::from(theirs)))
+            .stdout(Stdio::from(OwnedFd::from(theirs_out)))
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        ours.set_nonblocking(true).ok()?;
+        tokio::net::UnixStream::from_std(ours).ok()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quick_edit_save_replaces_the_file_atomically() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let Some(stream) = local_sftp_stream() else {
+            eprintln!("skipped: no local sftp-server");
+            return;
+        };
+        let sftp = SftpSession::new(stream).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("auraterm-quick-edit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("app.conf");
+        let link = dir.join("current.conf");
+        std::fs::write(&file, "a much longer original body that must not survive\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let original_inode = std::fs::metadata(&file).unwrap().ino();
+
+        write_remote_file_atomically(
+            &sftp,
+            || async { local_sftp_stream().map(RawSftpSession::new).ok_or_else(|| "no sftp-server".to_string()) },
+            link.to_str().unwrap(),
+            b"short\n",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "short\n");
+        let metadata = std::fs::metadata(&file).unwrap();
+        assert_ne!(metadata.ino(), original_inode, "replaced by rename, not rewritten in place");
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o640, "mode kept");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".auraterm-"))
+            .count();
+        assert_eq!(leftovers, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[tokio::test]
     async fn a_cancelled_transfer_stops_and_leaves_the_registry() {
