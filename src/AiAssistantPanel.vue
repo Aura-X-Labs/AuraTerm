@@ -63,9 +63,20 @@ const canSend = computed(
 );
 
 let unlisten: UnlistenFn | null = null;
+let unmounted = false;
 void listenAiStream(handleStreamEvent).then((fn) => {
-  unlisten = fn;
+  // Closed before the listener was registered: release it right away.
+  if (unmounted) fn();
+  else unlisten = fn;
+}).catch((error) => {
+  console.error("AI stream listener failed", error);
 });
+
+function cancelRequest(requestId: string) {
+  void aiChatCancel(requestId).catch((error) => {
+    console.error("AI request cancel failed", error);
+  });
+}
 
 function scrollToBottom() {
   void nextTick(() => {
@@ -150,7 +161,7 @@ async function send() {
 
 function stop() {
   const requestId = activeRequestId.value;
-  if (requestId) void aiChatCancel(requestId);
+  if (requestId) cancelRequest(requestId);
 }
 
 function clearConversation() {
@@ -215,8 +226,10 @@ function applyDraft(draft: string | undefined) {
 watch(() => props.draftKey, () => applyDraft(props.draft), { immediate: true });
 
 onBeforeUnmount(() => {
-  if (activeRequestId.value) void aiChatCancel(activeRequestId.value);
+  unmounted = true;
+  if (activeRequestId.value) cancelRequest(activeRequestId.value);
   unlisten?.();
+  unlisten = null;
 });
 </script>
 
