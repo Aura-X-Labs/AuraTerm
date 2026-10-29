@@ -39,16 +39,28 @@ export function aiTestConnection(): Promise<void> {
   return invoke("ai_test_connection");
 }
 
-export function aiSetApiKey(apiKey: string): Promise<void> {
-  return invoke("ai_set_api_key", { apiKey });
+/**
+ * The endpoint a key belongs to. A stored key is bound to the provider and
+ * base URL it was entered for and never sent anywhere else, so a provider
+ * change (including one synced from another device) asks for the key again.
+ */
+export interface AiKeyTarget {
+  provider: string;
+  baseUrl?: string | null;
+}
+
+/** Store the key for `target` (the saved provider / base URL when omitted). */
+export function aiSetApiKey(apiKey: string, target?: AiKeyTarget): Promise<void> {
+  return invoke("ai_set_api_key", { apiKey, provider: target?.provider ?? null, baseUrl: target?.baseUrl ?? null });
 }
 
 export function aiClearApiKey(): Promise<void> {
   return invoke("ai_clear_api_key");
 }
 
-export function aiHasApiKey(): Promise<boolean> {
-  return invoke<boolean>("ai_has_api_key");
+/** Whether a key usable with `target` (the saved provider / base URL when omitted) is stored. */
+export function aiHasApiKey(target?: AiKeyTarget): Promise<boolean> {
+  return invoke<boolean>("ai_has_api_key", { provider: target?.provider ?? null, baseUrl: target?.baseUrl ?? null });
 }
 
 /** Subscribe to the global AI stream; the caller filters by request id. */

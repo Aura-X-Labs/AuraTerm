@@ -58,7 +58,9 @@ export type AiProvider = "anthropic" | "openai-compatible";
 /**
  * AI assistant configuration. The API key deliberately lives outside this
  * structure (and outside settings.json): it is stored encrypted under the
- * device-local key via the `ai_set_api_key` command and never syncs.
+ * device-local key via the `ai_set_api_key` command, never syncs, and is only
+ * sent to the provider + base URL it was entered for. Base URLs must be
+ * https:// (plain http:// only for a server on this machine).
  */
 export interface AiConfig {
   enabled: boolean;

@@ -104,33 +104,160 @@ fn api_key_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(config_dir.join(API_KEY_FILE))
 }
 
-fn load_api_key(app: &AppHandle) -> Result<Zeroizing<String>, String> {
+/// What `ai_api_key.enc` holds: the key and the endpoint it was entered for.
+///
+/// The provider and base URL live in `aiConfig`, which syncs between devices;
+/// the key does not. Without the binding, a device that synced another
+/// device's provider would send its own key to that provider. A key is only
+/// ever sent to the endpoint it was entered for — anything else asks for the
+/// key again.
+#[derive(Serialize, Deserialize)]
+struct StoredApiKey {
+    /// `"<provider> <endpoint>"`, see [`endpoint_binding`].
+    endpoint: String,
+    key: String,
+}
+
+impl Drop for StoredApiKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.key.zeroize();
+    }
+}
+
+/// Whether `host` (as `Url::host_str` gives it) is this machine, where plain
+/// `http://` never crosses a network.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    host == "localhost" || host.ends_with(".localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The base URL requests for `config` go to, normalised. Rejects anything
+/// but `https://` — plain `http://` would send the key in the clear — except
+/// for a server on this machine (Ollama, LM Studio).
+fn effective_base(config: &AiConfig) -> Result<reqwest::Url, String> {
+    let raw = config.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let raw = match config.provider.as_str() {
+        "anthropic" => raw.unwrap_or(DEFAULT_ANTHROPIC_BASE),
+        "openai-compatible" => raw.ok_or_else(|| "Base URL is required for OpenAI-compatible providers".to_string())?,
+        other => return Err(format!("Unknown AI provider: {}", other)),
+    };
+    let url = reqwest::Url::parse(raw).map_err(|e| format!("Invalid AI base URL: {}", e))?;
+    match url.scheme() {
+        "https" => {}
+        "http" if url.host_str().is_some_and(is_loopback_host) => {}
+        "http" => return Err("The AI base URL must use https:// (plain http:// is only allowed for a server on this machine)".to_string()),
+        other => return Err(format!("Unsupported AI base URL scheme: {}", other)),
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("Invalid AI base URL: no host".to_string());
+    }
+    Ok(url)
+}
+
+/// `base` without the trailing slash, ready for `/v1/messages` & co.
+fn base_str(base: &reqwest::Url) -> &str {
+    base.as_str().trim_end_matches('/')
+}
+
+/// What a stored key is bound to: provider and normalised endpoint.
+fn endpoint_binding(config: &AiConfig) -> Result<String, String> {
+    Ok(format!("{} {}", config.provider, base_str(&effective_base(config)?)))
+}
+
+fn read_stored_key(app: &AppHandle) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let path = api_key_path(app)?;
     if !path.exists() {
-        return Err("AI API key is not configured".to_string());
+        return Ok(None);
     }
     let encrypted = fs::read(&path).map_err(|e| format!("Failed to read AI API key: {}", e))?;
     let key = encryption::load_or_create_local_key(app)?;
-    let plaintext = Zeroizing::new(encryption::decrypt_data(&encrypted, &key)?);
-    String::from_utf8(plaintext.to_vec())
-        .map(Zeroizing::new)
-        .map_err(|_| "Stored AI API key is corrupt".to_string())
+    Ok(Some(Zeroizing::new(encryption::decrypt_data(&encrypted, &key)?)))
 }
 
+fn write_stored_key(app: &AppHandle, stored: &StoredApiKey) -> Result<(), String> {
+    let path = api_key_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let plaintext = Zeroizing::new(serde_json::to_vec(stored).map_err(|e| e.to_string())?);
+    let key = encryption::load_or_create_local_key(app)?;
+    let encrypted = encryption::encrypt_data(&plaintext, &key)?;
+    crate::util::write_private_atomic(&path, &encrypted).map_err(|e| format!("Failed to write AI API key: {}", e))
+}
+
+/// Decode the stored file. Builds before the binding stored the bare key; such
+/// a key is bound to `legacy_binding` (the endpoint in use when it is first
+/// read) and rewritten, so it keeps working where it was entered.
+fn decode_stored_key(plaintext: &[u8], legacy_binding: impl FnOnce() -> Result<String, String>) -> Result<(StoredApiKey, bool), String> {
+    if let Ok(stored) = serde_json::from_slice::<StoredApiKey>(plaintext) {
+        return Ok((stored, false));
+    }
+    let key = std::str::from_utf8(plaintext).map_err(|_| "Stored AI API key is corrupt".to_string())?;
+    Ok((StoredApiKey { endpoint: legacy_binding()?, key: key.to_string() }, true))
+}
+
+fn load_stored_key(app: &AppHandle, current: &AiConfig) -> Result<Option<StoredApiKey>, String> {
+    let Some(plaintext) = read_stored_key(app)? else {
+        return Ok(None);
+    };
+    let (stored, legacy) = decode_stored_key(&plaintext, || endpoint_binding(current))?;
+    if legacy {
+        write_stored_key(app, &stored)?;
+    }
+    Ok(Some(stored))
+}
+
+/// Bind a key stored by an older build to the endpoint in use right now. A
+/// sync calls this before it writes another device's `aiConfig`, so the key
+/// stays with the provider it was entered for rather than following the
+/// synced one.
+pub(crate) fn bind_legacy_api_key(app: &AppHandle, current: &AiConfig) {
+    let _ = load_stored_key(app, current);
+}
+
+/// The key for a request to `config`'s endpoint — only if it was entered for
+/// exactly that endpoint.
+fn api_key_for(stored: Option<StoredApiKey>, config: &AiConfig) -> Result<Zeroizing<String>, String> {
+    let wanted = endpoint_binding(config)?;
+    let Some(stored) = stored else {
+        return Err("AI API key is not configured".to_string());
+    };
+    if stored.endpoint != wanted {
+        return Err(format!(
+            "The saved AI API key was entered for {}, not {}. Enter the API key for this provider in Settings → AI.",
+            stored.endpoint, wanted
+        ));
+    }
+    Ok(Zeroizing::new(stored.key.clone()))
+}
+
+fn load_api_key(app: &AppHandle, config: &AiConfig) -> Result<Zeroizing<String>, String> {
+    api_key_for(load_stored_key(app, config)?, config)
+}
+
+/// The AI config a key command is about: the provider / base URL the
+/// Settings dialog currently shows when given, else the saved one.
+fn config_for(app: &AppHandle, provider: Option<String>, base_url: Option<String>) -> Result<AiConfig, String> {
+    let mut config = settings::get_settings(app.clone())?.ai_config;
+    if let Some(provider) = provider {
+        config.provider = provider;
+        config.base_url = base_url;
+    }
+    Ok(config)
+}
+
+/// Store `api_key` for the given provider / base URL (the saved ones when
+/// omitted). It is only ever sent there.
 #[tauri::command]
-pub fn ai_set_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
+pub fn ai_set_api_key(app: AppHandle, api_key: String, provider: Option<String>, base_url: Option<String>) -> Result<(), String> {
     let api_key = Zeroizing::new(api_key);
     let trimmed = api_key.trim();
     if trimmed.is_empty() {
         return Err("API key must not be empty".to_string());
     }
-    let path = api_key_path(&app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let key = encryption::load_or_create_local_key(&app)?;
-    let encrypted = encryption::encrypt_data(trimmed.as_bytes(), &key)?;
-    crate::util::write_private_atomic(&path, &encrypted).map_err(|e| format!("Failed to write AI API key: {}", e))
+    let config = config_for(&app, provider, base_url)?;
+    write_stored_key(&app, &StoredApiKey { endpoint: endpoint_binding(&config)?, key: trimmed.to_string() })
 }
 
 #[tauri::command]
@@ -142,9 +269,16 @@ pub fn ai_clear_api_key(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a key usable with the given (or saved) provider / base URL is
+/// stored. A key entered for another endpoint does not count: the user has to
+/// enter one for this endpoint.
 #[tauri::command]
-pub fn ai_has_api_key(app: AppHandle) -> bool {
-    api_key_path(&app).map(|p| p.exists()).unwrap_or(false)
+pub fn ai_has_api_key(app: AppHandle, provider: Option<String>, base_url: Option<String>) -> bool {
+    let Ok(config) = config_for(&app, provider, base_url) else {
+        return false;
+    };
+    let saved = settings::get_settings(app.clone()).map(|s| s.ai_config).unwrap_or(config.clone());
+    load_stored_key(&app, &saved).is_ok_and(|stored| api_key_for(stored, &config).is_ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -160,15 +294,6 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-fn trimmed_base(base: &Option<String>, default: &str) -> String {
-    let base = base
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default);
-    base.trim_end_matches('/').to_string()
-}
-
 /// Build the provider-specific streaming request. Returns the prepared
 /// request plus which SSE dialect the response will speak.
 fn build_stream_request(
@@ -182,7 +307,7 @@ fn build_stream_request(
     let max_tokens = config.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).max(1);
     match config.provider.as_str() {
         "anthropic" => {
-            let url = format!("{}/v1/messages", trimmed_base(&config.base_url, DEFAULT_ANTHROPIC_BASE));
+            let url = format!("{}/v1/messages", base_str(&effective_base(config)?));
             let mut body = json!({
                 "model": config.model,
                 "max_tokens": max_tokens,
@@ -206,13 +331,7 @@ fn build_stream_request(
             Ok((request, Dialect::Anthropic))
         }
         "openai-compatible" => {
-            let base = config
-                .base_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "Base URL is required for OpenAI-compatible providers".to_string())?;
-            let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+            let url = format!("{}/chat/completions", base_str(&effective_base(config)?));
             let mut all_messages: Vec<Value> = Vec::with_capacity(messages.len() + 1);
             if let Some(system) = system.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 all_messages.push(json!({"role": "system", "content": system}));
@@ -404,7 +523,7 @@ async fn run_chat(
     system: Option<String>,
 ) -> Result<(), String> {
     let config = settings::get_settings(app.clone())?.ai_config;
-    let api_key = load_api_key(&app)?;
+    let api_key = load_api_key(&app, &config)?;
     let client = http_client()?;
     let (request, dialect) = build_stream_request(&client, &config, &api_key, &system, &messages, true)?;
 
@@ -501,7 +620,7 @@ pub async fn ai_complete(
         return Err("Messages must not be empty".to_string());
     }
     let config = settings::get_settings(app.clone())?.ai_config;
-    let api_key = load_api_key(&app)?;
+    let api_key = load_api_key(&app, &config)?;
     let client = http_client()?;
     let (request, dialect) = build_stream_request(&client, &config, &api_key, &system, &messages, false)?;
 
@@ -520,7 +639,7 @@ pub async fn ai_complete(
 #[tauri::command]
 pub async fn ai_test_connection(app: AppHandle) -> Result<(), String> {
     let config = settings::get_settings(app.clone())?.ai_config;
-    let api_key = load_api_key(&app)?;
+    let api_key = load_api_key(&app, &config)?;
     let client = http_client()?;
     let probe = vec![AiMessage { role: "user".to_string(), content: "ping".to_string() }];
     let mut probe_config = config;
@@ -622,6 +741,66 @@ mod tests {
 
         // Missing content degrades to empty string rather than erroring.
         assert_eq!(parse_full_response(&serde_json::json!({}), Dialect::Anthropic).unwrap(), "");
+    }
+
+    fn ai_config(provider: &str, base_url: Option<&str>) -> AiConfig {
+        AiConfig {
+            enabled: true,
+            provider: provider.to_string(),
+            base_url: base_url.map(str::to_string),
+            model: "m".to_string(),
+            max_tokens: None,
+        }
+    }
+
+    #[test]
+    fn plain_http_is_only_accepted_for_this_machine() {
+        let base = |url: &str| effective_base(&ai_config("openai-compatible", Some(url)));
+        assert!(base("https://api.deepseek.com/v1").is_ok());
+        assert!(base("http://localhost:11434/v1").is_ok());
+        assert!(base("http://127.0.0.1:1234/v1").is_ok());
+        assert!(base("http://[::1]:8080").is_ok());
+        assert!(base("http://api.example.com/v1").unwrap_err().contains("https://"));
+        assert!(base("http://192.168.1.10:11434/v1").is_err());
+        assert!(base("http://localhost.evil.com/v1").is_err());
+        assert!(base("ftp://example.com").is_err());
+        assert!(base("not a url").is_err());
+
+        let client = reqwest::Client::new();
+        let insecure = ai_config("anthropic", Some("http://api.example.com"));
+        assert!(build_stream_request(&client, &insecure, "k", &None, &[], true).is_err());
+    }
+
+    #[test]
+    fn a_key_is_only_sent_to_the_endpoint_it_was_entered_for() {
+        let deepseek = ai_config("openai-compatible", Some("https://api.deepseek.com/v1"));
+        let stored = || Some(StoredApiKey { endpoint: endpoint_binding(&deepseek).unwrap(), key: "sk-deepseek".to_string() });
+
+        assert_eq!(api_key_for(stored(), &deepseek).unwrap().as_str(), "sk-deepseek");
+        // Same endpoint written differently.
+        let respelled = ai_config("openai-compatible", Some(" HTTPS://API.DeepSeek.com/v1/ "));
+        assert!(api_key_for(stored(), &respelled).is_ok());
+
+        // Another device synced a different provider or endpoint here.
+        let anthropic = ai_config("anthropic", None);
+        let error = api_key_for(stored(), &anthropic).unwrap_err();
+        assert!(error.contains("Enter the API key"), "{error}");
+        assert!(api_key_for(stored(), &ai_config("openai-compatible", Some("https://attacker.example/v1"))).is_err());
+        assert!(api_key_for(stored(), &ai_config("anthropic", Some("https://api.deepseek.com/v1"))).is_err());
+        assert!(api_key_for(None, &deepseek).is_err());
+    }
+
+    #[test]
+    fn a_key_from_an_older_build_is_bound_where_it_is_first_read() {
+        let (legacy, migrated) = decode_stored_key(b"sk-old", || Ok("anthropic https://api.anthropic.com".to_string())).unwrap();
+        assert!(migrated);
+        assert_eq!(legacy.key, "sk-old");
+        assert_eq!(legacy.endpoint, endpoint_binding(&ai_config("anthropic", None)).unwrap());
+
+        let json = serde_json::to_vec(&legacy).unwrap();
+        let (current, migrated) = decode_stored_key(&json, || panic!("a bound key is not rebound")).unwrap();
+        assert!(!migrated);
+        assert_eq!(current.key, "sk-old");
     }
 
     #[test]
