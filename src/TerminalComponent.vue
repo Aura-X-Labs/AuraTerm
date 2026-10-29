@@ -371,6 +371,50 @@ function queueTerminalInput(data: string) {
   }, 10);
 }
 
+// PTY resizes are debounced: a window resize or divider drag changes the grid
+// every frame, and each SIGWINCH makes tmux/vim redraw the whole screen.
+const RESIZE_DEBOUNCE_MS = 100;
+let pendingResizeTimer: number | null = null;
+let lastSentResize: { id: string; cols: number; rows: number } | null = null;
+
+function clearPendingResize() {
+  if (pendingResizeTimer !== null) {
+    window.clearTimeout(pendingResizeTimer);
+    pendingResizeTimer = null;
+  }
+}
+
+function flushSessionResize() {
+  clearPendingResize();
+  const id = ptyId.value;
+  if (!id || !terminal) {
+    return;
+  }
+  const cols = terminal.cols ?? 80;
+  const rows = terminal.rows ?? 24;
+  if (lastSentResize && lastSentResize.id === id && lastSentResize.cols === cols && lastSentResize.rows === rows) {
+    return;
+  }
+  lastSentResize = { id, cols, rows };
+  void resizeSession(id, cols, rows, activeSessionRef.value).catch((error) => {
+    console.error("resize failed", error);
+  });
+}
+
+function scheduleSessionResize() {
+  if (!ptyId.value) {
+    return;
+  }
+  clearPendingResize();
+  pendingResizeTimer = window.setTimeout(flushSessionResize, RESIZE_DEBOUNCE_MS);
+}
+
+// A new or restarted session was started at the then-current size; anything
+// recorded for the previous one no longer says what the backend has.
+watch(ptyId, () => {
+  lastSentResize = null;
+});
+
 function clearPendingLogFlush() {
   if (pendingLogTimer !== null) {
     window.clearTimeout(pendingLogTimer);
@@ -926,13 +970,8 @@ onMounted(() => {
     }
   });
 
-  const resizeDisposable = terminal.onResize(({ cols, rows }) => {
-    if (!ptyId.value) {
-      return;
-    }
-    void resizeSession(ptyId.value, cols, rows, activeSessionRef.value).catch((error) => {
-      console.error("resize failed", error);
-    });
+  const resizeDisposable = terminal.onResize(() => {
+    scheduleSessionResize();
   });
 
   const handleWindowResize = () => {
@@ -943,20 +982,16 @@ onMounted(() => {
       applyRemoteSize();
       return;
     }
+    // fit() fires onResize when the grid changes, which schedules the PTY
+    // resize; scheduling here as well only covers a size the backend missed.
     fitAddon?.fit();
-    if (!ptyId.value || !terminal) {
-      return;
-    }
-    const cols = terminal.cols ?? 80;
-    const rows = terminal.rows ?? 24;
-    void resizeSession(ptyId.value, cols, rows, activeSessionRef.value).catch((error) => {
-      console.error("resize on window resize failed", error);
-    });
+    scheduleSessionResize();
   };
 
   window.addEventListener("resize", handleWindowResize);
 
   terminalCleanup = () => {
+    clearPendingResize();
     flushPendingInput();
     flushPendingLog(true);
     window.removeEventListener("resize", handleWindowResize);
