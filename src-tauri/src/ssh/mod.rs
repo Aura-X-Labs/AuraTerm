@@ -694,6 +694,53 @@ pub async fn close_ssh_pty(
     Ok(())
 }
 
+/// Why a connection attempt failed, and whether the reconnect loop should try
+/// again with the same settings.
+#[derive(Debug)]
+struct ConnectError {
+    message: String,
+    /// `false` for failures that will repeat verbatim on every retry — wrong
+    /// credentials, a key that will not decode, no ssh-agent, a host key the
+    /// user refused — so the loop stops instead of retrying every 5 s forever.
+    retryable: bool,
+}
+
+impl ConnectError {
+    fn terminal(message: impl Into<String>) -> Self {
+        Self { message: message.into(), retryable: false }
+    }
+
+    fn map_message(self, f: impl FnOnce(String) -> String) -> Self {
+        Self { message: f(self.message), retryable: self.retryable }
+    }
+}
+
+/// Plain messages are network-level failures unless they read like a
+/// server's authentication rejection.
+impl From<String> for ConnectError {
+    fn from(message: String) -> Self {
+        let retryable = !is_auth_error(&message);
+        Self { message, retryable }
+    }
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Where keyboard-interactive (MFA) prompts are shown. The payload's `id` is
+/// filled in by the sink.
+type PromptSink = Arc<dyn Fn(KeyboardInteractivePromptPayload) + Send + Sync>;
+
+fn app_prompt_sink(app: AppHandle, id: String) -> PromptSink {
+    Arc::new(move |mut payload: KeyboardInteractivePromptPayload| {
+        payload.id = id.clone();
+        let _ = app.emit(&crate::util::session_event("ssh-mfa-prompt", &id), payload);
+    })
+}
+
 /// Authenticate an SSH session and return a connected handle.
 fn authenticate_ssh(
     host: String,
@@ -709,9 +756,10 @@ fn authenticate_ssh(
     id: String,
     auth_response_rx: &mut mpsc::Receiver<String>,
     remote_forwards: forwarding::RemoteForwardRegistry,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SharedSshHandle, String>> + Send + '_>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SharedSshHandle, ConnectError>> + Send + '_>> {
     Box::pin(async move {
     let mut current: Option<SharedSshHandle> = None;
+    let prompts = app_prompt_sink(app.clone(), id.clone());
 
     for jump in jump_hosts {
         let (mut session, observed) = if let Some(previous) = current.as_ref() {
@@ -744,12 +792,13 @@ fn authenticate_ssh(
             jump.password.clone(),
             jump.private_key.clone(),
             jump.passphrase.clone(),
-            app.clone(),
-            id.clone(),
+            &prompts,
             auth_response_rx,
         )
         .await
-        .map_err(|error| format!("ProxyJump {}@{}:{}: {error}", jump.user, jump.host, jump.port))?;
+        .map_err(|error| error.map_message(|message| {
+            format!("ProxyJump {}@{}:{}: {message}", jump.user, jump.host, jump.port)
+        }))?;
         current = Some(Arc::new(session));
     }
 
@@ -783,8 +832,7 @@ fn authenticate_ssh(
         password,
         private_key,
         passphrase,
-        app,
-        id,
+        &prompts,
         auth_response_rx,
     )
     .await?;
@@ -822,10 +870,11 @@ async fn verify_host_fingerprint(
     host: String,
     port: u16,
     observed: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), ConnectError> {
     let observed = observed.ok_or_else(|| format!("SSH server {host}:{port} did not present a host key"))?;
     let scope = known_hosts::known_host_scope(&host, port);
-    let mut store = known_hosts::load_known_hosts(&app).await?;
+    // A trust store that cannot be read stays unreadable on the next attempt.
+    let mut store = known_hosts::load_known_hosts(&app).await.map_err(ConnectError::terminal)?;
 
     if let Some(expected) = store.hosts.get(&scope).cloned() {
         if expected == observed {
@@ -840,29 +889,33 @@ async fn verify_host_fingerprint(
             &expected,
             &observed,
         )
-        .await?;
+        .await
+        .map_err(ConnectError::terminal)?;
         if !trust {
-            return Err(format!("SSH host key changed for {scope}. Connection cancelled by user."));
+            // The same key will be presented again; asking every 5 s would
+            // just repeat the question the user already answered.
+            return Err(ConnectError::terminal(format!(
+                "SSH host key changed for {scope}. Connection cancelled by user."
+            )));
         }
         known_hosts::append_host_key_override_audit_log(&app, &host, port, &expected, &observed).await?;
     }
 
     store.hosts.insert(scope, observed);
-    known_hosts::save_known_hosts(&app, &store).await
+    Ok(known_hosts::save_known_hosts(&app, &store).await?)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn authenticate_connected_session(
+fn authenticate_connected_session<'a>(
     mut session: client::Handle<known_hosts::ClientHandler>,
     user: String,
     auth_type: Option<String>,
     password: Option<String>,
     private_key: Option<String>,
     passphrase: Option<String>,
-    app: AppHandle,
-    id: String,
-    auth_response_rx: &mut mpsc::Receiver<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, String>> + Send + '_>> {
+    prompts: &'a PromptSink,
+    auth_response_rx: &'a mut mpsc::Receiver<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, ConnectError>> + Send + 'a>> {
     Box::pin(async move {
     let password = password.filter(|value| !value.is_empty());
     let private_key = private_key.filter(|value| !value.trim().is_empty());
@@ -870,32 +923,35 @@ fn authenticate_connected_session(
 
     let interactive = match method.as_str() {
         "key" => {
-            let key = private_key.ok_or_else(|| "Private key is required".to_string())?;
-            let decoded = decode_private_key(&key, passphrase.as_deref())?;
+            let key = private_key.ok_or_else(|| ConnectError::terminal("Private key is required"))?;
+            // A wrong or missing passphrase fails identically on every retry.
+            let decoded = decode_private_key(&key, passphrase.as_deref()).map_err(ConnectError::terminal)?;
             match authenticate_with_decoded_key(&mut session, user.clone(), Arc::new(decoded)).await? {
                 client::AuthResult::Success => None,
-                client::AuthResult::Failure { .. } => return Err("Private key authentication failed".to_string()),
+                client::AuthResult::Failure { .. } => {
+                    return Err(ConnectError::terminal("Private key authentication failed"))
+                }
             }
         }
         "agent" => {
             return authenticate_with_agent(session, user).await;
         }
         "password" => {
-            let password = password.ok_or_else(|| "Password is required".to_string())?;
+            let password = password.ok_or_else(|| ConnectError::terminal("Password is required"))?;
             match session.authenticate_password(user.clone(), password).await {
                 Ok(client::AuthResult::Success) => None,
                 Ok(client::AuthResult::Failure { .. }) => {
                     Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await)
                 }
-                Err(error) => return Err(format!("Password auth error: {error}")),
+                Err(error) => return Err(format!("Password auth error: {error}").into()),
             }
         }
         "none" => Some(session.authenticate_keyboard_interactive_start(user.clone(), None).await),
-        other => return Err(format!("Unsupported SSH auth type: {other}")),
+        other => return Err(ConnectError::terminal(format!("Unsupported SSH auth type: {other}"))),
     };
 
     if let Some(result) = interactive {
-        run_keyboard_interactive(&mut session, result, app, id, auth_response_rx).await?;
+        run_keyboard_interactive(&mut session, result, prompts, auth_response_rx).await?;
     }
     Ok(session)
     })
@@ -1007,14 +1063,16 @@ fn try_agent_identities<'a>(
 fn authenticate_with_agent(
     mut session: client::Handle<known_hosts::ClientHandler>,
     user: String,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, String>> + Send>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<known_hosts::ClientHandler>, ConnectError>> + Send>> {
     Box::pin(async move {
     match try_agent_identities(&mut session, &user).await {
         Ok(client::AuthResult::Success) => Ok(session),
         Ok(client::AuthResult::Failure { .. }) => {
-            Err("SSH agent authentication failed for every identity".to_string())
+            Err(ConnectError::terminal("SSH agent authentication failed for every identity"))
         }
-        Err(error) => Err(error.into_message()),
+        // No agent, or an empty one: retrying every 5 s will not start one.
+        Err(AgentAuthError::Unavailable(message)) => Err(ConnectError::terminal(message)),
+        Err(error) => Err(error.into_message().into()),
     }
     })
 }
@@ -1022,30 +1080,32 @@ fn authenticate_with_agent(
 async fn run_keyboard_interactive(
     session: &mut client::Handle<known_hosts::ClientHandler>,
     result: Result<client::KeyboardInteractiveAuthResponse, russh::Error>,
-    app: AppHandle,
-    id: String,
+    prompt_sink: &PromptSink,
     auth_response_rx: &mut mpsc::Receiver<String>,
-) -> Result<(), String> {
+) -> Result<(), ConnectError> {
     let mut response = result.map_err(|error| format!("Keyboard interactive init failed: {error}"))?;
     loop {
         match response {
             client::KeyboardInteractiveAuthResponse::Success => return Ok(()),
-            client::KeyboardInteractiveAuthResponse::Failure { .. } => return Err("Authentication failed".to_string()),
+            client::KeyboardInteractiveAuthResponse::Failure { .. } => {
+                return Err(ConnectError::terminal("Authentication failed"))
+            }
             client::KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
-                let payload = KeyboardInteractivePromptPayload {
-                    id: id.to_string(),
+                prompt_sink(KeyboardInteractivePromptPayload {
+                    id: String::new(),
                     name,
                     instruction: instructions,
                     prompts: prompts.iter().map(|prompt| SshMfaPrompt {
                         text: prompt.prompt.clone(),
                         echo: prompt.echo,
                     }).collect(),
-                };
-                let _ = app.emit(&crate::util::session_event("ssh-mfa-prompt", &id), payload);
+                });
                 let mut answers = Vec::with_capacity(prompts.len());
                 for _ in &prompts {
+                    // The sender lives in the session record; it is gone once
+                    // the tab closed or the session was restarted.
                     answers.push(auth_response_rx.recv().await
-                        .ok_or_else(|| "Failed to collect MFA response".to_string())?);
+                        .ok_or_else(|| ConnectError::terminal("Failed to collect MFA response"))?);
                 }
                 response = session.authenticate_keyboard_interactive_respond(answers).await
                     .map_err(|error| format!("Failed auth step: {error}"))?;
@@ -1405,7 +1465,7 @@ pub async fn start_ssh_pty(
             Ok(_rx) => Ok(()),
             Err(err) => {
                 cleanup_ssh_session(state.inner(), &id).await;
-                Err(err)
+                Err(err.message)
             }
         }
     }
@@ -1523,16 +1583,17 @@ async fn run_reconnect_loop(
                 crate::debug_log!("[ssh-debug] {} do_single_ssh_connect returned Err: {}", id, err);
                 cleanup_ssh_runtime_state(&state, &id).await;
 
-                // Authentication errors are not recoverable by retrying with the
-                // same stored credentials. Stop the reconnect loop and let the
-                // frontend show the password-retry overlay via pty-exit.
-                if is_auth_error(&err) {
+                // Errors such as rejected credentials, an undecodable key, a
+                // missing agent or a refused host key are not recoverable by
+                // retrying with the same settings. Stop the reconnect loop and
+                // let the frontend show the password-retry overlay via pty-exit.
+                if !err.retryable {
                     cleanup_ssh_session(&state, &id).await;
                     let _ = app.emit(
                         &crate::util::session_event("pty-exit", &id),
                         PtyExitPayload {
                             id: id.clone(),
-                            message: err,
+                            message: err.message,
                         },
                     );
                     return;
@@ -1597,7 +1658,7 @@ fn do_single_ssh_connect(
     reconnect_session_name: Option<String>,
     should_prompt_existing_sessions: bool,
     mut auth_response_rx: mpsc::Receiver<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<mpsc::Receiver<String>, String>> + Send + 'static>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<mpsc::Receiver<String>, ConnectError>> + Send + 'static>> {
     Box::pin(async move {
     let addr = format!("{host}:{port}");
     crate::debug_log!("Connecting to {}...", addr);
@@ -2293,6 +2354,49 @@ mod tests {
 
         stalled.abort();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn credential_errors_stop_the_reconnect_loop() {
+        use super::*;
+        use russh::server;
+
+        struct Server;
+        impl server::Handler for Server {
+            type Error = russh::Error;
+        }
+
+        let locked = ssh_generate_key_pair(Some("right".to_string()), None).unwrap();
+        let cases: [(&str, Option<&str>, Option<&str>, Option<&str>); 3] = [
+            ("key", None, Some(locked.private_key.as_str()), Some("wrong")),
+            ("key", None, Some(locked.private_key.as_str()), None),
+            ("password", None, None, None),
+        ];
+        for (auth_type, password, key, passphrase) in cases {
+            let (address, server) = test_support::spawn_server(Server).await;
+            let session = test_support::connect(address).await;
+            let prompts: PromptSink = Arc::new(|_| panic!("no prompt expected"));
+            let (_tx, mut rx) = mpsc::channel(1);
+            let error = authenticate_connected_session(
+                session,
+                "user".to_string(),
+                Some(auth_type.to_string()),
+                password.map(str::to_string),
+                key.map(str::to_string),
+                passphrase.map(str::to_string),
+                &prompts,
+                &mut rx,
+            )
+            .await
+            .err()
+            .expect("authentication cannot succeed");
+            assert!(!error.retryable, "{auth_type}/{passphrase:?}: {}", error.message);
+            server.abort();
+        }
+
+        // Network trouble is still worth another attempt.
+        assert!(ConnectError::from("Connection error: Connection refused".to_string()).retryable);
+        assert!(!ConnectError::from("Permission denied (publickey)".to_string()).retryable);
     }
 
     #[test]
