@@ -330,6 +330,19 @@ impl SshState {
         guard.get_mut(id).map(f)
     }
 
+    /// Mutate the record only while `owner` (one `start_ssh_pty` call) still
+    /// owns it. No-op once the record was closed or the id started again.
+    async fn with_owned_session<F, R>(&self, id: &str, owner: &Arc<ReconnectCancellation>, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut SshSessionState) -> R,
+    {
+        let mut guard = self.sessions.write().await;
+        guard
+            .get_mut(id)
+            .filter(|s| s.owner.as_ref().is_some_and(|current| Arc::ptr_eq(current, owner)))
+            .map(f)
+    }
+
     /// Ensure a session record exists and apply a mutation closure.
     async fn upsert_session<F>(&self, id: &str, f: F)
     where
@@ -449,9 +462,14 @@ fn auraterm_reconnect_session_name(id: &str) -> String {
 
 /// Clear all transient channels/handles for a session while keeping the
 /// reconnect config and reconnect flag (so auto-reconnect can restart).
-async fn cleanup_ssh_runtime_state(state: &SshState, id: &str) {
+///
+/// Like every cleanup run by a connect attempt or reconnect loop, it only
+/// touches the record while `owner` still owns it: after a restart of the
+/// same id the record belongs to the new session, which an old task's
+/// cleanup must not strip. Returns whether it applied.
+async fn cleanup_ssh_runtime_state(state: &SshState, id: &str, owner: &Arc<ReconnectCancellation>) -> bool {
     state
-        .with_session_mut(id, |s| {
+        .with_owned_session(id, owner, |s| {
             s.input_tx = None;
             s.resize_tx = None;
             s.auth_tx = None;
@@ -459,14 +477,16 @@ async fn cleanup_ssh_runtime_state(state: &SshState, id: &str) {
             s.reconnect_prompt_tx = None;
             s.host_key_prompt_tx = None;
         })
-        .await;
+        .await
+        .is_some()
 }
 
 /// Clear transient state plus the reconnect config. Auto-reconnect flag is
-/// preserved so the reconnect loop can observe cancellation.
-async fn cleanup_ssh_session(state: &SshState, id: &str) {
+/// preserved so the reconnect loop can observe cancellation. Owner-scoped
+/// like [`cleanup_ssh_runtime_state`].
+async fn cleanup_ssh_session(state: &SshState, id: &str, owner: &Arc<ReconnectCancellation>) -> bool {
     state
-        .with_session_mut(id, |s| {
+        .with_owned_session(id, owner, |s| {
             s.input_tx = None;
             s.resize_tx = None;
             s.auth_tx = None;
@@ -475,7 +495,8 @@ async fn cleanup_ssh_session(state: &SshState, id: &str) {
             s.host_key_prompt_tx = None;
             s.reconnect_config = None;
         })
-        .await;
+        .await
+        .is_some()
     // Do NOT clear reconnect_flag here — that's handled only in close_ssh_pty
     // to allow the reconnect loop to restart the connection.
 }
@@ -1657,7 +1678,7 @@ pub async fn start_ssh_pty(
         match result {
             Ok(_) => Ok(()),
             Err(err) => {
-                cleanup_ssh_session(state.inner(), &id).await;
+                cleanup_ssh_session(state.inner(), &id, &owner).await;
                 Err(err.message)
             }
         }
@@ -1683,7 +1704,7 @@ async fn run_reconnect_loop(
         if !first_attempt {
             // Get the last error if available
             let last_error = state
-                .with_session_mut(&id, |s| {
+                .with_owned_session(&id, &cancel_notify, |s| {
                     s.reconnect_config.as_mut().and_then(|c| c.last_error.take())
                 })
                 .await
@@ -1707,7 +1728,7 @@ async fn run_reconnect_loop(
             // Wait 5 seconds, but abort early if cancelled.
             tokio::select! {
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
-                _ = cancel_notify.notify.clone().notified_owned() => { break; }
+                _ = cancel_notify.cancelled() => { break; }
             }
 
             if cancel_notify.is_cancelled() {
@@ -1722,11 +1743,16 @@ async fn run_reconnect_loop(
             None => break,
         };
 
-        // Ensure a fresh auth-response channel is available.
+        // Ensure a fresh auth-response channel is available. Never in a
+        // record that now belongs to a restarted session with the same id.
         let (auth_tx, rx) = mpsc::channel::<String>(4);
-        state
-            .upsert_session(&id, |s| s.auth_tx = Some(auth_tx))
-            .await;
+        if state
+            .with_owned_session(&id, &cancel_notify, |s| s.auth_tx = Some(auth_tx))
+            .await
+            .is_none()
+        {
+            break;
+        }
 
         // For Manual/Simple mode, pass None as reconnect_type so no multiplexer is used.
         let mux_type = match cfg.reconnect_type {
@@ -1760,36 +1786,42 @@ async fn run_reconnect_loop(
         ).await;
 
         match result {
-            Ok(_new_rx) => {
-                // Connection is running; wait until it drops (cleanup_ssh_session removes handles).
-                // Poll until the handle is gone or we're cancelled.
+            Ok(connected) => {
+                // Connection is running; wait until it drops (the IO loop
+                // clears its own handle from the record) or we're cancelled.
+                // Compare by pointer: after a restart of this id the record
+                // holds the new session's handle, which is not ours to wait on.
                 loop {
                     tokio::select! {
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {
-                            let gone = state.handle(&id).await.is_none();
-                            if gone { break; }
+                            let ours = state
+                                .handle(&id)
+                                .await
+                                .is_some_and(|current| Arc::ptr_eq(&current, &connected));
+                            if !ours { break; }
                         }
-                        _ = cancel_notify.notify.clone().notified_owned() => { return; }
+                        _ = cancel_notify.cancelled() => { return; }
                     }
                 }
             }
             Err(err) => {
                 crate::debug_log!("[ssh-debug] {} do_single_ssh_connect returned Err: {}", id, err);
-                cleanup_ssh_runtime_state(&state, &id).await;
+                cleanup_ssh_runtime_state(&state, &id, &cancel_notify).await;
 
                 // Errors such as rejected credentials, an undecodable key, a
                 // missing agent or a refused host key are not recoverable by
                 // retrying with the same settings. Stop the reconnect loop and
                 // let the frontend show the password-retry overlay via pty-exit.
                 if !err.retryable {
-                    cleanup_ssh_session(&state, &id).await;
-                    let _ = app.emit(
-                        &crate::util::session_event("pty-exit", &id),
-                        PtyExitPayload {
-                            id: id.clone(),
-                            message: err.message,
-                        },
-                    );
+                    if cleanup_ssh_session(&state, &id, &cancel_notify).await {
+                        let _ = app.emit(
+                            &crate::util::session_event("pty-exit", &id),
+                            PtyExitPayload {
+                                id: id.clone(),
+                                message: err.message,
+                            },
+                        );
+                    }
                     return;
                 }
 
@@ -1804,15 +1836,18 @@ async fn run_reconnect_loop(
         }
     }
 
-    // Loop exited — do final cleanup.
-    cleanup_ssh_session(&state, &id).await;
-    let _ = app.emit(
-        &crate::util::session_event("pty-exit", &id),
-        PtyExitPayload {
-            id: id.clone(),
-            message: "SSH session ended".to_string(),
-        },
-    );
+    // Loop exited — do final cleanup, and report the exit, but only for our
+    // own record: a closed tab needs neither, and a restarted one must not be
+    // told its new session ended.
+    if cleanup_ssh_session(&state, &id, &cancel_notify).await {
+        let _ = app.emit(
+            &crate::util::session_event("pty-exit", &id),
+            PtyExitPayload {
+                id: id.clone(),
+                message: "SSH session ended".to_string(),
+            },
+        );
+    }
 }
 
 /// Detect authentication-related error messages so the reconnect loop can
@@ -2828,6 +2863,35 @@ mod tests {
             .await
             .expect("cancelled() resolves once cancelled");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_old_session_cleanup_leaves_a_restarted_session_alone() {
+        use super::*;
+
+        let state = SshState::default();
+        let old = Arc::new(ReconnectCancellation::default());
+        state.upsert_session("tab", |s| s.owner = Some(old.clone())).await;
+
+        // The user restarts the tab with the same id.
+        stop_and_cleanup_ssh_session(&state, "tab").await;
+        assert!(old.is_cancelled());
+        let new = Arc::new(ReconnectCancellation::default());
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        state
+            .upsert_session("tab", |s| {
+                s.owner = Some(new.clone());
+                s.input_tx = Some(input_tx);
+            })
+            .await;
+
+        // The old reconnect loop / connect attempt now winds down.
+        assert!(!cleanup_ssh_runtime_state(&state, "tab", &old).await);
+        assert!(!cleanup_ssh_session(&state, "tab", &old).await);
+        assert!(state.contains("tab").await, "the new session keeps its input channel");
+
+        assert!(cleanup_ssh_session(&state, "tab", &new).await);
+        assert!(!state.contains("tab").await);
     }
 
     #[test]
