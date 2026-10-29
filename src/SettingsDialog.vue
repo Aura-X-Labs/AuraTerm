@@ -8,6 +8,7 @@ import {
   getMatchingTerminalThemePreset,
   getTerminalThemePreset,
   normalizeAppSettings,
+  rebaseSettingsEdits,
   TERMINAL_THEME_PRESETS,
   type AiConfig,
   type LiveRelaySettings,
@@ -32,6 +33,16 @@ const emit = defineEmits<{
 }>();
 
 const settings = ref<AppSettings>(normalizeAppSettings(props.initial));
+// What the dialog opened with. When the app's settings change underneath it
+// (a sync applied another device's settings), untouched fields follow them
+// and only the user's own edits are kept — saving must not restore the
+// pre-sync values.
+let openedWith = normalizeAppSettings(props.initial);
+watch(() => props.initial, (next) => {
+  const latest = normalizeAppSettings(next);
+  settings.value = rebaseSettingsEdits(openedWith, settings.value, latest);
+  openedWith = latest;
+});
 
 const activeTab = ref<"terminal" | "keyboard" | "theme" | "automation" | "ai" | "security">("terminal");
 

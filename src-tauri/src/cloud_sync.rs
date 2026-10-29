@@ -81,7 +81,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
 
 /// Encrypted, device-local sync configuration (the account credential lives here).
@@ -101,6 +101,10 @@ pub(crate) const ERR_LEGACY_VAULT: &str = "The cloud copy still uses the old syn
 pub(crate) const ERR_NOT_SIGNED_IN: &str = "Sign in to your AuraXLab account first.";
 /// Another device uploaded since the copy this push was based on (HTTP 409).
 pub(crate) const ERR_CONFLICT: &str = "The server has newer data than this device. Pull first, then push again.";
+
+/// Emitted to every window after a sync wrote synced settings to disk; the
+/// payload is the synced subset as it now stands (`settings-synced`).
+pub(crate) const SETTINGS_SYNCED_EVENT: &str = "settings-synced";
 
 /// Top-level settings keys that are safe and useful to sync across devices.
 /// Everything not listed here (window bounds, workspace/pane state, serial
@@ -608,6 +612,10 @@ fn apply_settings_subset(app: &AppHandle, subset: &Value) -> Result<bool, String
     }
     let merged: settings::Settings = serde_json::from_value(value).map_err(|e| e.to_string())?;
     settings::save_settings(app.clone(), merged)?;
+    // The windows still hold the settings they loaded; until they adopt these,
+    // their next save writes the old values back (and the next sync uploads
+    // them over the other devices' change).
+    let _ = app.emit(SETTINGS_SYNCED_EVENT, extract_settings_subset(app)?);
     Ok(true)
 }
 

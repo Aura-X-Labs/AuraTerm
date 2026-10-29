@@ -94,6 +94,7 @@ import {
   deriveUiTheme,
   MAX_INPUT_HISTORY,
   normalizeAppSettings,
+  withSyncedSettings,
   type AppSettings,
   type QuickButton,
   type SerialHistoryItem,
@@ -702,6 +703,16 @@ onMounted(async () => {
   ));
   // Viewer/controller attach + detach and reconnects update the status pill
   // immediately instead of waiting out the 10s poll.
+  // A sync wrote another device's settings to disk: adopt them, or the next
+  // save would write this window's stale copy back (and upload it).
+  cleanupFns.push(await listen<Partial<AppSettings>>("settings-synced", ({ payload }) => {
+    const next = withSyncedSettings(settingsRef.value, payload);
+    settingsRef.value = next;
+    settings.value = next;
+    // Persisting from the main window closes the window where a save that
+    // was already in flight landed after the sync's write.
+    if (isMainWindow) persistSettingsSilently(next);
+  }));
   cleanupFns.push(await listen("cloud-bridge-peers-changed", () => {
     void refreshCloudBridgeStatus().catch(() => {});
   }));
