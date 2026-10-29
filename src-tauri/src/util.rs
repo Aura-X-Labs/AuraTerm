@@ -280,6 +280,9 @@ const TELNET_TERMINAL_TYPE: u8 = 24;
 const TELNET_NAWS: u8 = 31;
 const TERMINAL_TYPE_IS: u8 = 0;
 const TERMINAL_TYPE_SEND: u8 = 1;
+/// Longest subnegotiation payload kept. The ones we act on (TERMINAL-TYPE,
+/// COM-PORT-OPTION) are a few bytes; a longer block is skipped, not buffered.
+pub(crate) const MAX_SUBNEGOTIATION_LEN: usize = 1024;
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum TelnetParse {
@@ -310,6 +313,10 @@ pub struct TelnetIacFilter {
     state: TelnetParse,
     subneg_option: Option<u8>,
     subneg_data: Vec<u8>,
+    /// The current subnegotiation outgrew [`MAX_SUBNEGOTIATION_LEN`].
+    subneg_overflow: bool,
+    /// The last in-band byte was a CR, so a NUL next is NVT padding.
+    after_cr: bool,
     local_enabled: [bool; 256],
     remote_enabled: [bool; 256],
     /// Options we already volunteered a `WILL` for, so an incoming `DO` is an
@@ -331,6 +338,8 @@ impl Default for TelnetIacFilter {
             state: TelnetParse::Data,
             subneg_option: None,
             subneg_data: Vec::new(),
+            subneg_overflow: false,
+            after_cr: false,
             local_enabled: [false; 256],
             remote_enabled: [false; 256],
             local_offered: [false; 256],
@@ -427,7 +436,15 @@ impl TelnetIacFilter {
                 TelnetParse::Data => {
                     if byte == IAC {
                         self.state = TelnetParse::Iac;
+                    } else if byte == 0
+                        && self.after_cr
+                        && !self.remote_enabled[TELNET_BINARY as usize]
+                    {
+                        // NVT sends a bare CR as CR NUL (RFC 854); the NUL is
+                        // padding. Passed through, it corrupts ZMODEM frames.
+                        self.after_cr = false;
                     } else {
+                        self.after_cr = byte == b'\r';
                         data.push(byte);
                     }
                 }
@@ -435,6 +452,7 @@ impl TelnetIacFilter {
                     IAC => {
                         // Escaped literal 0xFF data byte.
                         data.push(IAC);
+                        self.after_cr = false;
                         self.state = TelnetParse::Data;
                     }
                     WILL | WONT | DO | DONT => {
@@ -443,6 +461,7 @@ impl TelnetIacFilter {
                     SB => {
                         self.subneg_option = None;
                         self.subneg_data.clear();
+                        self.subneg_overflow = false;
                         self.state = TelnetParse::SubnegOption;
                     }
                     // Any other 2-byte command (NOP, GA, DM, …): consume and ignore.
@@ -472,6 +491,13 @@ impl TelnetIacFilter {
                         }
                         DO => response.extend_from_slice(&[IAC, WONT, byte]),
                         DONT => {
+                            // Turning off an enabled option is acknowledged
+                            // (RFC 854). A DONT for an option that is already
+                            // off, or that refuses our own WILL, is not: that
+                            // is what keeps negotiation from looping.
+                            if self.local_enabled[byte as usize] {
+                                response.extend_from_slice(&[IAC, WONT, byte]);
+                            }
                             self.local_enabled[byte as usize] = false;
                             self.local_offered[byte as usize] = false;
                             if byte == crate::rfc2217::COM_PORT_OPTION {
@@ -491,6 +517,10 @@ impl TelnetIacFilter {
                         }
                         WILL => response.extend_from_slice(&[IAC, DONT, byte]),
                         WONT => {
+                            // Same rule as DONT, from the other side.
+                            if self.remote_enabled[byte as usize] {
+                                response.extend_from_slice(&[IAC, DONT, byte]);
+                            }
                             self.remote_enabled[byte as usize] = false;
                             self.remote_requested[byte as usize] = false;
                         }
@@ -506,7 +536,7 @@ impl TelnetIacFilter {
                     if byte == IAC {
                         self.state = TelnetParse::SubnegIac;
                     } else {
-                        self.subneg_data.push(byte);
+                        self.push_subneg_byte(byte);
                     }
                 }
                 TelnetParse::SubnegIac => {
@@ -514,7 +544,7 @@ impl TelnetIacFilter {
                         self.finish_subnegotiation(&mut response);
                         self.state = TelnetParse::Data;
                     } else if byte == IAC {
-                        self.subneg_data.push(IAC);
+                        self.push_subneg_byte(IAC);
                         self.state = TelnetParse::Subneg;
                     } else {
                         self.state = TelnetParse::Subneg;
@@ -526,7 +556,23 @@ impl TelnetIacFilter {
         TelnetFiltered { data, response }
     }
 
+    fn push_subneg_byte(&mut self, byte: u8) {
+        if self.subneg_data.len() < MAX_SUBNEGOTIATION_LEN {
+            self.subneg_data.push(byte);
+        } else {
+            self.subneg_overflow = true;
+        }
+    }
+
     fn finish_subnegotiation(&mut self, response: &mut Vec<u8>) {
+        if self.subneg_overflow {
+            // Truncated, so not something we can act on safely.
+            self.subneg_option = None;
+            self.subneg_data.clear();
+            self.subneg_overflow = false;
+            return;
+        }
+
         if self.subneg_option == Some(TELNET_TERMINAL_TYPE)
             && self.local_enabled[TELNET_TERMINAL_TYPE as usize]
             && self.subneg_data.first() == Some(&TERMINAL_TYPE_SEND)
@@ -670,6 +716,7 @@ mod tests {
     use super::session_event;
     use super::{
         telnet_escape_iac, telnet_escape_outbound, TelnetIacFilter, DO, DONT, IAC, SB, SE,
+        MAX_SUBNEGOTIATION_LEN,
         TELNET_BINARY, TELNET_ECHO, TELNET_NAWS, TELNET_SGA, TELNET_TERMINAL_TYPE,
         TERMINAL_TYPE_SEND, WILL, WONT,
     };
@@ -782,6 +829,68 @@ mod tests {
         let out = filter.push(&[IAC, WONT, 1, IAC, DONT, 3]);
         assert!(out.data.is_empty());
         assert!(out.response.is_empty());
+    }
+
+    #[test]
+    fn telnet_acknowledges_dont_and_wont_for_enabled_options() {
+        let mut filter = TelnetIacFilter::new();
+        filter.push(&[IAC, DO, TELNET_NAWS, IAC, WILL, TELNET_ECHO]);
+        // Turning off an option that is on must be acknowledged (RFC 854),
+        // or the server waits for an answer that never comes.
+        let out = filter.push(&[IAC, DONT, TELNET_NAWS, IAC, WONT, TELNET_ECHO]);
+        assert_eq!(out.response, vec![IAC, WONT, TELNET_NAWS, IAC, DONT, TELNET_ECHO]);
+        // Once off, a repeat is not answered again (no negotiation loop).
+        let again = filter.push(&[IAC, DONT, TELNET_NAWS, IAC, WONT, TELNET_ECHO]);
+        assert!(again.response.is_empty());
+        // NAWS is off, so a resize no longer reports the window.
+        assert!(filter.update_window_size(100, 30).is_empty());
+    }
+
+    #[test]
+    fn telnet_does_not_answer_a_refusal_of_its_own_offer() {
+        let mut filter = TelnetIacFilter::with_com_port(ComPortState::new(SerialParams::default(), false));
+        filter.initial_negotiation();
+        // We offered WILL/DO BINARY; DONT/WONT here is the peer saying no.
+        let out = filter.push(&[IAC, DONT, TELNET_BINARY, IAC, WONT, TELNET_BINARY]);
+        assert!(out.response.is_empty());
+    }
+
+    #[test]
+    fn telnet_drops_the_nul_after_cr_outside_binary_mode() {
+        let mut filter = TelnetIacFilter::new();
+        // RFC 854: a bare CR travels as CR NUL. The NUL is padding, not data,
+        // and left in it corrupts ZMODEM frames received over Telnet.
+        assert_eq!(filter.push(b"a\r\0b\r\nc").data, b"a\rb\r\nc");
+        // The pair can straddle two reads.
+        assert_eq!(filter.push(b"x\r").data, b"x\r");
+        assert_eq!(filter.push(b"\0y").data, b"y");
+        // A NUL that does not follow CR is data.
+        assert_eq!(filter.push(b"\0").data, b"\0");
+    }
+
+    #[test]
+    fn telnet_keeps_the_nul_after_cr_in_binary_mode() {
+        let mut filter = TelnetIacFilter::new();
+        filter.push(&[IAC, WILL, TELNET_BINARY]);
+        assert_eq!(filter.push(b"\r\0").data, b"\r\0");
+    }
+
+    #[test]
+    fn telnet_bounds_the_subnegotiation_buffer() {
+        let mut filter = TelnetIacFilter::new();
+        filter.push(&[IAC, DO, TELNET_TERMINAL_TYPE]);
+        // A peer that opens a subnegotiation and never closes it must not
+        // make us buffer without limit.
+        filter.push(&[IAC, SB, TELNET_TERMINAL_TYPE, TERMINAL_TYPE_SEND]);
+        for _ in 0..64 {
+            filter.push(&[b'z'; 4096]);
+        }
+        assert!(filter.subneg_data.len() <= MAX_SUBNEGOTIATION_LEN);
+        // An oversized block is discarded rather than acted on, and the stream
+        // carries on after it.
+        let out = filter.push(&[IAC, SE, b'o', b'k']);
+        assert!(out.response.is_empty());
+        assert_eq!(out.data, b"ok");
     }
 
     #[test]
