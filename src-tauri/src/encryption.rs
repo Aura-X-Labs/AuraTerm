@@ -668,10 +668,7 @@ pub fn import_credentials_backup(
         .map_err(|e| format!("Failed to parse imported credentials: {}", e))?;
 
     // 加载现有凭据（用当前解锁方式）
-    let mut current_store =
-        load_encrypted_credentials(app, current_secret).unwrap_or(CredentialStore {
-            credentials: Vec::new(),
-        });
+    let mut current_store = load_encrypted_credentials(app, current_secret)?;
 
     // 合并：导入的凭据覆盖现有的同 ID 凭据。
     // 用 drain 取出元素，避免 move out（CredentialStore 因 ZeroizeOnDrop 实现了 Drop）。

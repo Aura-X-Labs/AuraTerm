@@ -791,7 +791,7 @@ pub(crate) fn merge_plain_credentials(store: &impl SyncStore, incoming: Vec<Stor
     if incoming.is_empty() {
         return Ok(0);
     }
-    let mut local = store.credentials().unwrap_or_default();
+    let mut local = store.credentials()?;
     let changed = merge_credentials(&mut local, incoming);
     if changed > 0 {
         store.write_credentials(local)?;
@@ -2283,6 +2283,7 @@ pub(crate) mod tests {
         settings: Mutex<serde_json::Map<String, Value>>,
         known_hosts: Mutex<HashMap<String, String>>,
         credentials: Mutex<Vec<StoredCredential>>,
+        credentials_read_error: bool,
         /// The master password when unlocked, otherwise the skip code.
         envelope_key: Mutex<Result<String, &'static str>>,
         base: Mutex<Option<SyncBase>>,
@@ -2297,6 +2298,7 @@ pub(crate) mod tests {
                 settings: Mutex::new(serde_json::Map::new()),
                 known_hosts: Mutex::new(HashMap::new()),
                 credentials: Mutex::new(Vec::new()),
+                credentials_read_error: false,
                 envelope_key: Mutex::new(Ok(MASTER.to_string())),
                 base: Mutex::new(None),
                 config: SyncConfig {
@@ -2420,6 +2422,9 @@ pub(crate) mod tests {
         }
 
         fn credentials(&self) -> Result<Vec<StoredCredential>, String> {
+            if self.credentials_read_error {
+                return Err("Credential store cannot be decrypted".to_string());
+            }
             Ok(self.credentials.lock().unwrap().clone())
         }
 
@@ -2447,6 +2452,18 @@ pub(crate) mod tests {
         credential.connection_id = id.to_string();
         credential.password = Some(password.to_string());
         credential
+    }
+
+    #[test]
+    fn credential_merge_never_overwrites_an_unreadable_store() {
+        let mut device = FakeDevice::new("http://unused", "unreadable");
+        device.save_password("local", "keep");
+        device.credentials_read_error = true;
+        let error = merge_plain_credentials(&device, vec![credential("remote", "incoming")])
+            .expect_err("an unreadable local store must stop the merge");
+        assert!(error.contains("cannot be decrypted"));
+        assert_eq!(device.password("local").as_deref(), Some("keep"));
+        assert_eq!(device.password("remote"), None);
     }
 
     fn new_vault() -> (MockVault, String) {

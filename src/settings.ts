@@ -278,14 +278,6 @@ export interface AppSettings {
   paneLayout: unknown | null;
   /** Persisted workspace snapshot including tabs and pane layout */
   workspaceState: unknown | null;
-  /** Master password hash (Argon2 format) - managed by backend */
-  masterPasswordHash?: string | null;
-  /** Master password salt (Base64 encoded) - managed by backend */
-  masterPasswordSalt?: string | null;
-  /** Whether credentials have been initialized with encryption */
-  credentialsInitialized?: boolean;
-  /** When a master password is set, cache it in the OS keychain for auto-unlock (macOS/Windows) */
-  rememberMasterPassword?: boolean;
   /** AI assistant configuration (API key excluded; stored encrypted separately) */
   aiConfig: AiConfig;
   /** Live Relay provider policy; defaults keep the device unreachable. */
@@ -616,10 +608,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   restoreTabsOnStartup: false,
   paneLayout: null,
   workspaceState: null,
-  masterPasswordHash: null,
-  masterPasswordSalt: null,
-  credentialsInitialized: false,
-  rememberMasterPassword: false,
   aiConfig: DEFAULT_AI_CONFIG,
   liveRelay: DEFAULT_LIVE_RELAY,
 };
@@ -690,7 +678,7 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     nextTheme.foreground = DEFAULT_THEME.foreground;
   }
 
-  return {
+  const normalized: AppSettings = {
     ...DEFAULT_SETTINGS,
     ...value,
     language: normalizeLanguage(value?.language),
@@ -744,13 +732,13 @@ export function normalizeAppSettings(value?: Partial<AppSettings> | null): AppSe
     restoreTabsOnStartup: value?.restoreTabsOnStartup ?? DEFAULT_SETTINGS.restoreTabsOnStartup,
     paneLayout: value?.paneLayout ?? DEFAULT_SETTINGS.paneLayout,
     workspaceState: value?.workspaceState ?? DEFAULT_SETTINGS.workspaceState,
-    masterPasswordHash: value?.masterPasswordHash ?? DEFAULT_SETTINGS.masterPasswordHash,
-    masterPasswordSalt: value?.masterPasswordSalt ?? DEFAULT_SETTINGS.masterPasswordSalt,
-    credentialsInitialized: value?.credentialsInitialized ?? DEFAULT_SETTINGS.credentialsInitialized,
-    rememberMasterPassword: value?.rememberMasterPassword ?? DEFAULT_SETTINGS.rememberMasterPassword,
     aiConfig: normalizeAiConfig(value?.aiConfig),
     liveRelay: normalizeLiveRelay(value?.liveRelay),
   };
+  for (const key of ["masterPasswordHash", "masterPasswordSalt", "credentialsInitialized", "rememberMasterPassword"]) {
+    Reflect.deleteProperty(normalized, key);
+  }
+  return normalized;
 }
 
 export function normalizeLiveRelay(value?: Partial<LiveRelaySettings> | null): LiveRelaySettings {
