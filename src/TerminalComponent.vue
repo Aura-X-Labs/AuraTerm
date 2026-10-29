@@ -199,7 +199,9 @@ function buildTerminalTheme(settings: AppSettings) {
 }
 
 const effectiveSettings = computed(() => props.settings ?? DEFAULT_SETTINGS);
-const settingsRef = ref<AppSettings>(effectiveSettings.value);
+// Settings are replaced wholesale (App.vue keeps them in a shallowRef), so a
+// plain alias always reads the current object without a deep watch/proxy.
+const settingsRef = effectiveSettings;
 const terminalRootRef = ref<HTMLDivElement | null>(null);
 const ptyId = ref<string | null>(null);
 const osType = ref("unknown");
@@ -472,10 +474,6 @@ function queueLogChunk(path: string, chunk: string) {
   }, LOG_FLUSH_INTERVAL_MS);
 }
 
-watch(effectiveSettings, (value) => {
-  settingsRef.value = value;
-}, { deep: true, immediate: true });
-
 watch(() => props.logPath, (value) => {
   logPathRef.value = value;
 });
@@ -502,16 +500,32 @@ watch(activeSession, (session) => {
   activeSessionRef.value = session;
 }, { deep: true, immediate: true });
 
-watch(effectiveSettings, (value) => {
-  if (!terminal) {
-    return;
-  }
-  terminal.options.fontSize = value.fontSize;
-  terminal.options.fontFamily = value.fontFamily;
-  terminal.options.scrollback = value.scrollback;
-  terminal.options.theme = buildTerminalTheme(value);
-  fit();
-}, { deep: true });
+// Every settings save (including workspace autosaves after a tab drag or
+// split resize) hands each terminal a new settings object. Only touch xterm
+// when an option it renders actually changed: assigning the theme repaints
+// the whole terminal, hidden tabs included.
+watch(
+  [
+    () => effectiveSettings.value.fontSize,
+    () => effectiveSettings.value.fontFamily,
+    () => effectiveSettings.value.scrollback,
+    () => JSON.stringify(effectiveSettings.value.theme),
+  ],
+  ([fontSize, fontFamily, scrollback, theme], [oldFontSize, oldFontFamily, oldScrollback, oldTheme]) => {
+    if (!terminal) {
+      return;
+    }
+    if (fontSize !== oldFontSize) terminal.options.fontSize = fontSize;
+    if (fontFamily !== oldFontFamily) terminal.options.fontFamily = fontFamily;
+    if (scrollback !== oldScrollback) terminal.options.scrollback = scrollback;
+    if (theme !== oldTheme) terminal.options.theme = buildTerminalTheme(effectiveSettings.value);
+    // Hidden terminals have no size to fit to; the isVisible watch refits
+    // them when they are shown.
+    if (props.isVisible && (fontSize !== oldFontSize || fontFamily !== oldFontFamily)) {
+      fit();
+    }
+  },
+);
 
 watch(() => props.isFocused, (isFocused) => {
   if (!isFocused || !props.isVisible) {
