@@ -1857,9 +1857,10 @@ function rememberSerialConfig(serialConfig: SerialConfig) {
 }
 
 function sendToActiveTerminal(text: string, raw = false) {
-  const handle = termRefs.get(activeTabId.value);
+  const sourceTabId = activeTabId.value;
+  const handle = termRefs.get(sourceTabId);
   if (handle) {
-    sendInputText(handle, text, raw);
+    sendInputText(handle, text, raw, (data) => handleBroadcastInput(sourceTabId, data));
   }
 }
 

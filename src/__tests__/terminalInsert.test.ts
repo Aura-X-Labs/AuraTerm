@@ -27,6 +27,13 @@ describe("terminal text routing", () => {
     expect(handle.pasteText).not.toHaveBeenCalled();
   });
 
+  it("hands raw input-bar text to the broadcast fan-out, which xterm's onData no longer reaches", () => {
+    const handle = fakeHandle();
+    const broadcast = vi.fn();
+    sendInputText(handle, "\x03", true, broadcast);
+    expect(broadcast).toHaveBeenCalledExactlyOnceWith("\x03");
+  });
+
   it("sends line-mode input-bar text through sendData", () => {
     const handle = fakeHandle();
     sendInputText(handle, "ls\n", false);
