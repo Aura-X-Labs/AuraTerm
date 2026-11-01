@@ -691,6 +691,38 @@ describe("TerminalComponent", () => {
     wrapper.unmount();
   });
 
+  it("retries a resize the backend rejected instead of deduping it away", async () => {
+    const wrapper = mount(TerminalComponent, {
+      global: { plugins: [i18n] },
+      props: {
+        sessionId: "local-session-resize-retry",
+        isVisible: true,
+        isFocused: true,
+        session: { protocol: "local" } satisfies SessionConfig,
+        settings: DEFAULT_SETTINGS,
+      },
+    });
+    await flushPromises();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // As a Telnet session does while it is still connecting.
+    mockState.resizeSession.mockRejectedValueOnce(new Error("Telnet session not found"));
+    mockState.terminals[0].emitResize(100, 40);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(mockState.resizeSession).toHaveBeenCalledTimes(1);
+
+    // The same grid is sent again on the next resize, now that it can land.
+    window.dispatchEvent(new Event("resize"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(mockState.resizeSession).toHaveBeenCalledTimes(2);
+    expect(mockState.resizeSession).toHaveBeenLastCalledWith(
+      "local-session-resize-retry", 100, 40, expect.anything(),
+    );
+
+    wrapper.unmount();
+    consoleError.mockRestore();
+  });
+
   it("only reapplies terminal options when terminal-relevant settings change", async () => {
     const wrapper = mount(TerminalComponent, {
       global: { plugins: [i18n] },

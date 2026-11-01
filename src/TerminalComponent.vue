@@ -386,8 +386,15 @@ function flushSessionResize() {
   if (lastSentResize && lastSentResize.id === id && lastSentResize.cols === cols && lastSentResize.rows === rows) {
     return;
   }
-  lastSentResize = { id, cols, rows };
+  const sent = { id, cols, rows };
+  lastSentResize = sent;
   void resizeSession(id, cols, rows, activeSessionRef.value).catch((error) => {
+    // Rejected (a Telnet session still connecting has nothing to resize), so
+    // the backend never got this size: let the next resize send it again.
+    // A newer request owns the record by now and is left alone.
+    if (lastSentResize === sent) {
+      lastSentResize = null;
+    }
     console.error("resize failed", error);
   });
 }
