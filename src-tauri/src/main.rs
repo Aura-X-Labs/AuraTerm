@@ -9,6 +9,7 @@ use base64::Engine as _;
 use std::ffi::CStr;
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter, Manager, State};
 
@@ -59,7 +60,38 @@ struct AppState {
     /// Owns every local PTY session; shared seam for the Tauri UI today and
     /// the Cloud Console agent later.
     broker: Arc<PtyBroker>,
+    /// Each local tab's Tauri UI adapters, retired when the tab's PTY closes.
+    ui_adapters: Arc<Mutex<HashMap<String, Vec<terminal_event_hub::SubscriptionToken>>>>,
     startup_dir: Arc<Mutex<Option<String>>>,
+}
+
+impl AppState {
+    fn retire_ui_adapter(&self, id: &str, subscription: &terminal_event_hub::SubscriptionToken) {
+        self.broker.hub().unsubscribe(subscription);
+        let mut adapters = self.ui_adapters.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tokens) = adapters.get_mut(id) {
+            tokens.retain(|token| token != subscription);
+            if tokens.is_empty() {
+                adapters.remove(id);
+            }
+        }
+    }
+
+    /// Unsubscribe every UI adapter of `id`. A closed session's stream runs on
+    /// until its killed shell's reader sees EOF; an adapter left subscribed
+    /// would emit that session's `pty-exit:<id>` and output to a restarted tab
+    /// listening on the same id.
+    fn retire_ui_adapters(&self, id: &str) {
+        let tokens = self
+            .ui_adapters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id)
+            .unwrap_or_default();
+        for token in &tokens {
+            self.broker.hub().unsubscribe(token);
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -238,10 +270,21 @@ async fn start_pty(
     if !distribution::LOCAL_SHELL {
         return Err(distribution::LOCAL_SHELL_UNAVAILABLE.to_string());
     }
+    // First, so a close_pty from a tab closed while the shell spawns cancels
+    // this open instead of finding nothing to close.
+    let ticket = state.broker.begin_open(&id);
     let shell_path = resolve_local_shell_path(&app);
     zmodem.reset_session(&id);
-    // Subscribe before opening so the first prompt bytes cannot be missed.
+    // Subscribe before opening so the first prompt bytes cannot be missed,
+    // and record the adapter before opening so a close retires it either way.
     let subscription = attach_tauri_ui_adapter(&app, &state.broker, zmodem.inner(), &id);
+    state
+        .ui_adapters
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(id.clone())
+        .or_default()
+        .push(subscription.clone());
 
     let request = OpenTerminalRequest {
         session_id: id.clone(),
@@ -249,10 +292,10 @@ async fn start_pty(
         shell_path,
         cwd,
     };
-    if let Err(error) = state.broker.open(request) {
+    if let Err(error) = state.broker.open_started(&ticket, request) {
         // Only our own subscription: when the id is still open, the others
         // belong to that live session.
-        state.broker.hub().unsubscribe(&subscription);
+        state.retire_ui_adapter(&id, &subscription);
         return Err(error);
     }
 
@@ -288,6 +331,8 @@ fn close_pty(
     zmodem: State<'_, zmodem::ZmodemState>,
     id: String,
 ) -> Result<(), String> {
+    // Before closing, so the killed shell's exit cannot reach the UI.
+    state.retire_ui_adapters(&id);
     state.broker.close(&id, CloseReason::LocalRequest)?;
     zmodem.reset_session(&id);
     Ok(())
@@ -956,6 +1001,7 @@ fn main() {
     let telnet_state = telnet::TelnetState::new(event_hub.clone());
     let app_state = AppState {
         broker: Arc::new(PtyBroker::new(Box::new(PortablePtyAdapter), event_hub.clone())),
+        ui_adapters: Arc::new(Mutex::new(HashMap::new())),
         startup_dir: Arc::new(Mutex::new(startup_dir)),
     };
     let shared_port: Arc<dyn shared_session::SharedSessionPort> = Arc::new(

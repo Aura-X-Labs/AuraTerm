@@ -29,6 +29,7 @@ use std::thread;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::terminal_event_hub::{SubscriptionMark, TerminalEvent, TerminalEventHub};
+use crate::util::{PendingStarts, StartTicket, CLOSED_WHILE_CONNECTING};
 
 pub type TerminalError = String;
 
@@ -109,6 +110,8 @@ pub struct PtyBroker {
     port: Box<dyn LocalTerminalPort>,
     hub: Arc<TerminalEventHub>,
     sessions: Mutex<HashMap<String, SessionEntry>>,
+    /// Opens still spawning their shell, which `close` cancels.
+    starts: PendingStarts,
 }
 
 impl PtyBroker {
@@ -117,6 +120,7 @@ impl PtyBroker {
             port,
             hub,
             sessions: Mutex::new(HashMap::new()),
+            starts: PendingStarts::default(),
         }
     }
 
@@ -126,7 +130,28 @@ impl PtyBroker {
 
     /// Open a new session and start pumping its raw output into the hub.
     /// Subscribe to the hub *before* calling this to observe the first bytes.
+    #[allow(dead_code)] // used by tests and the Cloud Console agent (next phase)
     pub fn open(&self, request: OpenTerminalRequest) -> Result<(), TerminalError> {
+        let ticket = self.begin_open(&request.session_id);
+        self.open_started(&ticket, request)
+    }
+
+    /// Record that `session_id` is about to open, so a `close` that arrives
+    /// while the shell is still spawning cancels the open rather than finding
+    /// nothing to close. Take the ticket as early as possible, then pass it to
+    /// [`open_started`](Self::open_started).
+    pub fn begin_open(&self, session_id: &str) -> StartTicket {
+        self.starts.begin(session_id)
+    }
+
+    /// [`open`](Self::open) under a ticket from [`begin_open`](Self::begin_open).
+    /// Fails with [`CLOSED_WHILE_CONNECTING`], and kills the shell it spawned,
+    /// when the session was closed before it could be registered.
+    pub fn open_started(
+        &self,
+        ticket: &StartTicket,
+        request: OpenTerminalRequest,
+    ) -> Result<(), TerminalError> {
         let session_id = request.session_id.clone();
         {
             let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
@@ -143,6 +168,13 @@ impl PtyBroker {
         let closed_at = Arc::new(Mutex::new(SubscriptionMark::ALL));
         {
             let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+            // Checked under the session lock, which `close` cancels under: a
+            // close either sees this session registered or has cancelled it.
+            if ticket.is_cancelled() {
+                drop(sessions);
+                let _ = handle.close(CloseReason::LocalRequest);
+                return Err(CLOSED_WHILE_CONNECTING.to_string());
+            }
             sessions.insert(
                 session_id.clone(),
                 SessionEntry {
@@ -231,11 +263,13 @@ impl PtyBroker {
         entry.handle.resize(bounded)
     }
 
-    /// Close and forget the session. Idempotent: closing an unknown session is
-    /// a no-op. The backend's read loop delivers the final `Exit` event.
+    /// Close and forget the session, or cancel its open if the shell is still
+    /// spawning. Idempotent: closing an unknown session is a no-op. The
+    /// backend's read loop delivers the final `Exit` event.
     pub fn close(&self, session_id: &str, reason: CloseReason) -> Result<(), TerminalError> {
         let entry = {
             let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+            self.starts.cancel(session_id);
             let entry = sessions.remove(session_id);
             // Marked under the session lock, before the id can be reopened:
             // anything subscribed from here on is for a newer session.
@@ -776,6 +810,35 @@ mod tests {
             TerminalEvent::Output(b"new prompt".to_vec())
         );
         assert!(old_events.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn a_close_while_the_shell_spawns_cancels_the_open() {
+        let (adapter, broker, _hub) = scripted_broker();
+        // start_pty takes its ticket, then the tab closes before the open
+        // (fork/exec) finishes: close finds no session to close yet.
+        let ticket = broker.begin_open("s1");
+        broker.close("s1", CloseReason::LocalRequest).unwrap();
+
+        let result = broker.open_started(&ticket, open_request("s1"));
+
+        assert_eq!(result, Err(CLOSED_WHILE_CONNECTING.to_string()));
+        assert!(!broker.contains("s1"));
+        // The shell it did spawn is killed, not left running tab-less.
+        let state = adapter.state.lock().unwrap();
+        assert_eq!(state.opens.len(), 1);
+        assert_eq!(state.closes, vec![("s1".to_string(), CloseReason::LocalRequest)]);
+    }
+
+    #[test]
+    fn a_close_before_a_restart_leaves_the_restart_alone() {
+        let (_adapter, broker, _hub) = scripted_broker();
+        broker.open(open_request("s1")).unwrap();
+        // Restart: the old session is closed before the new open begins.
+        broker.close("s1", CloseReason::LocalRequest).unwrap();
+        let ticket = broker.begin_open("s1");
+        broker.open_started(&ticket, open_request("s1")).unwrap();
+        assert!(broker.contains("s1"));
     }
 
     /// A paste larger than the PTY input buffer, sent while the foreground
