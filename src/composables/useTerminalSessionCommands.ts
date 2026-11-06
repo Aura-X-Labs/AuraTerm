@@ -213,7 +213,8 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
       // 2. Fallback: match an existing SSH bookmark by host/port/user so that
       //    quick-connect reconnects for a known server also update the stored
       //    password (only when exactly one candidate exists — otherwise we
-      //    would silently mutate the wrong bookmark).
+      //    would silently mutate the wrong bookmark). With none or several
+      //    matches the new password only lasts for the current session.
       if (!target) {
         const candidates = connections.filter(
           (connection) =>
@@ -224,20 +225,10 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
         );
         if (candidates.length === 1) {
           target = candidates[0];
-          console.info(
-            `[password-retry] matched bookmark "${target.name}" by host/port/user; updating its stored password`,
-          );
-        } else if (candidates.length > 1) {
-          console.warn(
-            `[password-retry] ${candidates.length} bookmarks match ${sshConfig.user}@${sshConfig.host}:${sshConfig.port}; skipping persistence to avoid ambiguous overwrite`,
-          );
         }
       }
 
       if (!target) {
-        console.info(
-          `[password-retry] no saved bookmark found for ${sshConfig.user}@${sshConfig.host}:${sshConfig.port}; new password will only last for the current session`,
-        );
         return;
       }
 
@@ -250,7 +241,6 @@ export function useTerminalSessionCommands({ onSshPasswordUpdated }: UseTerminal
           password: sshConfig.password,
         },
       });
-      console.info(`[password-retry] password for bookmark "${target.name}" updated`);
       onSshPasswordUpdated();
     } catch (error) {
       console.error("Failed to persist updated SSH password", error);
