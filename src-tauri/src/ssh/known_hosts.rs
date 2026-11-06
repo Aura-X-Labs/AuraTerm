@@ -187,6 +187,38 @@ pub(super) async fn append_host_key_override_audit_log(
     old_fingerprint: &str,
     new_fingerprint: &str,
 ) -> Result<(), String> {
+    append_security_audit_log(
+        app,
+        &format!(
+            "event=ssh_host_key_override host={host} port={port} old_summary=\"{}\" new_summary=\"{}\" old=\"{}\" new=\"{}\"",
+            summarize_fingerprint(old_fingerprint),
+            summarize_fingerprint(new_fingerprint),
+            old_fingerprint,
+            new_fingerprint,
+        ),
+    )
+    .await
+}
+
+/// Record a host key trusted on first use, so a key that was accepted without
+/// a prompt can still be traced back to when it was first seen.
+pub(super) async fn append_host_key_first_trust_audit_log(
+    app: &AppHandle,
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+) -> Result<(), String> {
+    append_security_audit_log(
+        app,
+        &format!(
+            "event=ssh_host_key_first_trust host={host} port={port} summary=\"{}\" fingerprint=\"{fingerprint}\"",
+            summarize_fingerprint(fingerprint),
+        ),
+    )
+    .await
+}
+
+async fn append_security_audit_log(app: &AppHandle, event: &str) -> Result<(), String> {
     let config_dir = app
         .path()
         .app_config_dir()
@@ -202,13 +234,7 @@ pub(super) async fn append_host_key_override_audit_log(
     let timestamp_secs = now.as_secs();
     let timestamp_millis = now.subsec_millis();
 
-    let line = format!(
-        "ts_unix={timestamp_secs}.{timestamp_millis:03} event=ssh_host_key_override host={host} port={port} old_summary=\"{}\" new_summary=\"{}\" old=\"{}\" new=\"{}\"\n",
-        summarize_fingerprint(old_fingerprint),
-        summarize_fingerprint(new_fingerprint),
-        old_fingerprint,
-        new_fingerprint,
-    );
+    let line = format!("ts_unix={timestamp_secs}.{timestamp_millis:03} {event}\n");
 
     let mut file = fs::OpenOptions::new()
         .create(true)
