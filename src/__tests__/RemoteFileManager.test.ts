@@ -165,3 +165,44 @@ describe("RemoteFileManager uploads", () => {
     wrapper.unmount();
   });
 });
+
+describe("RemoteFileManager large directories", () => {
+  it("renders a big listing in pages as the list is scrolled", async () => {
+    const entries = Array.from({ length: 450 }, (_, index) => ({
+      name: `file-${index}`,
+      path: `/data/file-${index}`,
+      kind: "file",
+      isDir: false,
+      size: index,
+      modifiedAt: null,
+      permissions: "-rw-r--r--",
+    }));
+    tauri.invoke.mockImplementation((command: string) => (
+      command === "ssh_list_remote_dir"
+        ? Promise.resolve({ path: "/data", parent: "/", entries })
+        : Promise.resolve()
+    ));
+    const wrapper = mount(RemoteFileManager, {
+      props: { sessionId: "tab-1", sshConfig },
+      global: { plugins: [i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    const rows = () => wrapper.findAll(".remote-file-manager-row");
+    expect(rows()).toHaveLength(200);
+
+    // jsdom has no layout: fake a list scrolled to its end.
+    const list = wrapper.get(".remote-file-manager-list").element as HTMLElement;
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 500 });
+    list.scrollTop = 500;
+    await wrapper.get(".remote-file-manager-list").trigger("scroll");
+    expect(rows()).toHaveLength(400);
+
+    await wrapper.get(".remote-file-manager-list").trigger("scroll");
+    await wrapper.get(".remote-file-manager-list").trigger("scroll");
+    expect(rows()).toHaveLength(450);
+    wrapper.unmount();
+  });
+});
