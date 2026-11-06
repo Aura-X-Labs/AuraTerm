@@ -626,6 +626,7 @@ fn drive_receiver(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn maybe_emit_progress(
     app: &AppHandle,
     id: &str,
@@ -653,6 +654,7 @@ fn maybe_emit_progress(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_event(
     app: &AppHandle,
     id: &str,

@@ -164,7 +164,7 @@ pub async fn connect_relay(relay_url: &str, ticket: &str) -> Result<RelayAdmissi
         .await
         .map_err(|e| format!("relay connection failed: {e}"))?;
     let (mut sink, mut stream) = socket.split();
-    sink.send(Message::Text(json!({"kind": "AUTH", "ticket": ticket}).to_string().into()))
+    sink.send(Message::Text(json!({"kind": "AUTH", "ticket": ticket}).to_string()))
         .await
         .map_err(|e| format!("relay AUTH failed: {e}"))?;
     let auth = recv_text(&mut stream).await?;
@@ -221,12 +221,14 @@ pub fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
         }
     }
     let bytes = value.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("odd hex length".into());
     }
     bytes
-        .chunks_exact(2)
-        .map(|pair| Ok((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[high, low]| Ok((nibble(*high)? << 4) | nibble(*low)?))
         .collect()
 }
 
@@ -381,7 +383,7 @@ impl RemoteTabs {
         let _guard = cipher.send_lock.lock().await;
         let envelope = cipher.encrypt(&scope_id, &connection_id, self.protocol.own_direction, &frame)?;
         outbound
-            .send(Message::Text(envelope.to_string().into()))
+            .send(Message::Text(envelope.to_string()))
             .await
             .map_err(|_| "relay connection is closed".to_string())
     }
@@ -826,10 +828,10 @@ mod tests {
             let (mut sink, mut stream) = ws.split();
             let Some(Ok(Message::Text(_auth))) = stream.next().await else { return };
             let _ = sink
-                .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": CONNECTION}).to_string().into()))
+                .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": CONNECTION}).to_string()))
                 .await;
             for frame in frames {
-                let _ = sink.send(Message::Text(frame.to_string().into())).await;
+                let _ = sink.send(Message::Text(frame.to_string())).await;
             }
             while let Some(Ok(message)) = stream.next().await {
                 if let Message::Text(text) = message {

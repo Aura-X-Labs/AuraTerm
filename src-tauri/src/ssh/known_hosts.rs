@@ -71,7 +71,7 @@ impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
     fn check_server_key(
-        self: &mut Self,
+        &mut self,
         server_public_key: &russh::keys::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         let observed = self.observed_fingerprint.clone();

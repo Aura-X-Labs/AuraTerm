@@ -311,11 +311,15 @@ pub(crate) fn local_port_builder(
         .flow_control(params.flow_control_enum()))
 }
 
+/// An open port: the link that reads and controls it, and the sink that
+/// writes to it.
+pub type OpenedLink = (Box<dyn SerialLink>, Arc<dyn SerialSink>);
+
 /// Open a port on this machine.
 pub fn open_local(
     port_name: &str,
     params: SerialParams,
-) -> Result<(Box<dyn SerialLink>, Arc<dyn SerialSink>), String> {
+) -> Result<OpenedLink, String> {
     let port = local_port_builder(port_name, params)?
         .open()
         .map_err(|error| error.to_string())?;
@@ -602,7 +606,7 @@ impl SerialLink for NetSerialLink {
         let data = self
             .sink
             .feed(&self.scratch[..read])
-            .map_err(|error| std::io::Error::other(error))?;
+            .map_err(std::io::Error::other)?;
 
         // A chunk that was pure negotiation leaves nothing for the terminal.
         if data.is_empty() {

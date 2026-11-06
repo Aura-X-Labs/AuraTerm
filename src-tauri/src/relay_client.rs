@@ -643,7 +643,7 @@ fn open_refusal(reason: Option<&str>) -> String {
         "unknown_target" => "That device no longer offers this target.".into(),
         "busy" => "That device already has as many peers as it allows.".into(),
         "denied" => "The other device declined the request.".into(),
-        other if other.is_empty() => "The other device declined the request.".into(),
+        "" => "The other device declined the request.".into(),
         other => format!("The other device declined the request ({other})."),
     }
 }
@@ -774,7 +774,7 @@ mod tests {
                     assert_eq!(auth["kind"], "AUTH");
                     assert_eq!(auth["ticket"], "tick-relay");
                     let _ = sink
-                        .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": CONNECTION_ID, "session_id": SESSION_ID, "role": "relay_viewer"}).to_string().into()))
+                        .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": CONNECTION_ID, "session_id": SESSION_ID, "role": "relay_viewer"}).to_string()))
                         .await;
                     // Provider handshake: the consumer key arrived via the grant.
                     let peer_public = loop {
@@ -787,7 +787,7 @@ mod tests {
                     let context = e2ee_context(PROVIDER_DEVICE, SESSION_ID, CONNECTION_ID, &peer_public, &agent_public);
                     let proof = ed25519_sign_b64(&URL_SAFE_NO_PAD.encode(PROVIDER_SEED), &context).unwrap();
                     let _ = sink
-                        .send(Message::Text(json!({"kind": "E2EE_READY", "connection_id": CONNECTION_ID, "agent_public_key": agent_public, "proof": proof}).to_string().into()))
+                        .send(Message::Text(json!({"kind": "E2EE_READY", "connection_id": CONNECTION_ID, "agent_public_key": agent_public, "proof": proof}).to_string()))
                         .await;
                     for frame in [
                         json!({"kind": "RELAY_STATE", "state": "active", "role": "viewer",
@@ -802,7 +802,7 @@ mod tests {
                             break;
                         }
                         let envelope = cipher.encrypt(SESSION_ID, CONNECTION_ID, DIRECTION_AGENT, &frame).unwrap();
-                        let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+                        let _ = sink.send(Message::Text(envelope.to_string())).await;
                     }
                     if hangup_first && nth == 1 {
                         return;

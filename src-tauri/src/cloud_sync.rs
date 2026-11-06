@@ -180,7 +180,9 @@ fn sync_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join(SYNC_CONFIG_FILE))
 }
 
-/// What `sync_config.enc` holds.
+/// What `sync_config.enc` holds. Only ever returned and matched on the spot,
+/// so the large variant is not worth boxing.
+#[allow(clippy::large_enum_variant)]
 enum ConfigFile {
     Missing,
     Readable(SyncConfig),
@@ -2082,8 +2084,7 @@ pub(crate) mod tests {
 
     #[test]
     fn config_view_redacts_the_account_credential() {
-        let mut config = SyncConfig::default();
-        config.provider = "auraxlab".to_string();
+        let mut config = SyncConfig { provider: "auraxlab".to_string(), ..Default::default() };
         config.auraxlab.token = "axsync_secret".to_string();
         config.auraxlab.username = "alice".to_string();
         let view = SyncConfigView::from_config(&config, "masterPassword", true);
@@ -2098,10 +2099,12 @@ pub(crate) mod tests {
 
     #[test]
     fn input_patch_touches_only_the_editable_fields() {
-        let mut config = SyncConfig::default();
-        config.provider = "auraxlab".into();
+        let mut config = SyncConfig {
+            provider: "auraxlab".into(),
+            device_id: "dev-1".into(),
+            ..Default::default()
+        };
         config.auraxlab.token = "axsync_keep".into();
-        config.device_id = "dev-1".into();
         apply_input(
             &mut config,
             SyncSettingsInput {
@@ -2157,14 +2160,12 @@ pub(crate) mod tests {
         assert!(!serde_json::to_string(&config).unwrap().contains("ghp_secret"));
 
         // Signed in to AuraXLab as well: keep syncing through the account.
-        let mut config = SyncConfig::default();
-        config.provider = "webdav".into();
+        let mut config = SyncConfig { provider: "webdav".into(), ..Default::default() };
         config.auraxlab.token = "axsync_x".into();
         assert!(migrate_removed_providers(&mut config));
         assert_eq!(config.provider, "auraxlab");
 
-        let mut config = SyncConfig::default();
-        config.provider = "auraxlab".into();
+        let mut config = SyncConfig { provider: "auraxlab".into(), ..Default::default() };
         assert!(!migrate_removed_providers(&mut config));
         assert!(!config.legacy_provider_notice);
     }

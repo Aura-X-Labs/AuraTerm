@@ -154,6 +154,20 @@ impl PeerCipher {
     }
 }
 
+/// Short authentication string over a derived per-connection key, shown on
+/// both ends of a Live Relay tab so users can compare out of band (same
+/// visual shape as the Remote Assist fingerprint). Domain-separated by
+/// `label` so keys from different features can never collide visually.
+pub fn sas_fingerprint(key: &[u8; 32], label: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update(key);
+    let digest = hasher.finalize();
+    let raw = crate::pake::base32_no_pad(&digest[..5]);
+    format!("{}-{}", &raw[..4], &raw[4..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,18 +224,4 @@ mod tests {
         assert!(host.decrypt("s", "c", DIRECTION_GUEST, &forged).is_err());
         assert_eq!(host.decrypt("s", "c", DIRECTION_GUEST, &real).unwrap()["n"], 1);
     }
-}
-
-/// Short authentication string over a derived per-connection key, shown on
-/// both ends of a Live Relay tab so users can compare out of band (same
-/// visual shape as the Remote Assist fingerprint). Domain-separated by
-/// `label` so keys from different features can never collide visually.
-pub fn sas_fingerprint(key: &[u8; 32], label: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(label.as_bytes());
-    hasher.update(key);
-    let digest = hasher.finalize();
-    let raw = crate::pake::base32_no_pad(&digest[..5]);
-    format!("{}-{}", &raw[..4], &raw[4..])
 }

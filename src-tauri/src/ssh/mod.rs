@@ -894,6 +894,7 @@ fn app_prompt_sink(app: AppHandle, id: String) -> PromptSink {
 }
 
 /// Authenticate an SSH session and return a connected handle.
+#[allow(clippy::too_many_arguments)]
 fn authenticate_ssh(
     host: String,
     port: u16,
@@ -1153,7 +1154,7 @@ fn authenticate_connected_session<'a>(
             match next_auth_factor(&remaining, &accepted, decoded_key.is_some() || method == "agent", password.is_some()) {
                 Some(next) => next,
                 None => {
-                    let offered = remaining.iter().map(|kind| <&str>::from(kind)).collect::<Vec<_>>().join(", ");
+                    let offered = remaining.iter().map(<&str>::from).collect::<Vec<_>>().join(", ");
                     return Err(ConnectError::terminal(format!(
                         "The server requires another authentication step ({offered}) that this connection cannot provide"
                     )));
@@ -1583,6 +1584,7 @@ async fn open_pty_channel(
     Ok((channel, false))
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn start_ssh_pty(
     app: AppHandle,
@@ -1910,6 +1912,7 @@ fn is_auth_error(err: &str) -> bool {
 /// Connect once to SSH, open a PTY, and spawn the IO loop.
 /// Returns Ok(auth_response_rx) on success (ownership moved into caller for reuse),
 /// or Err on failure.
+#[allow(clippy::too_many_arguments)]
 fn do_single_ssh_connect(
     app: AppHandle,
     state: SshState,
@@ -2216,6 +2219,7 @@ fn line_input(value: &str) -> String {
 }
 
 /// Drive the SSH channel: forward data to the frontend, forward input/resize to the channel.
+#[allow(clippy::too_many_arguments)]
 async fn run_channel_io_loop(
     app: AppHandle,
     state: SshState,
@@ -2504,8 +2508,8 @@ pub async fn import_known_hosts(
     known_hosts::update_known_hosts(app, |store| {
         let mut added = 0usize;
         for (scope, fingerprint) in incoming {
-            if !store.hosts.contains_key(&scope) {
-                store.hosts.insert(scope, fingerprint);
+            if let std::collections::hash_map::Entry::Vacant(e) = store.hosts.entry(scope) {
+                e.insert(fingerprint);
                 added += 1;
             }
         }
@@ -2672,7 +2676,9 @@ mod tests {
         }
 
         let locked = ssh_generate_key_pair(Some("right".to_string()), None).unwrap();
-        let cases: [(&str, Option<&str>, Option<&str>, Option<&str>); 3] = [
+        // (auth type, password, private key, passphrase)
+        type Case<'a> = (&'a str, Option<&'a str>, Option<&'a str>, Option<&'a str>);
+        let cases: [Case; 3] = [
             ("key", None, Some(locked.private_key.as_str()), Some("wrong")),
             ("key", None, Some(locked.private_key.as_str()), None),
             ("password", None, None, None),

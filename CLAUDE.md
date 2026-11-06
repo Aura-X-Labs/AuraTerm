@@ -19,6 +19,7 @@ npm run build          # Vue TSC type-check + Vite production build (use to vali
 ### Rust / Tauri backend
 ```bash
 cd src-tauri && cargo check    # Validate Rust changes without a full build
+cd src-tauri && cargo clippy --all-targets -- -D warnings   # Lint (CI fails on any warning)
 cd src-tauri && cargo build    # Compile the Rust backend
 ```
 
@@ -67,7 +68,7 @@ Plus the two checks that are not test suites:
 
 Anything touching a live terminal, PTY, or real SSH/serial connection is still verified by hand with `npm run tauri dev` — none of that is covered above.
 
-The CI pipeline (`.github/workflows/ci.yml`) has three jobs: **lint** (type-check + frontend tests + release-script tests), **rust-check** (`cargo check` + `cargo test`), and **build** (full Tauri builds across Ubuntu, macOS arm64, and Windows — macOS x64/Intel is no longer supported).
+The CI pipeline (`.github/workflows/ci.yml`) has three jobs: **lint** (type-check + frontend tests + release-script tests), **rust-check** (`cargo check` + `cargo clippy -D warnings` + `cargo test`), and **build** (full Tauri builds across Ubuntu, macOS arm64, and Windows — macOS x64/Intel is no longer supported).
 
 ---
 

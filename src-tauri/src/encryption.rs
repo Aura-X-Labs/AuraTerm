@@ -1574,7 +1574,7 @@ mod tests {
         let blob = encrypt_share_blob(b"bundle", "SECRETCODE12").unwrap();
         assert_eq!(blob[8], ENVELOPE_V2);
         assert_eq!(KdfParams::decode(&blob[9..21]).unwrap(), KdfParams::STRONG);
-        assert!(KdfParams::STRONG.m_kib > KdfParams::LEGACY.m_kib);
+        const { assert!(KdfParams::STRONG.m_kib > KdfParams::LEGACY.m_kib) };
         assert_eq!(decrypt_share_blob(&blob, "SECRETCODE12").unwrap(), b"bundle");
         assert!(decrypt_share_blob(&blob, "WRONGCODE123").is_err());
 
