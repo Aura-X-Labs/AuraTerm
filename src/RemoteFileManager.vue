@@ -47,6 +47,12 @@ const editorLoading = ref(false);
 const editorSaving = ref(false);
 const cleanupFns: UnlistenFn[] = [];
 
+// Directories with thousands of entries render in pages: the first page right
+// away, the next one whenever the list is scrolled near its end.
+const ENTRY_RENDER_PAGE = 200;
+const entryRenderLimit = ref(ENTRY_RENDER_PAGE);
+const visibleEntries = computed(() => entries.value.slice(0, entryRenderLimit.value));
+
 const selectedEntry = computed(() => (
   entries.value.find((entry: RemoteFileEntry) => entry.path === selectedPath.value) ?? null
 ));
@@ -276,6 +282,7 @@ async function loadDirectory(path?: string | null) {
     currentPath.value = listing.path;
     parentPath.value = listing.parent ?? null;
     entries.value = listing.entries;
+    entryRenderLimit.value = ENTRY_RENDER_PAGE;
     if (!entries.value.some((entry: RemoteFileEntry) => entry.path === selectedPath.value)) {
       selectedPath.value = null;
     }
@@ -284,6 +291,16 @@ async function loadDirectory(path?: string | null) {
     setError(error);
   } finally {
     loading.value = false;
+  }
+}
+
+function handleFileListScroll() {
+  const element = fileListRef.value;
+  if (!element || entryRenderLimit.value >= entries.value.length) {
+    return;
+  }
+  if (element.scrollTop + element.clientHeight >= element.scrollHeight - 400) {
+    entryRenderLimit.value += ENTRY_RENDER_PAGE;
   }
 }
 
@@ -711,6 +728,7 @@ onBeforeUnmount(() => {
       ref="fileListRef"
       class="remote-file-manager-list"
       :class="{ 'dragging-files': draggingFiles }"
+      @scroll.passive="handleFileListScroll"
     >
       <div v-if="draggingFiles" class="remote-file-manager-drop-hint">{{ $t('remoteFiles.dropHint', { path: currentPath }) }}</div>
       <div class="remote-file-manager-list-head">
@@ -723,7 +741,7 @@ onBeforeUnmount(() => {
       <div v-else-if="entries.length === 0" class="remote-file-manager-empty">{{ $t('remoteFiles.emptyDir') }}</div>
 
       <button
-        v-for="entry in entries"
+        v-for="entry in visibleEntries"
         :key="entry.path"
         type="button"
         class="remote-file-manager-row"
