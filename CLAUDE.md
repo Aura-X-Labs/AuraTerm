@@ -119,6 +119,7 @@ AuraTerm follows the standard Tauri architecture: a **Rust backend** that manage
 | `src/composables/` | Shared Vue composables |
 | `src/composables/useAppEventListeners.ts` | Tauri window/menu event listener registration |
 | `src/composables/useTerminalSearch.ts` | Xterm search addon integration |
+| `src/composables/useTerminalSearchBar.ts` | App-level find bar: query/toggles, per-tab results, find next/previous |
 | `src/composables/useTerminalSessionCommands.ts` | IPC wrappers for all session types |
 | `src/composables/useWorkspacePersistence.ts` | Debounced workspace state save |
 | `src/usePaneLayout.ts` | Binary-tree split-pane layout engine |
