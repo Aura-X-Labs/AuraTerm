@@ -64,6 +64,7 @@ impl TelnetState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn start_telnet_session(
     app: AppHandle,

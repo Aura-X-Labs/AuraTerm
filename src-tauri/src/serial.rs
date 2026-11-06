@@ -14,7 +14,7 @@ use crate::connection_test::{
     tcp_connect, ConnectionTestReport, ProbeFailure, TestCode, TCP_CONNECT_TIMEOUT,
 };
 use crate::serial_link::{
-    connect_network, local_port_builder, open_local, SerialLink, SerialSink, SinkSlot,
+    connect_network, local_port_builder, open_local, OpenedLink, SerialLink, SerialSink, SinkSlot,
 };
 use crate::serial_params::{PurgeTarget, SerialParams, SerialStatus, SerialTransport};
 
@@ -385,7 +385,7 @@ fn reconnect(
     target: &NetworkTarget,
     stop_flag: &AtomicBool,
     mut on_progress: impl FnMut(ReconnectProgress),
-) -> Option<(Box<dyn SerialLink>, Arc<dyn SerialSink>)> {
+) -> Option<OpenedLink> {
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;

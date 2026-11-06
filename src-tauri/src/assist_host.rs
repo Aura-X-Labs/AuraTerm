@@ -149,7 +149,7 @@ impl AssistHost {
                 control_requested: guest.control_requested,
             })
             .collect();
-        guests.sort_by(|a, b| a.joined_at.cmp(&b.joined_at));
+        guests.sort_by_key(|guest| guest.joined_at);
         AssistStatusView {
             assist_id: self.assist_id.clone(),
             code: assist::format_code(&self.route_code, &self.secret),
@@ -352,6 +352,7 @@ pub struct AssistStartView {
     pub join_expires_at: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn assist_start(
     app: AppHandle,
@@ -939,9 +940,8 @@ async fn handle_pake_a<R: tauri::Runtime>(client: &reqwest::Client, inner: &Arc<
     let outcome = {
         let Ok(mut guard) = inner.lock() else { return };
         let Some(assist) = guard.assist.as_mut() else { return };
-        if assist.locked || version != u64::from(PROTOCOL_VERSION) || !(now_secs() < system_time_seconds(Some(assist.join_expires_at)).unwrap_or(0) || !assist.guests.is_empty()) {
-            None
-        } else if !has_room_for(assist, connection_id) {
+        let join_closed = now_secs() >= system_time_seconds(Some(assist.join_expires_at)).unwrap_or(0) && assist.guests.is_empty();
+        if assist.locked || version != u64::from(PROTOCOL_VERSION) || join_closed || !has_room_for(assist, connection_id) {
             None
         } else {
             let host = assist::host_pake(&assist.w, assist_id, connection_id).ok();
@@ -1185,12 +1185,10 @@ async fn handle_guest_envelope<R: tauri::Runtime>(
                 let protocol = assist.protocol;
                 let Some(guest) = assist.guests.get_mut(connection_id) else { return };
                 let live = match guest.state {
-                    GuestState::Controller { expires_at } => expires_at.map_or(true, |t| t > SystemTime::now()),
+                    GuestState::Controller { expires_at } => expires_at.is_none_or(|t| t > SystemTime::now()),
                     _ => false,
                 };
-                if !live {
-                    None
-                } else if inner_frame.get("fence").and_then(|v| v.as_u64()) != Some(fence) {
+                if !live || inner_frame.get("fence").and_then(|v| v.as_u64()) != Some(fence) {
                     None
                 } else {
                     let data = inner_frame
@@ -1290,19 +1288,16 @@ async fn expire_stalled_handshakes<R: tauri::Runtime>(client: &reqwest::Client, 
 /// output pump but keyed on the assist session (which may switch tabs).
 fn spawn_output_pump(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, assist_id: String) {
     tauri::async_runtime::spawn(async move {
-        loop {
-            let Some((ring, notify, targets, size)) = inner.lock().ok().and_then(|guard| {
-                guard.assist.as_ref().filter(|a| a.assist_id == assist_id).map(|a| {
-                    (
-                        Arc::clone(&a.ring),
-                        Arc::clone(&a.output_notify),
-                        a.active_ciphers(),
-                        guard.terminal_size(&a.local_session_id),
-                    )
-                })
-            }) else {
-                break;
-            };
+        while let Some((ring, notify, targets, size)) = inner.lock().ok().and_then(|guard| {
+            guard.assist.as_ref().filter(|a| a.assist_id == assist_id).map(|a| {
+                (
+                    Arc::clone(&a.ring),
+                    Arc::clone(&a.output_notify),
+                    a.active_ciphers(),
+                    guard.terminal_size(&a.local_session_id),
+                )
+            })
+        }) {
             let next = ring
                 .lock()
                 .ok()

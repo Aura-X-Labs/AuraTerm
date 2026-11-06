@@ -550,7 +550,7 @@ pub(crate) fn ed25519_verify(public_key: &[u8], message: &[u8], signature: &[u8]
 }
 
 pub(crate) fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.is_empty() || value.len() % 2 != 0 || value.len() > MAX_TX_BYTES * 2 {
+    if value.is_empty() || !value.len().is_multiple_of(2) || value.len() > MAX_TX_BYTES * 2 {
         return Err("invalid TX byte length".into());
     }
     (0..value.len())
@@ -737,7 +737,7 @@ pub(crate) async fn connect(app: &AppHandle, state: &CloudBridgeState) -> Result
 /// online in the background. Missing/undecryptable config is not an error:
 /// the bridge simply stays unenrolled.
 pub(crate) fn restore(app: &AppHandle, state: &CloudBridgeState) -> Result<bool, String> {
-    let Some(device) = load_device_config(&app).unwrap_or(None) else {
+    let Some(device) = load_device_config(app).unwrap_or(None) else {
         return Ok(false);
     };
     {
@@ -984,8 +984,7 @@ async fn connect_websocket(
         .send(Message::Text(
             json!({"kind": "AUTH", "relay_grant": grant.relay_grant,
                    "boot_id": device.boot_id})
-            .to_string()
-            .into(),
+            .to_string(),
         ))
         .await
         .map_err(|e| format!("relay AUTH send failed: {e}"))?;
@@ -1423,6 +1422,7 @@ fn spawn_control_pump(
 
 /// Websocket transport: one writer task (channel -> sink, plus heartbeats)
 /// and one reader task feeding `process_inbound_frame`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_ws_pumps(
     client: reqwest::Client,
     inner: Arc<Mutex<BridgeInner>>,
@@ -1446,13 +1446,13 @@ fn spawn_ws_pumps(
                 envelope = outbound_rx.recv() => {
                     let Some(envelope) = envelope else { break };
                     let Ok(text) = serde_json::to_string(&envelope) else { continue };
-                    if sink.send(Message::Text(text.into())).await.is_err() {
+                    if sink.send(Message::Text(text)).await.is_err() {
                         break;
                     }
                 }
                 _ = heartbeat.tick() => {
                     let ping = serde_json::json!({"kind": "HEARTBEAT"}).to_string();
-                    if sink.send(Message::Text(ping.into())).await.is_err() {
+                    if sink.send(Message::Text(ping)).await.is_err() {
                         break;
                     }
                 }
@@ -1480,6 +1480,7 @@ fn spawn_ws_pumps(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn cloud_bridge_share_session(
     app: AppHandle,
@@ -1658,20 +1659,16 @@ pub(crate) async fn send_e2ee_frame(
 
 fn spawn_output_pump(client: reqwest::Client, inner: Arc<Mutex<BridgeInner>>, local_session_id: String) {
     tauri::async_runtime::spawn(async move {
-        loop {
-            let (cloud_id, ring, notify, peers) = match inner.lock().ok().and_then(|guard| {
-                guard.shares.get(&local_session_id).map(|share| {
-                    (
-                        share.cloud_session_id.clone(),
-                        Arc::clone(&share.ring),
-                        Arc::clone(&share.output_notify),
-                        share.peers.clone(),
-                    )
-                })
-            }) {
-                Some(values) => values,
-                None => break,
-            };
+        while let Some((cloud_id, ring, notify, peers)) = inner.lock().ok().and_then(|guard| {
+            guard.shares.get(&local_session_id).map(|share| {
+                (
+                    share.cloud_session_id.clone(),
+                    Arc::clone(&share.ring),
+                    Arc::clone(&share.output_notify),
+                    share.peers.clone(),
+                )
+            })
+        }) {
             let next = ring
                 .lock()
                 .ok()

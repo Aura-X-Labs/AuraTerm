@@ -139,8 +139,7 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
         .send(Message::Text(
             json!({"kind": "PAKE_A", "protocol_version": PROTOCOL_VERSION,
                    "pa": URL_SAFE_NO_PAD.encode(share)})
-            .to_string()
-            .into(),
+            .to_string(),
         ))
         .await
         .map_err(|_| "relay send failed".to_string())?;
@@ -169,8 +168,7 @@ pub(crate) async fn join_session<R: tauri::Runtime>(
     outbound
         .send(Message::Text(
             json!({"kind": "PAKE_CONFIRM", "confirm_a": URL_SAFE_NO_PAD.encode(keys.own_confirmation())})
-                .to_string()
-                .into(),
+                .to_string(),
         ))
         .await
         .map_err(|_| "relay send failed".to_string())?;
@@ -307,7 +305,7 @@ mod tests {
                     "AUTH" => {
                         assert_eq!(frame["ticket"], "tick-1");
                         let _ = sink
-                            .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": connection_id, "role": "assist_guest"}).to_string().into()))
+                            .send(Message::Text(json!({"kind": "AUTH_OK", "connection_id": connection_id, "role": "assist_guest"}).to_string()))
                             .await;
                     }
                     "PAKE_A" => {
@@ -318,7 +316,7 @@ mod tests {
                         let confirm = URL_SAFE_NO_PAD.encode(keys.own_confirmation());
                         let _ = sink
                             .send(Message::Text(
-                                json!({"kind": "PAKE_B", "connection_id": connection_id, "pb": URL_SAFE_NO_PAD.encode(share), "confirm_b": confirm}).to_string().into(),
+                                json!({"kind": "PAKE_B", "connection_id": connection_id, "pb": URL_SAFE_NO_PAD.encode(share), "confirm_b": confirm}).to_string(),
                             ))
                             .await;
                         host_keys = Some(keys);
@@ -333,11 +331,11 @@ mod tests {
                             "cols": 100, "rows": 30, "host_label": "Fake Host", "fingerprint": assist::fingerprint(&keys),
                             "control_policy": "on_request", "fence": fence});
                         let envelope = peer.encrypt(&assist_id, &connection_id, DIRECTION_HOST, &state).unwrap();
-                        let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+                        let _ = sink.send(Message::Text(envelope.to_string())).await;
                         let snapshot = json!({"kind": "TERMINAL_SNAPSHOT", "snapshot_seq": 1, "cols": 100, "rows": 30,
                             "data_hex": encode_hex(b"host$ ")});
                         let envelope = peer.encrypt(&assist_id, &connection_id, DIRECTION_HOST, &snapshot).unwrap();
-                        let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+                        let _ = sink.send(Message::Text(envelope.to_string())).await;
                         observed.lock().unwrap().keys = Some(keys);
                         cipher = Some(peer);
                     }
@@ -350,16 +348,16 @@ mod tests {
                                 fence += 1;
                                 let grant = json!({"kind": "CONTROL_GRANT", "fence": fence, "expires_at": 0});
                                 let envelope = peer.encrypt(&assist_id, &connection_id, DIRECTION_HOST, &grant).unwrap();
-                                let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+                                let _ = sink.send(Message::Text(envelope.to_string())).await;
                             }
                             "INPUT" => {
                                 assert_eq!(inner["fence"].as_u64(), Some(fence));
                                 let ack = json!({"kind": "INPUT_ACK", "input_seq": inner["input_seq"], "fence": fence});
                                 let envelope = peer.encrypt(&assist_id, &connection_id, DIRECTION_HOST, &ack).unwrap();
-                                let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+                                let _ = sink.send(Message::Text(envelope.to_string())).await;
                                 let echo = json!({"kind": "OUTPUT", "output_seq": 2, "data_hex": inner["data_hex"]});
                                 let envelope = peer.encrypt(&assist_id, &connection_id, DIRECTION_HOST, &echo).unwrap();
-                                let _ = sink.send(Message::Text(envelope.to_string().into())).await;
+                                let _ = sink.send(Message::Text(envelope.to_string())).await;
                             }
                             _ => {}
                         }

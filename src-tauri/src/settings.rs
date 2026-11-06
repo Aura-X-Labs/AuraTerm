@@ -449,7 +449,7 @@ fn read_settings(path: &std::path::Path) -> Result<Settings, String> {
     if !path.exists() {
         return Ok(Settings::default());
     }
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     // Merge loaded settings with defaults to tolerate missing fields
     let loaded: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
     let default_value = serde_json::to_value(Settings::default()).map_err(|e| e.to_string())?;
@@ -508,7 +508,7 @@ fn write_settings_at(path: &std::path::Path, settings: &Settings) -> Result<(), 
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    crate::util::write_atomic(&path, &content)?;
+    crate::util::write_atomic(path, &content)?;
     Ok(())
 }
 

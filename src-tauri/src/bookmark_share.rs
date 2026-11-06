@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(secret.len(), SECRET_LEN);
         assert!(secret.bytes().all(|b| CODE_ALPHABET.contains(&b)));
         // The whole point of the 12/8 split: a share is attacked offline.
-        assert!(SECRET_LEN > crate::assist::SECRET_LEN);
+        const { assert!(SECRET_LEN > crate::assist::SECRET_LEN) };
     }
 
     /// `tauri::test::mock_app()` resolves to **one shared config directory**,
