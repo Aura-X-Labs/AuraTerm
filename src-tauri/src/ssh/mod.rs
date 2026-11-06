@@ -1063,17 +1063,26 @@ async fn verify_host_fingerprint(
 
     // First contact: trust on first use, unless another connection recorded
     // a different key for this host in the meantime.
-    known_hosts::update_known_hosts(&app, |store| match store.hosts.get(&scope) {
+    let newly_trusted = known_hosts::update_known_hosts(&app, |store| match store.hosts.get(&scope) {
         Some(recorded) if *recorded != observed => Err(format!(
             "SSH host key for {scope} was just recorded with a different fingerprint; reconnect to review it"
         )),
-        _ => {
-            store.hosts.insert(scope.clone(), observed);
-            Ok(())
+        Some(_) => Ok(false),
+        None => {
+            store.hosts.insert(scope.clone(), observed.clone());
+            Ok(true)
         }
     })
     .await
-    .map_err(ConnectError::terminal)
+    .map_err(ConnectError::terminal)?;
+    // The key is already trusted; a log that cannot be written must not undo
+    // that or fail the connection.
+    if newly_trusted {
+        if let Err(error) = known_hosts::append_host_key_first_trust_audit_log(&app, &host, port, &observed).await {
+            crate::warn_log!("[ssh] could not record the first-use trust of {scope}: {error}");
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
